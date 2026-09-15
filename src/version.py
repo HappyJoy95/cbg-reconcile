@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "CBG报量对账"
-VERSION = "1.4.9"          # 功能有增删就动这个；打包时间看 BUILD.txt
+VERSION = "1.4.10"          # 功能有增删就动这个；打包时间看 BUILD.txt
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_FILE = ROOT / "BUILD.txt"
