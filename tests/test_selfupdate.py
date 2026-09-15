@@ -256,13 +256,13 @@ class TestWhitelist(unittest.TestCase):
         映射表硬凑。那种"两套布局 + 对照表"的结构，加一个文件要想两处，迟早漏。
         """
         for rel in ("src/cli.py", "web/app.js", "bootstrap.py",
-                    "install.bat", "安装部署指南.md", "tests/test_x.py",
+                    "install.bat", "运维手册.md", "tests/test_x.py",
                     "run_check.py", ".gitattributes"):
             self._mk(rel)
         got = {str(rel) for _, rel in selfupdate._targets(self.zip_root)}
         self.assertEqual(got, {
             "src/cli.py", "web/app.js", "bootstrap.py",
-            "install.bat", "安装部署指南.md", "tests/test_x.py",
+            "install.bat", "运维手册.md", "tests/test_x.py",
             "run_check.py", ".gitattributes",
         }, "路径被改过了 —— 那就不再是'跟着仓库走'")
 
@@ -545,7 +545,7 @@ class TestFailureDiagnostics(unittest.TestCase):
         self.assertIn("命令行入口", msg, "它是干什么的也要说")
         self.assertIn("README.md", msg, "实际收到的东西要列出来")
         self.assertIn("手动升级", msg, "要给出退路 —— 网络问题是修不好的")
-        self.assertIn("安装部署指南", msg, "退路要指到具体文档")
+        self.assertIn("运维手册", msg, "退路要指到具体文档")
 
     def test_a_good_package_still_passes(self):
         """闸门不能把正常的包也拦下来。"""

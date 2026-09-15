@@ -686,7 +686,7 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH) -> dict:
                 + " —— 这不像我们的包。\n"
                 + _describe_package(zip_root)
                 + "\n    （网络代理 / 镜像站换掉了内容？或者下载被截断了）"
-                + "\n    手动升级：把正式包解压覆盖过去，见「安装部署指南 → 升级到新版本」")
+                + "\n    手动升级：把正式包解压覆盖过去，见「运维手册 → 升级到新版本」")
 
         remote = ""
         try:

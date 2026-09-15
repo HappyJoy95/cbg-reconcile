@@ -61,6 +61,8 @@ rsync -a \
   --exclude 'run-now.bat' \
   --exclude '.gitignore' \
   --exclude 'README.md' \
+  --exclude 'AGENTS.md' \
+  --exclude '运维手册.md' \
   "${ROOT}/" "${STAGE}/"
 # ⚠ `update-debug.py` 不排除：自更新是"照仓库原样铺"，包里有、更新后也该有 ——
 #   不然同一个版本号会有两种内容（zip 装的没有、自更新的有）。
@@ -201,7 +203,7 @@ body = f"""# CBG 报量对账 · 发布说明
    > 顺序不重要，**改完都立刻生效、不用重启**。只有一条：
    > **先把门店配对，再加定时任务** —— 不然到点那一跑会对到别的店账上去。
 
-完整步骤看 **`安装部署指南.md`**。
+完整步骤看 **`门店操作手册.md`**。
 
 ## 出问题先做这个
 
@@ -220,7 +222,7 @@ body = f"""# CBG 报量对账 · 发布说明
 | `selftest.bat` | 逐项自检（第 0 节打印版本和 Python 版本） |
 | `diagnose.bat` | 出问题时一键收集信息 |
 | `uninstall.bat` | 卸载（**默认不删**报告和凭据） |
-| `安装部署指南.md` | 门店操作手册（**有问题先翻这个**） |
+| `门店操作手册.md` | 门店操作手册（**五六步，有问题先翻这个**） |
 | `发布说明.md` | 就是本文件 |
 | `config\\` | 门店配置（**记得改成自己店**） |
 | `.secrets\\` | 凭据（云商账号等） |
@@ -278,7 +280,7 @@ EOF
 # 远程指挥门店时，他翻到 README 就会照着做错。
 #
 # 两份都在 git 仓库里，维护的人照样看得到；门店这边留指南 + 发布说明就够了。
-cp "${ROOT}/安装部署指南.md" "${STAGE}/安装部署指南.md"
+cp "${ROOT}/门店操作手册.md" "${STAGE}/门店操作手册.md"
 
 # ---------------------------------------------------------------- 自检
 echo "==> 打包前自检"
@@ -314,7 +316,7 @@ fi
 [ -f "${STAGE}/uninstall.bat" ]   || { echo "    ✗ 缺 uninstall.bat"; fail=1; }
 [ -f "${STAGE}/diagnose.bat" ]    || { echo "    ✗ 缺 diagnose.bat"; fail=1; }
 [ -f "${STAGE}/run_check.py" ]    || { echo "    ✗ 缺 run_check.py（计划任务靠它记日志）"; fail=1; }
-[ -f "${STAGE}/安装部署指南.md" ]  || { echo "    ✗ 缺 安装部署指南.md"; fail=1; }
+[ -f "${STAGE}/门店操作手册.md" ] || { echo "    ✗ 缺 门店操作手册.md"; fail=1; }
 [ -f "${STAGE}/发布说明.md" ]      || { echo "    ✗ 缺 发布说明.md"; fail=1; }
 # 本机生成的 run 脚本绝不能进包 —— 里面写着**开发机**的 Python 绝对路径，
 # 门店电脑上跑不了。（上次就漏了 run-now.sh 进去。）
@@ -328,9 +330,9 @@ fi
 # ⚠ 这两份**不该**进包：README 是给开发者的（而且里面那节"部署到门店"讲的是
 #   手工流程，跟 install.bat 那套不一样，门店照着做会错），设计文档是技术架构。
 #   加这条是防止以后谁顺手又拷回去 —— 门店那边"文档越多越乱"。
-for _doc in README.md 设计文档.md; do
+for _doc in README.md 设计文档.md 运维手册.md; do
   if [ -e "${STAGE}/${_doc}" ]; then
-    echo "    ✗ 包里混进了给开发者看的文档：${_doc}（门店只看 安装部署指南.md）"
+    echo "    ✗ 包里混进了不给门店看的文档：${_doc}（门店只看 门店操作手册.md）"
     fail=1
   fi
 done
