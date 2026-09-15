@@ -1,0 +1,7 @@
+# ⚠ Windows 批处理**必须**是 CRLF。
+# 不加这条的话，在 macOS/Linux 上 clone 出来的 bat 会是 LF ——
+# cmd 对 LF 的容忍度很怪（有些跳转标签会失效），门店上就会莫名其妙。
+*.bat text eol=crlf
+
+# 其余一律保持原样，别让 git 自作主张改行尾
+* -text

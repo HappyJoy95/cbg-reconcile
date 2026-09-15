@@ -1,0 +1,72 @@
+# 体验店名单 + 串号标识映射（唯一真源）
+#
+# 验证方式：2026-09-15 用「库存串号」视角交叉验证 ——
+#   拉全库在库/在途合计 26,015 行，按 `串号标识` 分组看 `分仓` 落在哪，
+#   14 个码各自都指向唯一一个仓，与门店名精确对应。见设计文档 §三。
+#
+# huawei_code 是华为门店编码（SCN…）。空的表示未知 —— 不影响运行：
+#   不传 storeCode 时，华为接口默认按会话自身所属门店查询。
+stores:
+  - marker: D
+    erp_name: 青岛城阳万达店
+    huawei_code: ""
+  - marker: W
+    erp_name: 青岛城阳万象汇店
+    huawei_code: ""
+  - marker: H
+    erp_name: 胶南合美MALL店
+    huawei_code: ""
+  - marker: S          # ⚠ 数据里是小写 s，比对必须忽略大小写
+    erp_name: 青岛顺和汇店
+    huawei_code: ""
+  - marker: Y
+    erp_name: 青岛新业广场店
+    huawei_code: SCN231409
+  - marker: T
+    erp_name: 青岛悦荟店
+    huawei_code: ""
+  - marker: LH
+    erp_name: 青岛胶州龙湖店
+    huawei_code: ""
+  - marker: SCM
+    erp_name: 黄岛传媒广场店
+    huawei_code: ""
+  - marker: M
+    erp_name: 青岛丽达茂店
+    huawei_code: ""
+  - marker: GT
+    erp_name: 深蓝中心店
+    huawei_code: ""
+  - marker: Z
+    erp_name: 上街里容滙城店
+    huawei_code: ""
+  - marker: C
+    erp_name: 青岛CBD万达店
+    huawei_code: ""
+  - marker: JM
+    erp_name: 市南金茂湾店
+    huawei_code: ""
+  - marker: K
+    erp_name: 城阳首创奥莱店
+    huawei_code: ""
+
+# ⚠ 以下标识**不是门店码**，是机况/来源标记，不得当作门店处理
+# （2026-09-15 实测在库台数）：
+#   J 4,727 台 · A 126 台（落海信广场）· jc 90 台 ·
+#   销售助手 23 · 售后换回 12 · 外地 3 · 自用 2 · 旧 1
+non_store_markers:
+  - J
+  - A
+  - jc
+  - 销售助手
+  - 售后换回
+  - 外地
+  - 自用
+  - 旧
+
+# 云商单据类型（实测分布，2026-09-14 全天 446 行）
+doc_types:
+  # include 是白名单：名单外的类型**不静默丢弃**，会进「过滤统计」并计入
+  # 「未识别单据类型:xxx」，让人看得见（实测出现过 客情单 / 空值）
+  include: [零售, 分销, 客情单]
+  exclude: [零售退, 分销退, 核销]   # 退货不是"卖货"；核销单金额为 0

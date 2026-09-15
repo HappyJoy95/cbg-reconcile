@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>云商 ↔ 华为报量对账</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232563eb'/%3E%3Ctext x='50' y='72' font-size='62' text-anchor='middle' fill='white'%3E%E2%87%84%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <span class="logo">⇄</span>
+    <div>
+      <h1>云商 ↔ 华为报量对账</h1>
+      <div class="sub" id="store-line">加载中…</div>
+      <div class="sub" id="build-line" style="opacity:.55;font-size:11.5px"></div>
+    </div>
+  </div>
+  <div class="top-right">
+    <span class="pill" id="pill-session" title="华为会话状态">会话</span>
+    <span class="pill" id="pill-schedule" title="定时执行状态">定时</span>
+    <span class="pill" id="pill-update" title="有新版本" hidden></span>
+    <button class="btn primary" id="btn-quick-run">立即运行</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="reports">报告</button>
+  <button class="tab" data-tab="run">运行</button>
+  <button class="tab" data-tab="session">会话</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
+<main>
+
+<!-- ───────────────────────────── 报告 ───────────────────────────── -->
+<section class="panel active" id="panel-reports">
+  <div class="cards" id="report-cards"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>历史报告 <span class="hint" id="report-count"></span></h2>
+      <button class="btn ghost small" id="btn-refresh-reports">刷新</button>
+    </div>
+    <div id="report-list"></div>
+  </div>
+
+  <div class="card" id="report-detail-card" hidden>
+    <div class="card-head">
+      <h2 id="report-detail-title">报告明细</h2>
+      <div>
+        <a class="btn ghost small" id="btn-download" href="#" download>下载 xlsx</a>
+        <button class="btn ghost small" id="btn-close-detail">关闭</button>
+      </div>
+    </div>
+    <div class="subtabs" id="sheet-tabs"></div>
+    <div id="sheet-body"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 运行 ───────────────────────────── -->
+<section class="panel" id="panel-run">
+  <div class="card">
+    <div class="card-head"><h2>跑一次对账</h2></div>
+    <div class="form-row">
+      <label>目标日</label>
+      <select id="run-mode">
+        <option value="days_ago" selected>昨天（推荐 —— 那天的销售已结束）</option>
+        <option value="today">今天（当晚就能发现漏报，但跑完到打烊之间不算）</option>
+        <option value="date">指定日期…</option>
+      </select>
+      <input type="date" id="run-date" hidden>
+    </div>
+    <details class="adv">
+      <summary>高级（时间窗容差）</summary>
+      <div class="form-row">
+        <label>销售窗口往前看</label><input type="number" id="run-lookback" min="0" max="30" placeholder="用配置">
+        <label>华为窗口往后看</label><input type="number" id="run-lookahead" min="0" max="7" placeholder="用配置">
+      </div>
+      <p class="hint">「华为窗口往后看」大于 0 时，会把目标日之后补报的也算进来
+        （容忍 23:50 卖的货次日才报量）。默认 0，只看当天。</p>
+    </details>
+    <div class="form-row">
+      <button class="btn primary" id="btn-run">开始运行</button>
+      <button class="btn ghost" id="btn-stop" disabled>停止</button>
+      <span class="hint" id="run-status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>运行日志</h2></div>
+    <pre class="log" id="run-log">（还没有运行记录）</pre>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 会话 ───────────────────────────── -->
+<section class="panel" id="panel-session">
+  <div class="card">
+    <div class="card-head">
+      <h2>自动抓取 <span class="hint">（推荐，不用手抄）</span></h2>
+      <button class="btn ghost small" id="btn-ping">会话自检</button>
+    </div>
+    <p class="hint" id="browser-line">正在检测浏览器…</p>
+
+    <div class="form-row"><label>华为账号</label>
+      <input id="hw-username" placeholder="账号名 / 邮箱 / 手机号 / W3账号" autocomplete="off">
+      <span class="hint" id="hw-status"></span></div>
+    <div class="form-row"><label>密码</label>
+      <input type="password" id="hw-password" placeholder="华为账号密码" autocomplete="new-password">
+      <span class="hint">只存本机 <code>.secrets/huawei.env</code>，界面不回显</span></div>
+    <div class="form-row">
+      <button class="btn small" id="btn-hw-save">保存账号</button>
+      <span class="hint">配了账号密码，抓取时会<b>自动填表登录</b>，不用手点</span>
+    </div>
+    <div class="hint" id="hw-warn" style="margin:-4px 0 10px 0"></div>
+
+    <div class="form-row">
+      <button class="btn primary" id="btn-auto-login">打开浏览器抓取</button>
+      <button class="btn" id="btn-auto-refresh">静默续期</button>
+    </div>
+    <p class="hint">
+      用<b>自己的浏览器 profile</b>（不碰你日常用的那个）打开
+      <span class="mono">#/group/smart-store/homepage</span>，未登录会自动跳到华为 SSO。
+      配了账号密码就自动登录；<b>没配、或遇到图形验证码</b>时窗口会留着让你手动登。
+      之后会话失效会<b>自动无头续期</b>，日常完全不用管。
+    </p>
+    <pre class="log" id="auto-log" hidden></pre>
+    <div id="auto-result"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>当前会话</h2></div>
+    <div id="session-box"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>退路：手抄 curl</h2></div>
+    <p class="hint">自动抓取用不了时（比如浏览器装在不常见的位置）才需要这个。</p>
+    <ol class="steps">
+      <li>浏览器打开 <code>https://cbg.huawei.com/</code>，进新零售/报量页面</li>
+      <li>按 <kbd>F12</kbd> → <b>Network</b> → 刷新页面</li>
+      <li>找任意一条发往 <code>cbg.huawei.com</code>、返回 JSON 的请求</li>
+      <li>右键 → <b>Copy</b> → <b>Copy as cURL (cmd)</b></li>
+      <li>粘到下面，点「导入」</li>
+    </ol>
+    <textarea id="curl-input" rows="5"
+      placeholder="curl --url ^&quot;https://cbg.huawei.com/isrp/...^&quot; ^&#10;  -b ^&quot;JSESSIONID=...; hwssot3=...^&quot; ^&#10;  -H ^&quot;x-csrf-token: ...^&quot;"></textarea>
+    <div class="form-row">
+      <button class="btn" id="btn-import">导入并自检</button>
+      <button class="btn ghost" id="btn-clear-curl">清空</button>
+      <span class="hint">只要 cookie 和 x-csrf-token，两者必须来自同一份 curl。</span>
+    </div>
+    <div id="import-result"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 设置 ───────────────────────────── -->
+<section class="panel" id="panel-settings">
+  <div class="card">
+    <div class="card-head"><h2>门店</h2></div>
+    <p class="hint">部署到门店电脑，改这三行就够了。</p>
+    <div class="form-row"><label>华为门店编码</label>
+      <input id="cfg-store_code" placeholder="SCN231409（留空则按会话自身门店查）"></div>
+    <div class="form-row"><label>串号标识（本店码）</label>
+      <input id="cfg-marker" placeholder="Y">
+      <span class="hint">对照 <code>config/stores.yaml</code>；顺和汇在数据里是小写 <code>s</code></span></div>
+    <div class="form-row"><label>云商门店名</label>
+      <input id="cfg-erp_store_name" placeholder="青岛新业广场店"></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-save-store">保存门店配置</button>
+      <span class="hint" id="store-msg"></span>
+    </div>
+    <p class="hint">⚠ <b>改了华为门店编码要重新登录一次华为</b> —— 会话是按店存的
+      （<code>.secrets/cbg-&lt;门店码&gt;.json</code>），换店等于换一份会话，
+      到「会话」页用<b>那个店的账号</b>重新抓一次。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>云商账号</h2>
+      <span class="hint" id="erp-status"></span>
+    </div>
+    <div class="form-row"><label>账号</label>
+      <input id="erp-username" placeholder="云商登录账号" autocomplete="off"></div>
+    <div class="form-row"><label>密码</label>
+      <input type="password" id="erp-password" placeholder="云商登录密码" autocomplete="new-password">
+      <span class="hint">只存本机 <code>.secrets/erp.env</code>，界面不回显</span></div>
+    <div class="form-row"><label>公司代码</label>
+      <input id="erp-company" placeholder="00001937"></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-erp-save">保存</button>
+      <button class="btn" id="btn-erp-login">测试登录</button>
+      <span class="hint" id="erp-msg"></span>
+    </div>
+    <div id="erp-captcha" hidden>
+      <div class="banner warn" style="margin-bottom:8px">
+        云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
+      </div>
+      <div class="form-row">
+        <img id="erp-captcha-img" alt="验证码"
+             style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
+        <input id="erp-captcha-code" style="min-width:130px" placeholder="填图上的字"
+               autocomplete="off" maxlength="10">
+        <button class="btn primary" id="btn-erp-captcha">提交验证码</button>
+        <span class="hint" id="erp-captcha-msg"></span>
+      </div>
+      <p class="hint" style="margin-top:-4px">看不清就再点一次「测试登录」换一张。</p>
+    </div>
+    <div class="hint" id="erp-warn"></div>
+    <p class="hint">「测试登录」用上面填的值去换一次真 token，<b>失败不会保存</b>。
+      ⚠️ <b>别连着点</b> —— 云商连着登几次会要求图形验证码，歇几分钟再试。</p>
+    <details class="adv">
+      <summary>账号要图形验证码？手动填 token（退路）</summary>
+      <div class="form-row"><label>token</label>
+        <input id="erp-token" placeholder="浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串"
+               autocomplete="off"></div>
+      <div class="form-row">
+        <button class="btn small" id="btn-erp-token-save">只存 token</button>
+        <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>邮件推送</h2>
+      <span class="hint" id="mail-status"></span>
+    </div>
+    <div class="form-row">
+      <label style="min-width:0"><input type="checkbox" id="mail-enabled"> 每次跑完把差异清单发到邮箱</label>
+      <select id="mail-preset" style="min-width:200px">
+        <option value="">—— 常见邮箱快速填充 ——</option>
+      </select>
+    </div>
+    <div class="form-row"><label>SMTP 服务器</label>
+      <input id="mail-host" placeholder="smtp.qq.com" autocomplete="off">
+      <label style="min-width:auto">端口</label>
+      <input type="number" id="mail-port" style="min-width:90px" placeholder="465">
+      <select id="mail-security" style="min-width:130px">
+        <option value="ssl">SSL</option>
+        <option value="starttls">STARTTLS</option>
+        <option value="none">不加密</option>
+      </select>
+    </div>
+    <div class="form-row"><label>账号</label>
+      <input id="mail-username" placeholder="发件邮箱地址" autocomplete="off">
+      <span class="hint" id="mail-hint"></span></div>
+    <div class="form-row"><label>密码 / 授权码</label>
+      <input type="password" id="mail-password" placeholder="多数邮箱要填「授权码」" autocomplete="new-password">
+      <span class="hint">只存本机 <code>.secrets/mail.env</code>，界面不回显</span></div>
+    <div class="form-row"><label>收件人</label>
+      <input id="mail-recipients" placeholder="多个用逗号分隔，例如 a@x.com, b@y.com"></div>
+    <div class="form-row"><label>发件人</label>
+      <input id="mail-sender" placeholder="留空 = 用账号" autocomplete="off">
+      <label style="min-width:auto">主题前缀</label>
+      <input id="mail-subject_prefix" style="min-width:130px" placeholder="[报量对账]"></div>
+    <div class="form-row"><label>发送时机</label>
+      <select id="mail-when" style="min-width:170px">
+        <option value="always">每次都发</option>
+        <option value="only_diff">只有差异才发</option>
+      </select></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-mail-save">保存</button>
+      <button class="btn" id="btn-mail-test">发送测试邮件</button>
+      <span class="hint" id="mail-msg"></span>
+    </div>
+    <div class="hint" id="mail-warn"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>企微群推送</h2>
+      <span class="hint" id="wecom-status"></span>
+    </div>
+    <div class="form-row">
+      <label style="min-width:0"><input type="checkbox" id="wecom-enabled">
+        每次跑完推送到企业微信群</label>
+    </div>
+    <div class="form-row"><label>webhook 地址</label>
+      <input id="wecom-webhook" style="min-width:420px" autocomplete="off"
+             placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"></div>
+    <div class="hint" style="margin:-4px 0 10px 0">
+      群里 → 右上角设置 → 群机器人 → 添加机器人 → 复制 webhook 地址。
+      <b>只存本机 <code>.secrets/wecom.env</code></b>，界面只回显打码后的 key。
+    </div>
+    <div class="form-row">
+      <label style="min-width:0"><input type="checkbox" id="wecom-mention_all">
+        有差异时 @所有人</label>
+      <label style="min-width:0"><input type="checkbox" id="wecom-send_file">
+        同时把差异清单 xlsx 传到群里</label>
+    </div>
+    <div class="form-row"><label>发送时机</label>
+      <select id="wecom-when" style="min-width:170px">
+        <option value="always">每次都推</option>
+        <option value="only_diff">只有差异才推</option>
+      </select></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-wecom-save">保存</button>
+      <button class="btn" id="btn-wecom-test">推送测试消息</button>
+      <span class="hint" id="wecom-msg"></span>
+    </div>
+    <div class="hint" id="wecom-warn"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>后台服务</h2>
+      <span class="hint" id="svc-status"></span>
+    </div>
+    <div class="form-row">
+      <label style="min-width:0"><input type="checkbox" id="svc-autostart">
+        <b>开机自动启动</b>（<b>以管理员身份</b>运行，登录 Windows 后自动在后台跑起来，不弹 UAC）</label>
+    </div>
+    <div class="form-row" id="svc-mode-row">
+      <label style="min-width:0">启动方式</label>
+      <select id="svc-mode">
+        <option value="elevated">以管理员身份（计划任务，不弹 UAC）</option>
+        <option value="normal">普通权限（注册表启动项）</option>
+      </select>
+      <span class="hint">浏览器抓会话出问题时，换成普通权限试试</span>
+    </div>
+    <div class="hint" id="svc-detail" style="margin:-4px 0 10px 0"></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-svc-save">保存</button>
+      <span class="hint" id="svc-msg"></span>
+    </div>
+    <p class="hint">
+      <code>start.bat</code> 会把服务放后台跑，前台窗口报完「启动成功」按任意键就关掉，<b>不影响后台</b>。
+      停止服务：双击 <code>stop.bat</code>（或 <code>python -m src.cli stop</code>）。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>对账参数</h2></div>
+    <div class="form-row"><label>销售窗口往前看（天）</label>
+      <input type="number" id="cfg-lookback_days" min="0" max="30">
+      <span class="hint">默认 0：只查目标日</span></div>
+    <div class="form-row"><label>华为窗口往后看（天）</label>
+      <input type="number" id="cfg-report_lookahead_days" min="0" max="7">
+      <span class="hint">默认 0：只看目标日当天。调 1 可容忍跨零点报量</span></div>
+    <div class="form-row"><label>分页大小</label><input type="number" id="cfg-page_size" min="10" max="5000"></div>
+    <div class="form-row"><label>华为订单付款状态</label><input type="number" id="cfg-pay_status">
+      <span class="hint">2 = 已付款（实测 0/1/3 都是 0 单）</span></div>
+    <div class="form-row"><label>华为退货状态</label><input type="number" id="cfg-return_status">
+      <span class="hint">0 = 排除退货</span></div>
+    <div class="form-row"><button class="btn primary" id="btn-save-config">保存配置</button>
+      <span class="hint" id="config-msg"></span></div>
+    <p class="hint">保存是<b>逐行定点替换</b>，配置文件里的注释不会被冲掉。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>检查更新</h2>
+      <span class="hint" id="update-status"></span>
+    </div>
+    <div id="update-box"></div>
+    <div class="form-row">
+      <button class="btn" id="btn-update-check">检查更新</button>
+      <button class="btn primary" id="btn-update-apply" hidden>立即更新</button>
+      <span class="hint" id="update-msg"></span>
+    </div>
+    <p class="hint">
+      从 GitHub 拉最新代码（<code>HappyJoy95/cbg-reconcile</code>）。<br>
+      <b>只覆盖代码</b> —— <code>config\</code>（门店配置）、<code>.secrets\</code>（账号/会话）、
+      <code>out\</code>（历史报告）<b>一根手指都不碰</b>。更新完服务会自动重启。
+    </p>
+
+    <details id="history-wrap" style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:13px">历史版本 / 回退</summary>
+      <p class="hint" style="margin:8px 0">
+        升级出问题时可以退回以前的版本。<b>回退同样只覆盖代码</b>，
+        门店配置、账号会话、历史报告都不会动。回退完服务会自动重启。
+      </p>
+      <div class="form-row">
+        <button class="btn" id="btn-history-load">读取历史版本</button>
+        <span class="hint" id="history-msg"></span>
+      </div>
+      <div id="history-list"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>定时执行</h2></div>
+    <div id="schedule-box"></div>
+    <div class="form-row">
+      <label>每天</label><input type="time" id="sched-time" value="21:00">
+      <label>跑</label>
+      <select id="sched-days-ago">
+        <option value="1" selected>昨天</option>
+        <option value="0">今天</option>
+      </select>
+      <label>任务名</label>
+      <input type="text" id="sched-name" placeholder="留空 = CBG报量对账-21点00" size="30">
+      <button class="btn primary" id="btn-sched-install">添加定时任务</button>
+    </div>
+    <p class="hint">建议设在店里<b>肯定开着机</b>的时候（比如关门前）——
+      Windows 计划任务错过时间<b>不会补跑</b>。<br>
+      选「昨天」零遗漏；选「今天」当晚就能发现漏报，但跑完到打烊之间的销售不在这份报告里。<br>
+      每行右边的「执行」会<b>立刻按这条任务跑一次</b>（跟到点自动跑走的是同一条路，
+      所以顺手能验证任务配得对不对）；「删除」只删那一行。<br>
+      开机自启那个任务不在这张表里，在「后台服务」卡片管。</p>
+    <div id="sched-result"></div>
+  </div>
+</section>
+
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

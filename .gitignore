@@ -1,0 +1,31 @@
+# 会话与凭据：绝不入库
+.secrets/
+*.env
+config/store-*.local.yaml
+
+# 运行产物
+out/
+!out/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# 打包产物
+dist/
+
+# 构建指纹：打包时由 tools/build_package.sh 写，clone 部署时由
+# bootstrap.py install 从 .git 补一个 —— 两种都是本机生成，不入库
+BUILD.txt
+
+# 安装时按本机生成的运行脚本（里面是**这台电脑**的 Python 绝对路径）
+# run_check.py 不一样 —— 那是源码，要提交
+run.sh
+run.bat
+run-now.sh
+run-now.bat
+
+# macOS
+.DS_Store
