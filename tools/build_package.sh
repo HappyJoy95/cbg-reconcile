@@ -14,13 +14,29 @@
 
 set -euo pipefail
 
+# 用法：
+#   bash tools/build_package.sh            # 正式包（发给门店）
+#   bash tools/build_package.sh beta       # 测试包 —— 包名和 BUILD.txt 都带 beta 标记
+#   CBG_BETA=1 bash tools/build_package.sh # 同上（环境变量也行）
+#
+# beta 包的用处：改了东西想先在门店/本机试，但**还不想发版**。
+# 它不改 src/version.py，所以线上版本号不动 —— 只是文件名和指纹上多一个标记，
+# 好跟你手上的正式包区分开（不然两个 zip 长得一样，很容易发错）。
+BETA="${1:-${CBG_BETA:-}}"
+case "${BETA}" in
+  1|true|yes|beta|BETA) BETA=1 ;;
+  "") BETA="" ;;
+  *) echo "参数只认 beta（或留空）。收到的是：${BETA}"; exit 1 ;;
+esac
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$(date +%Y%m%d)"
 NAME="cbg-reconcile"                              # 包内顶层目录用 ASCII —— 少一层乱码风险
 # 版本号从代码里读，别手写 —— 手写迟早跟 version.py 对不上
 VER="$(sed -n 's/^VERSION *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/version.py")"
 [ -n "${VER}" ] || { echo "读不出版本号（src/version.py）"; exit 1; }
-ZIPNAME="cbg-reconcile-v${VER}-${STAMP}.zip"
+SUFFIX=""; [ -n "${BETA}" ] && SUFFIX="-beta"
+ZIPNAME="cbg-reconcile-v${VER}${SUFFIX}-${STAMP}.zip"
 DIST="${ROOT}/dist"
 STAGE_ROOT="$(mktemp -d)"
 STAGE="${STAGE_ROOT}/${NAME}"
@@ -44,7 +60,11 @@ rsync -a \
   --exclude 'run-now.sh' \
   --exclude 'run-now.bat' \
   --exclude '.gitignore' \
+  --exclude 'README.md' \
   "${ROOT}/" "${STAGE}/"
+# ⚠ `update-debug.py` 不排除：自更新是"照仓库原样铺"，包里有、更新后也该有 ——
+#   不然同一个版本号会有两种内容（zip 装的没有、自更新的有）。
+#   它是更新失败时的现场诊断脚本，留着有用。
 
 # ---------------------------------------------------------------- 凭据
 # ⚠ **包里一个真凭据都不带**。
@@ -115,17 +135,25 @@ done
 # ------------------------------------------------------------ 构建指纹
 # 门店电脑上跑的往往是拷过去的旧版本 —— 没有这个，没人知道对面是哪一版，
 # "我明明修好了 / 你那边怎么还这样" 一来回就是一轮。
+#
+# beta 包把标记也写进指纹：这样控制台标题下面那行会显示「v1.4.10 · beta · …」——
+# 门店（或你自己）一眼就知道手上这个是测试包，不是正式版。
 BUILD_STAMP="$(date '+%Y-%m-%d %H:%M')"
-printf '%s\n' "${BUILD_STAMP}" > "${STAGE}/BUILD.txt"
-echo "==> 构建指纹：${BUILD_STAMP}"
+if [ -n "${BETA}" ]; then
+  printf 'beta · %s\n' "${BUILD_STAMP}" > "${STAGE}/BUILD.txt"
+  echo "==> 构建指纹：beta · ${BUILD_STAMP}（测试包）"
+else
+  printf '%s\n' "${BUILD_STAMP}" > "${STAGE}/BUILD.txt"
+  echo "==> 构建指纹：${BUILD_STAMP}"
+fi
 
 # ---------------------------------------------------------------- 发布说明
 # ⚠ 用 Python 写而不是 heredoc：正文里有大量反引号（`install.bat` 这种），
 #   不带引号的 heredoc 会把它们当**命令替换**执行掉（真踩了）。
-python3 - "${STAGE}" "${VER}" "${BUILD_STAMP}" <<'RELNOTES'
+python3 - "${STAGE}" "${VER}" "${BUILD_STAMP}" "${BETA:-}" <<'RELNOTES'
 import pathlib, sys
 
-stage, ver, stamp = sys.argv[1], sys.argv[2], sys.argv[3]
+stage, ver, stamp, beta = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 body = f"""# CBG 报量对账 · 发布说明
 
 **版本** v{ver}　**构建** {stamp}
@@ -192,9 +220,8 @@ body = f"""# CBG 报量对账 · 发布说明
 | `selftest.bat` | 逐项自检（第 0 节打印版本和 Python 版本） |
 | `diagnose.bat` | 出问题时一键收集信息 |
 | `uninstall.bat` | 卸载（**默认不删**报告和凭据） |
-| `安装部署指南.md` | 门店操作手册（**中文，先看这个**） |
+| `安装部署指南.md` | 门店操作手册（**有问题先翻这个**） |
 | `发布说明.md` | 就是本文件 |
-| `设计文档.md` | 技术设计，给维护的人看 |
 | `config\\` | 门店配置（**记得改成自己店**） |
 | `.secrets\\` | 凭据（云商账号等） |
 | `out\\` | 跑出来的报告和日志 |
@@ -215,8 +242,15 @@ v{ver} · {stamp}
 
 命令行也行：双击 `selftest.bat`，**第 0 节**会打印版本。
 """
+if beta:
+    body = body.replace(
+        "---",
+        "> ⚠️ **这是测试包（beta），不是正式版。** 只用来验证改动，"
+        "别长期留在门店电脑上。\n\n---", 1)
+    body = body.replace(f"v{ver} · {stamp}",
+                        f"v{ver} · beta · {stamp}（测试包会显示 beta）")
 pathlib.Path(stage, "发布说明.md").write_text(body, encoding="utf-8")
-print(f"    ✓ 发布说明.md（v{ver}）")
+print(f"    ✓ 发布说明.md（v{ver}{' · beta' if beta else ''}）")
 RELNOTES
 
 
@@ -234,23 +268,17 @@ EOF
 
 # ---------------------------------------------------------------- 指南与文档
 # 仓库布局 == 安装布局，直接平铺（不再有 packaging/ 中间层）
+#
+# ⚠ **包里只放门店真正会看的文档。**
+#
+# 以前还拷 `README.md`（41 KB）和 `设计文档.md`（53 KB）—— 文档占了顶层内容的
+# 3/4，而这两份对门店没用：README 是写给开发者的（接口契约、已知坑、怎么跑测试），
+# 设计文档是技术架构。更糟的是 README 里那节「部署到门店电脑」讲的是**手工流程**
+# （拷目录、手建 .secrets\erp.env、写 run.bat），跟 install.bat 那套不是一回事 ——
+# 远程指挥门店时，他翻到 README 就会照着做错。
+#
+# 两份都在 git 仓库里，维护的人照样看得到；门店这边留指南 + 发布说明就够了。
 cp "${ROOT}/安装部署指南.md" "${STAGE}/安装部署指南.md"
-if [ -f "${ROOT}/../docs/superpowers/specs/2026-09-15-cbg-reconcile-design.md" ]; then
-  # ⚠ 设计文档里带着开发机的绝对路径 —— 洗掉再发，别把作者的家目录带到门店
-  sed 's#/Users/ashui/Documents/ds-chat/cbg-reconcile#<项目目录>#g; s#/Users/ashui#<开发机>#g' \
-    "${ROOT}/../docs/superpowers/specs/2026-09-15-cbg-reconcile-design.md" \
-    > "${STAGE}/设计文档.md"
-fi
-# 仓库里的 README 指向仓库内的 docs/，包里改成平级
-python3 - "$STAGE/README.md" <<'PY'
-import re, sys, pathlib
-p = pathlib.Path(sys.argv[1])
-if p.exists():
-    t = p.read_text(encoding="utf-8")
-    t = t.replace("../docs/superpowers/specs/2026-09-15-cbg-reconcile-design.md", "设计文档.md")
-    t = t.replace("门店测试指南.md", "安装部署指南.md")
-    p.write_text(t, encoding="utf-8")
-PY
 
 # ---------------------------------------------------------------- 自检
 echo "==> 打包前自检"
@@ -297,9 +325,18 @@ if [ -n "${_stray}" ]; then
   fail=1
 fi
 [ -f "${STAGE}/requirements.txt" ] || { echo "    ✗ 缺 requirements.txt"; fail=1; }
+# ⚠ 这两份**不该**进包：README 是给开发者的（而且里面那节"部署到门店"讲的是
+#   手工流程，跟 install.bat 那套不一样，门店照着做会错），设计文档是技术架构。
+#   加这条是防止以后谁顺手又拷回去 —— 门店那边"文档越多越乱"。
+for _doc in README.md 设计文档.md; do
+  if [ -e "${STAGE}/${_doc}" ]; then
+    echo "    ✗ 包里混进了给开发者看的文档：${_doc}（门店只看 安装部署指南.md）"
+    fail=1
+  fi
+done
 # 包里不能有任何本机绝对路径
-if grep -rIl "/Users/ashui" "${STAGE}" 2>/dev/null | grep -v '设计文档.md' | head -3 | grep -q .; then
-  echo "    ✗ 有文件残留本机绝对路径："; grep -rIl "/Users/ashui" "${STAGE}" | grep -v '设计文档.md' | head -3
+if grep -rIl "/Users/ashui" "${STAGE}" 2>/dev/null | head -3 | grep -q .; then
+  echo "    ✗ 有文件残留本机绝对路径："; grep -rIl "/Users/ashui" "${STAGE}" | head -3
   fail=1
 fi
 # 开发垃圾不能进包（门店同事会打开这个目录，看到缓存文件会困惑）
