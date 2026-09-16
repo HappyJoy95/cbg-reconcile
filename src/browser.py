@@ -46,6 +46,10 @@ SSO_ENTRY = "https://uniportal.huawei.com/uniportal1/"
 
 MAX_LOGIN_TRIES = 3
 
+# 上次抓取撞了验证码的标记。放 `.secrets/`：它是**这台电脑的**运行状态，
+# 不跟包走、也不该被自更新冲掉（selfupdate 的 NEVER_TOUCH）。
+CAPTURE_STATE = ".secrets/capture-state.json"
+
 # 登录态相关的 cookie 所在的域
 _COOKIE_DOMAINS = ("cbg.huawei.com", ".huawei.com", "login.huawei.com", ".huawei.cn")
 
@@ -90,11 +94,68 @@ class BrowserError(RuntimeError):
     pass
 
 
+class CbgCaptchaRequired(CbgAuthError):
+    """自动登录撞上了图形验证码 —— 自动这条路走不通，得人来。
+
+    ⚠ **必须继承 `CbgAuthError`**：`cli.py` 有三处 `except CbgAuthError`、
+    `probe_session` 里还有一处 `except (CbgAuthError, BrowserError)` ——
+    不是子类的话，这个新异常会直接炸穿那些调用方。
+
+    ⚠ 抛它之前，`capture_session` 的 `finally` 已经**把浏览器关掉了**
+    （`_shutdown`）—— 调用方拿到它就可以安全地删 profile 了
+    （Windows 上还有句柄就删不掉）。
+    """
+
+    def __init__(self, profile_dir=None):
+        super().__init__(
+            "自动登录时登录页要**图形验证码** —— 自动填表这条路走不通。"
+            "已经把浏览器关掉、并重置了这台电脑的抓取 profile"
+            "（那个半成品留着也没用，反而会让下次从脏状态开始）。"
+            "请重新点「打开浏览器抓取」，在弹出的窗口里**手动登录并输入验证码**。"
+            + (f"\n（profile：{profile_dir}）" if profile_dir else ""))
+
+
 def profile_path(cfg: dict, root) -> Path:
     """配置文件里的 `session.browser_profile`，没配就用默认的 .secrets/browser-profile。"""
     rel = (cfg.get("session") or {}).get("browser_profile") or PROFILE_DIRNAME
     p = Path(rel)
     return p if p.is_absolute() else Path(root) / p
+
+
+def _state_path(root) -> Path:
+    return Path(root) / CAPTURE_STATE
+
+
+def captcha_marked(root) -> bool:
+    """上次抓取是不是撞了验证码。
+
+    ⚠ 这是**降级用**的东西：读不到就当没有，**绝不抛** ——
+    抓取路径上抛一次就是整条流程挂掉，而它只是个提示开关。
+    """
+    try:
+        d = json.loads(_state_path(root).read_text(encoding="utf-8"))
+        return bool(isinstance(d, dict) and d.get("captcha_at"))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def mark_captcha(root) -> None:
+    """记下"这次是被验证码挡下来的"。写不成不影响抓取本身。"""
+    try:
+        p = _state_path(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"captcha_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def clear_captcha(root) -> None:
+    """抓到可用会话了 —— 标记没用了，清掉，恢复自动填表。"""
+    try:
+        _state_path(root).unlink()
+    except OSError:
+        pass
 
 
 def login_url(cfg: dict) -> str:
@@ -906,7 +967,8 @@ def csrf_from_api(cookies: str, timeout: int = 20) -> str | None:
 def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float = 240,
                     on_step=None, verify=None, url: str | None = None,
                     credentials: tuple[str, str] | None = None,
-                    cfg: dict | None = None) -> CbgSession:
+                    cfg: dict | None = None, state_root=None,
+                    on_need=None) -> CbgSession:
     """抓一份可用会话。
 
     headless=False：弹窗口（首次 / SSO 过期时；有账号密码就自动填）
@@ -917,10 +979,22 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
     verify: 校验函数 `(CbgSession) -> bool`。**一定要传** —— 光看"cookie 名字对不对"
         不够（未登录时 cbg 也会发 JSESSIONID）。校验不过就继续等，
         绝不把没验证过的凭据交出去。
+    state_root：给了就维护"上次撞了验证码"的标记（`.secrets/capture-state.json`）。
+        ⚠ 必须**显式传**，不从 `profile_dir.parent` 推 ——
+        `session.browser_profile` 可以配成任意绝对路径，推出来的 `.secrets/`
+        可能根本不是我们的。
+    on_need   ：`(what: str) -> None`，运行中"还差人做一件事"时回调。
+        目前只有 `'captcha'`（手动登录时页面要验证码）。
     """
     say = on_step or (lambda msg: None)
     start_url = url or PORTAL_URL
     user, pwd = credentials or ("", "")
+    if state_root is not None and credentials and captcha_marked(state_root):
+        # ⚠ 上一次就是被验证码挡下来的。再自动填一次只会把**同一个**验证码
+        #   再撞出来，然后又被中止 —— 死循环，"请手动登录"那句提示永远执行不了。
+        say("上次抓取撞上了图形验证码 —— 这次**不自动填账号密码**，"
+            "请在窗口里手动登录（含验证码）")
+        user = pwd = ""
     proc, port = launch(Path(profile_dir), url=start_url, headless=headless, cfg=cfg)
     say(f"浏览器已启动（调试端口 {port}）")
     say(f"打开：{start_url}")
@@ -972,6 +1046,9 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                     ok, why = _verify_result(verify, sess)
                     if ok:
                         say(f"✅ 抓到 {len(names)} 个 cookie + csrf token（{csrf_src}），自检通过")
+                        if state_root is not None:
+                            # 抓到一次就恢复正常：以后照旧自动填账号密码
+                            clear_captcha(state_root)
                         return sess
                     last_reason = why or last_reason
                     if not said_invalid:
@@ -995,10 +1072,10 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                     time.sleep(6)
                     continue
                 if r == "captcha":
-                    say("⚠️ 登录页要图形验证码 —— 自动登录走不通，"
-                        "请在弹出的窗口里手动登录")
-                    user = pwd = ""                    # 不再无谓重试
-                    nav_done = True
+                    # ⚠ 不在 `finally` 里删 profile：那时浏览器**还开着**，
+                    #   Windows 上有句柄就删不掉。抛出去，让调用方在
+                    #   `finally` 跑完之后删 —— 见 CbgCaptchaRequired 的文档。
+                    raise CbgCaptchaRequired(profile_dir)
                 elif r == "error":
                     # 账号密码不对之类 —— 再试只会把账号试锁，直接停
                     say("⚠️ 账号密码可能不对 —— 停止自动重试（免得把账号试锁），"

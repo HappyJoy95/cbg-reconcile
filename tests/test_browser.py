@@ -1157,3 +1157,87 @@ class TestLaunchSettling(unittest.TestCase):
 
     def test_settle_window_exists(self):
         self.assertGreater(browser.SETTLE_SECONDS, 0, "返回前必须观察一小会儿")
+
+
+class TestCaptchaAbortsAutoLogin(unittest.TestCase):
+    """⚠ 自动登录撞上验证码 → **必须中止并把这件事传给上层**。
+
+    以前只是 `say()` 一句就继续干等 —— 而 `say()` 在控制台里只进滚动日志，
+    最后那个醒目的横幅一个字都不提验证码。用户等到超时，
+    看到的是「始终没看到登录 cookie」，完全不知道要输验证码。
+    """
+
+    def test_raises_dedicated_error_inheriting_auth_error(self):
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser", return_value=("", {})), \
+                mock.patch.object(browser, "try_auto_login",
+                                  lambda *a, **k: "captcha"), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            with self.assertRaises(browser.CbgCaptchaRequired) as ctx:
+                browser.capture_session(Path("/x"), headless=False, timeout=1.0,
+                                        credentials=("u", "p"), verify=lambda s: True)
+        self.assertIn("验证码", str(ctx.exception))
+        # ⚠ 必须是 CbgAuthError 的子类：cli.py 三处 + probe_session 靠它兜底，
+        #   不是子类的话新异常会直接炸穿那些调用方
+        self.assertIsInstance(ctx.exception, CbgAuthError)
+
+
+class TestCaptchaMemory(unittest.TestCase):
+    """⚠ 没有这个标记就会**死循环**：
+
+    撞验证码 → 删 profile → 用户按提示重新点一次 → 自动登录又把同一个验证码
+    撞出来 → 又中止…… 「重新点一次并手动登录」这句提示根本执行不了。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def test_mark_then_read_then_clear(self):
+        self.assertFalse(browser.captcha_marked(self.root))
+        browser.mark_captcha(self.root)
+        self.assertTrue(browser.captcha_marked(self.root))
+        browser.clear_captcha(self.root)
+        self.assertFalse(browser.captcha_marked(self.root))
+
+    def test_broken_state_file_is_not_a_crash(self):
+        """这是降级用的东西 —— 坏了最多是「这次照常自动填」，**绝不能抛**。"""
+        p = browser._state_path(self.root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        for junk in ("{ 不是 json", "[]", "", "null"):
+            p.write_text(junk, encoding="utf-8")
+            self.assertFalse(browser.captcha_marked(self.root), repr(junk))
+
+    def test_marked_means_no_auto_fill(self):
+        browser.mark_captcha(self.root)
+        calls = {"n": 0}
+
+        def fake_login(*a, **k):
+            calls["n"] += 1
+            return "submitted"
+
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser", return_value=("", {})), \
+                mock.patch.object(browser, "try_auto_login", fake_login), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            with self.assertRaises(CbgAuthError):
+                browser.capture_session(Path("/x"), headless=False, timeout=0.8,
+                                        credentials=("u", "p"), verify=lambda s: True,
+                                        state_root=self.root)
+        self.assertEqual(calls["n"], 0, "标记还在时**不许**再自动填账号密码")
+
+    def test_success_clears_the_mark(self):
+        browser.mark_captcha(self.root)
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser",
+                                  return_value=("JSESSIONID=abc", {})), \
+                mock.patch.object(browser, "csrf_from_page", lambda p: "C"), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            browser.capture_session(Path("/x"), headless=True, timeout=5,
+                                    verify=lambda s: True, state_root=self.root)
+        self.assertFalse(browser.captcha_marked(self.root),
+                         "抓到一次就该把标记清掉，否则以后永远不自动填了")
