@@ -221,15 +221,27 @@ class TestAutostart(unittest.TestCase):
         """pythonw.exe 不带控制台窗口 —— 开机时不会闪黑框。"""
         fake_py = Path("/fake/python.exe")
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
-                mock.patch.object(autostart.sys, "executable", str(fake_py)), \
-                mock.patch.object(autostart.Path, "exists", lambda self: True):
+                mock.patch.object(autostart.runtime, "current", lambda: str(fake_py)), \
+                mock.patch.object(autostart.runtime, "pythonw_for",
+                                  lambda e: str(Path(e).with_name("pythonw.exe"))):
             self.assertTrue(autostart._python_exe().endswith("pythonw.exe"))
 
     def test_windows_falls_back_when_no_pythonw(self):
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
-                mock.patch.object(autostart.sys, "executable", "/fake/python.exe"), \
-                mock.patch.object(autostart.Path, "exists", lambda self: False):
+                mock.patch.object(autostart.runtime, "current", lambda: "/fake/python.exe"), \
+                mock.patch.object(autostart.runtime, "pythonw_for", lambda e: e):
             self.assertEqual(autostart._python_exe(), "/fake/python.exe")
+
+    def test_autostart_prefers_the_recorded_interpreter(self):
+        """开机自启必须拉起**安装时记下的那个** Python。
+
+        一台电脑上两个 Python 时，用错的那个表现是"每天开机都静静地起不来"——
+        界面上什么都看不到，只有 out/autostart.log 里一行 ImportError。
+        """
+        with mock.patch.object(autostart.platform, "system", lambda: "Linux"), \
+                mock.patch.object(autostart.runtime, "current",
+                                  lambda: "/recorded/python3"):
+            self.assertEqual(autostart._python_exe(), "/recorded/python3")
 
     def test_install_refuses_without_boot_script(self):
         empty = Path(self.dir.name) / "empty"

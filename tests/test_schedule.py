@@ -821,12 +821,17 @@ class TestReconcileWindows(unittest.TestCase):
         self.assertEqual((s1, s2, c1, c2), (self.target,) * 4)
 
     def test_config_default_is_zero(self):
-        """配置里 report_lookahead_days 默认必须是 0（用户要求的）。"""
+        """**发出去的那份模板**里 report_lookahead_days 默认必须是 0（用户要求的）。
+
+        ⚠ 读的是 `src/store-config.default.yaml`，不是 `config/store-*.yaml`：
+        后者是**这台电脑自己的配置**（已不进 git、不进包），新克隆的仓库上根本没有
+        —— 读它的话这条测试在新机器上必挂。
+        """
         import pathlib
         import yaml
         cfg = yaml.safe_load(
             (pathlib.Path(__file__).resolve().parent.parent
-             / "config" / "store-SCN231409.yaml").read_text(encoding="utf-8"))
+             / "src" / "store-config.default.yaml").read_text(encoding="utf-8"))
         self.assertEqual(cfg["check"]["report_lookahead_days"], 0)
         self.assertEqual(cfg["check"]["lookback_days"], 0)
 
@@ -857,3 +862,309 @@ class TestNoShadowedClasses(unittest.TestCase):
             names = [n.name for n in tree.body if isinstance(n, ast.ClassDef)]
             dup = [k for k, v in collections.Counter(names).items() if v > 1]
             self.assertFalse(dup, f"{f.name} 里有重名的测试类：{dup}（会静默覆盖，丢掉测试）")
+
+
+class TestScheduleFailureAdvice(unittest.TestCase):
+    """注册失败时给的**下一步**必须是能照着做的。
+
+    ⚠ 原来写的是"试试右键 start.bat → 以管理员身份运行" —— **完全错的方向**：
+    `start.bat` 是"启动服务"，跟建计划任务没有半点关系，照着做只会白跑一趟。
+    （实测用户就卡在这儿，问"没有管理员权限了那定时任务怎么加"。）
+    """
+
+    def _fail_msg(self):
+        import types
+        from src import schedule
+        r = types.SimpleNamespace(returncode=1, stdout=b"", stderr="错误: 拒绝访问。")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "write_runner_script",
+                                  lambda *a, **k: pathlib.Path("D:/x/run.bat")), \
+                mock.patch.object(schedule, "_schtasks", lambda *a, **k: r):
+            return schedule.install(pathlib.Path("D:/x"), "21:00", 1, "config/x.yaml")
+
+    def test_does_not_tell_users_to_run_start_bat_as_admin(self):
+        msg = self._fail_msg()["message"]
+        self.assertNotIn("右键 start.bat", msg,
+                         "start.bat 是启动服务，跟建计划任务无关 —— 别指错方向")
+
+    def test_says_it_needs_admin_but_only_once(self):
+        msg = self._fail_msg()["message"]
+        self.assertIn("管理员权限", msg)
+        self.assertIn("只弹这一次", msg, "要说明是一次性的，不是每次都要")
+
+    def test_says_the_task_still_runs_unelevated(self):
+        """⚠ 关键承诺：提权**建**出来的任务，照样是普通权限**运行**的。
+
+        不然用户会以为"又变回管理员了"，而管理员身份会让自动抓会话失败。
+        `schtasks` 的 `/rl` 默认就是 `Limited`（微软文档），所以这是真的。
+        """
+        msg = self._fail_msg()["message"]
+        self.assertIn("普通权限运行", msg)
+
+    def test_names_the_stale_task_cause(self):
+        """第二种原因要点出来：以前用管理员身份建过同名任务 → 覆盖不了。"""
+        msg = self._fail_msg()["message"]
+        self.assertIn("覆盖", msg)
+
+    def test_manual_command_is_still_offered(self):
+        got = self._fail_msg()
+        self.assertIn("schtasks", got["manual"], "手动那条路要留着当退路")
+
+
+class TestUnreadableTaskIsNotMissing(unittest.TestCase):
+    """⚠ **"读不到详情"和"没有这个任务"是两回事**，界面上的话也完全不同。
+
+    实测：定时任务里只显示一个名字、时间和命令全空。原因是任务
+    **以管理员身份建**的（所有者 `Administrators`），而服务现在是
+    **普通权限**（过滤令牌）→ `schtasks /query /tn <名> /xml` 直接被拒。
+    用户看到的就是"没有管理员权限就看不到定时执行的设置"。
+
+    所以 `_win_task_info` 要把这种情况标出来（`unreadable=True`），
+    界面才能说"是权限不够，不是没设"并给出修法。
+    """
+
+    def _info(self, query_results):
+        """query_results: 按调用顺序给的返回值（`_schtasks` 会被调两次）。"""
+        from src import schedule as sch
+        calls = []
+
+        def fake(args, **kw):
+            calls.append(args)
+            return query_results[min(len(calls) - 1, len(query_results) - 1)]
+
+        with mock.patch.object(sch, "_schtasks", fake):
+            return sch._win_task_info(r"\CBG报量对账-21点00"), calls
+
+    def test_both_queries_denied_marks_it_unreadable(self):
+        r = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied")
+        info, calls = self._info([r, r])
+        self.assertTrue(info["unreadable"], "该标成「读不到」")
+        self.assertEqual(info["time"], "")
+        self.assertEqual(len(calls), 2, "两条路都要试过才认")
+
+    def test_xml_success_is_not_unreadable(self):
+        xml = (b'<?xml version="1.0" encoding="UTF-16"?>'
+               b'<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+               b'<Triggers><CalendarTrigger><StartBoundary>2026-09-15T21:00:00</StartBoundary>'
+               b'</CalendarTrigger></Triggers><Settings><Enabled>true</Enabled></Settings>'
+               b'<Actions><Exec><Command>pythonw.exe</Command></Exec></Actions></Task>')
+        ok = types.SimpleNamespace(returncode=0, stdout=xml, stderr=b"")
+        info, _ = self._info([ok])
+        self.assertFalse(info["unreadable"])
+        self.assertEqual(info["time"], "21:00")
+
+    def test_list_fallback_that_works_is_not_unreadable(self):
+        """XML 读不到但 LIST 读得到 → 能拿到时间就算正常。"""
+        bad = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+        listing = ("\u4efb\u52a1\u540d:  x\r\n\u4e0b\u6b21\u8fd0\u884c\u65f6\u95f4: 2026-09-16 21:00:00\r\n").encode("utf-8")
+        good = types.SimpleNamespace(returncode=0, stdout=listing, stderr=b"")
+        info, _ = self._info([bad, good])
+        self.assertFalse(info["unreadable"], "退路读到了就不算读不到")
+        self.assertEqual(info["time"], "21:00")
+
+
+class TestScheduleRecord(unittest.TestCase):
+    """我们自己记的那份"注册参数"（`.secrets/schedule.json`）。
+
+    ## 为什么非有它不可
+
+    门店那台机器上**普通权限建不了计划任务**（`schtasks /create` 报
+    `错误: 拒绝访问。`），只能提权建；而提权建出来的任务所有者是
+    `Administrators` → 之后普通权限**连详情都读不到**
+    （`schtasks /query /tn <名> /xml` 被拒）。
+
+    用户看到的原话是「**没有管理员权限就看不到定时执行设置了**」。
+    那就别去问 Windows —— 注册参数是我们自己传的，记下来就行。
+    这份记录**不依赖任何 ACL 行为、任何系统语言**。
+
+    ⚠ 所以它是"提权建任务"能成立的前提：**没有记录就别提权建**，
+      否则又回到"界面上只有一个名字"。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def _record(self) -> dict:
+        import json as _json
+        f = self.root / schedule.RECORD_FILE
+        return _json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+    # ---- 读写
+    def test_successful_install_remembers_the_parameters(self):
+        """⚠ 注册成功就**立刻**记 —— 这是记录机制唯一的写入点。"""
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_install",
+                                  return_value={"ok": True, "task": "T"}):
+            r = schedule.install(self.root, "20:30", days_ago=2,
+                                 config="config/store-X.yaml",
+                                 name="CBG报量对账-20点30")
+        self.assertTrue(r["ok"])
+        rec = self._record()["CBG报量对账-20点30"]
+        self.assertEqual(rec["time"], "20:30")
+        self.assertEqual(rec["days_ago"], 2)
+        self.assertEqual(rec["config"], "config/store-X.yaml")
+        self.assertTrue(rec["at"], "要记下什么时候注册的")
+
+    def test_failed_install_does_not_remember(self):
+        """没建成的任务不许在界面上装作存在 —— 失败就**不记**。"""
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_install",
+                                  return_value={"ok": False, "message": "拒绝访问"}):
+            r = schedule.install(self.root, "20:30")
+        self.assertFalse(r["ok"])
+        self.assertEqual(self._record(), {})
+
+    def test_record_lives_in_secrets_so_updates_cannot_wipe_it(self):
+        """⚠ 放 `.secrets/` 是**有意的**：selfupdate 的 NEVER_TOUCH。
+
+        它跟 `.secrets/` 里其它东西一样是"**这台电脑的**运行状态" ——
+        自更新"照仓库原样铺"时不许碰，否则一次升级就把注册记录冲没了。
+        """
+        self.assertTrue(schedule.RECORD_FILE.startswith(".secrets/"),
+                        "挪出 .secrets/ 就会被自更新冲掉")
+        from src import selfupdate
+        self.assertIn(".secrets", selfupdate.NEVER_TOUCH)
+
+    def test_corrupt_or_missing_record_never_raises(self):
+        """这是**显示用**的东西 —— 坏了最多是显示不出来，**绝不能把注册搞挂**。
+
+        界面上"要不要注册"的判断全都会路过这里，抛一次就是整个页面白屏。
+        """
+        self.assertEqual(schedule._recall(self.root), {}, "文件不在 → 空")
+        f = self.root / schedule.RECORD_FILE
+        f.parent.mkdir(parents=True, exist_ok=True)
+        for junk in ("{ 这不是 json", "[1,2,3]", "", "null"):
+            f.write_text(junk, encoding="utf-8")
+            self.assertEqual(schedule._recall(self.root), {}, f"{junk!r} 要给空 dict")
+
+    def test_recall_without_a_root_is_empty_not_a_crash(self):
+        """`root=None` 也要给空 dict（Path(None) 抛的是 TypeError）。"""
+        self.assertEqual(schedule._recall(None), {})
+
+    # ---- 读不到详情时拿记录兜底
+    def test_record_fills_in_the_details_when_windows_refuses_to_read(self):
+        """普通权限两条查询都被拒 → **记录顶上**，界面上照样有时间和命令。
+
+        ⚠ 这时 `unreadable` 必须是 False：它表示"真的读不到、得让用户去修"，
+        而我们有记录，用户不需要做任何事。
+        """
+        rec = {"CBG报量对账-21点20": {"time": "21:20", "days_ago": 0,
+                                      "at": "2026-09-16 22:01:00"}}
+        denied = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied")
+        with mock.patch.object(schedule, "_schtasks", lambda *a, **k: denied), \
+                mock.patch.object(schedule, "_win_list_names",
+                                  lambda: [r"\CBG报量对账-21点20"]), \
+                mock.patch.object(schedule, "_recall", lambda root: rec), \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            schedule.invalidate_cache()
+            tasks = schedule._win_list(force=True, root=self.root)
+        self.assertEqual(len(tasks), 1)
+        t = tasks[0]
+        self.assertEqual(t["time"], "21:20", "记录里的时间要顶上去")
+        self.assertEqual(t["detail_source"], "record")
+        self.assertFalse(t["unreadable"], "有记录就不算「读不到」")
+
+    def test_without_a_record_it_still_says_unreadable(self):
+        """**没有**记录 + 读不到 → 老实标 `unreadable`，界面才知道要提示修。"""
+        denied = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied")
+        with mock.patch.object(schedule, "_schtasks", lambda *a, **k: denied), \
+                mock.patch.object(schedule, "_win_list_names",
+                                  lambda: [r"\CBG报量对账-21点20"]), \
+                mock.patch.object(schedule, "_recall", lambda root: {}), \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            schedule.invalidate_cache()
+            tasks = schedule._win_list(force=True, root=self.root)
+        self.assertTrue(tasks[0]["unreadable"])
+        self.assertEqual(tasks[0]["time"], "")
+
+    # ---- 删掉就抹掉
+    def test_removing_a_task_forgets_its_record(self):
+        """删了还留着记录 → 界面上"任务没了、时间和命令还在"，看着像没删掉。"""
+        schedule._remember(self.root, "CBG报量对账-中午", time_str="12:00")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_remove",
+                                  return_value={"ok": True, "task": "T"}):
+            r = schedule.remove("CBG报量对账-中午", self.root)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self._record(), {})
+
+    def test_failed_removal_keeps_the_record(self):
+        """没删掉就不能抹记录 —— 任务还在，界面得继续显示它。"""
+        schedule._remember(self.root, "CBG报量对账-中午", time_str="12:00")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_remove",
+                                  return_value={"ok": False, "message": "拒绝访问"}):
+            schedule.remove("CBG报量对账-中午", self.root)
+        self.assertIn("CBG报量对账-中午", self._record())
+
+    def test_forget_accepts_the_full_name_the_ui_sends(self):
+        """⚠ 界面上删除按钮发的是 `full_name`（带反斜杠），记录里的键是叶子名。
+
+        只 `pop(task)` 的话**永远删不掉** —— 用户看到的是
+        "删了之后时间和命令还挂在那儿"，会以为删除失败了。
+        这个 bug 真出现过。
+        """
+        schedule._remember(self.root, "CBG报量对账-21点20", time_str="21:20")
+        schedule._forget(self.root, "\\CBG报量对账-21点20")
+        self.assertEqual(self._record(), {}, "带反斜杠的名字也要认得出来")
+
+    def test_remove_all_clears_the_record_when_everything_is_gone(self):
+        """卸载时整套撤干净，记录也别留 —— 否则下次安装会显示一个不存在的时间。"""
+        # ⚠ 名字要通过 `_is_ours`（含 TASK_NAME），否则它压根不进删除列表，
+        #   这条测试就"因为没有任务可删"而**假绿**
+        schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_list_names",
+                                  lambda: ["\\CBG报量对账-21点00"]), \
+                mock.patch.object(schedule, "_schtasks",
+                                  lambda *a, **k: types.SimpleNamespace(
+                                      returncode=0, stdout=b"", stderr=b"")):
+            r = schedule.remove_all(self.root)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self._record(), {})
+
+    def test_remove_all_keeps_the_record_if_something_survived(self):
+        """⚠ 还有任务没删掉时**不能**抹记录。
+
+        那种情况下这份记录是界面上唯一还能显示它的东西 ——
+        抹了就真成"看不见也删不掉"，只能去任务计划程序里瞎找。
+        """
+        schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_list_names",
+                                  lambda: ["\\CBG报量对账-21点00"]), \
+                mock.patch.object(schedule, "_schtasks",
+                                  lambda *a, **k: types.SimpleNamespace(
+                                      returncode=1, stdout=b"", stderr=b"denied")):
+            r = schedule.remove_all(self.root)
+        self.assertFalse(r["ok"])
+        self.assertIn("CBG报量对账-21点00", self._record())
+
+    def test_two_tasks_do_not_overwrite_each_other(self):
+        """中午 + 打烊两条要各记各的 —— 后来的不能把先前的盖掉。"""
+        schedule._remember(self.root, "A", time_str="12:00")
+        schedule._remember(self.root, "B", time_str="21:00")
+        self.assertEqual(self._record()["A"]["time"], "12:00")
+        self.assertEqual(self._record()["B"]["time"], "21:00")
+        schedule._forget(self.root, "A")
+        self.assertNotIn("A", self._record())
+        self.assertIn("B", self._record(), "抹掉一条不能连坐")
+
+
+class TestScheduleSubcommandsExist(unittest.TestCase):
+    """`bootstrap.py` 那两个子命令是界面上提权按钮的落点。
+
+    ⚠ 名字写错了表现是"点了没反应" —— 门店完全无从下手，所以钉住。
+    """
+
+    def test_bootstrap_has_both_subcommands(self):
+        import pathlib as _p
+        src = (_p.Path(__file__).resolve().parent.parent / "bootstrap.py").read_text(encoding="utf-8")
+        for sub in ("schedule-install", "schedule-remove"):
+            self.assertIn(f'"{sub}"', src)
+            self.assertIn(sub, src.split("STDLIB_ONLY = ")[1][:200],
+                          f"{sub} 可能在依赖没装好时被提权调起 —— 要进 STDLIB_ONLY")
+        self.assertIn("do_schedule_install", src)
+        self.assertIn("do_schedule_remove", src)

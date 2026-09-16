@@ -141,7 +141,7 @@ class TestProfileLock(unittest.TestCase):
                         "profile 被占是最可能的原因，要排前面")
 
     def test_hint_still_works_without_a_profile_dir(self):
-        self.assertIn("可能的原因", browser._launch_failure_hint("Chrome"))
+        self.assertIn("profile 目录有问题", browser._launch_failure_hint("Chrome"))
 
 
 class TestDetachedBrowser(unittest.TestCase):
@@ -268,6 +268,272 @@ class TestLaunchWaitsThroughDeElevation(unittest.TestCase):
         msg = str(cm.exception)
         self.assertIn("管理员", msg, "管理员身份是最可能的原因，必须写出来")
         self.assertIn("browser-profile", msg, "要给出能照着做的下一步")
+
+    def test_missing_browser_message_does_not_claim_edge_is_builtin(self):
+        """找不到浏览器时的提示**不能**说"Edge 是系统自带的"。
+
+        ⚠ Win10 上 Edge 确实是系统自带的，**Win7 上不是** —— 出厂只有 IE11，
+        Chromium Edge 是 2020 年微软通过 Windows Update 推过去的，
+        那之后没更新过的机器上就没有。Win7 门店的店员照着"开始菜单里找 Edge"
+        会找不到，然后卡在这儿。
+        而且 **IE11 必须点名说不行**：它跑不了控制台前端（`fetch` / `async` 一个
+        都不支持），也没有 CDP，两个功能都用不了。
+        """
+        with mock.patch.object(browser, "find_browser", lambda *a, **k: None):
+            with self.assertRaises(browser.BrowserError) as cm:
+                browser.launch(Path("/tmp/prof-none"))
+        msg = str(cm.exception)
+        self.assertNotIn("系统自带", msg, "Win7 上 Edge 不是自带的，这句会误导人")
+        self.assertIn("IE11", msg, "要知道 IE11 不行")
+        self.assertIn("Windows 7", msg, "要点明是 Win7 的坑")
+        self.assertIn("browser.prefer", msg, "要给出能照着做的下一步")
+
+
+class TestExitCode21MeansProfileInUse(unittest.TestCase):
+    """⚠ **退出码 21 是"profile 被占着"的铁证**，比翻锁文件可靠。
+
+    21 就是 Chromium 的 `RESULT_CODE_PROFILE_IN_USE`。
+    实测踩过：报错写着"退出码 21"，而 `profile_locked()` 翻不到锁文件
+    （那台机器/那个版本的 Edge 上文件名不一样）—— 于是"profile 被占着"
+    这条提示**根本没出现**，用户看到的是一堆不相干的建议。
+    **退出码是浏览器直接告诉我们的，优先信它。**
+    """
+
+    def test_returncode_21_adds_the_profile_hint(self):
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/prof", returncode=21)
+        self.assertIn("profile 被占着", msg)
+        self.assertIn("PROFILE_IN_USE", msg, "要说清 21 是什么")
+        self.assertIn("msedge.exe", msg, "要给出能照着做的下一步（结束残留进程）")
+
+    def test_says_the_trap_is_a_chain(self):
+        """这次没关掉的浏览器会让**之后每次**抓取都撞 —— 这个连锁必须说破。"""
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p", returncode=21)
+        self.assertIn("连锁", msg)
+
+    def test_gives_a_pasteable_kill_command(self):
+        """⚠ 残留的那个浏览器**多半是看不见的**（静默续期走无头模式，没有窗口）。
+
+        所以「关掉所有浏览器窗口」这句对用户等于没说 —— 他关了、还是撞 21，
+        完全不知道还能干什么。必须给一条**能直接粘的命令**。
+        """
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p", returncode=21)
+        self.assertIn("taskkill /f /im msedge.exe", msg, "要给能直接粘的命令")
+        self.assertIn("无头", msg, "要点破「看不见」这件事")
+        self.assertIn("chrome.exe", msg, "用 Chrome 的机器也要能用")
+
+    def test_elevation_line_does_not_hardcode_exit_code_zero(self):
+        """⚠ 别把"你看到的是退出码 0"写死 —— 那只是**典型**表现。
+
+        这次可能先撞上 profile 被占（21），写死了就跟下面第 2 条自相矛盾，
+        用户会以为程序在胡说。（实测真撞上过。）
+        """
+        with mock.patch.object(browser, "_am_i_admin", lambda: True), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p", returncode=21)
+        self.assertIn("典型表现", msg)
+        self.assertNotIn("所以你看到的是「启动后立刻退出（退出码 0）」", msg)
+
+    def test_other_returncodes_do_not_claim_locked(self):
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p", returncode=0)
+        self.assertNotIn("profile 被占着", msg)
+
+    def test_lock_file_still_works_without_a_returncode(self):
+        """没有退出码（跑到一半浏览器没了那条路）时，还得靠锁文件判断。"""
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: True):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p")
+        self.assertIn("profile 被占着", msg)
+
+    def test_says_edge_not_just_chrome(self):
+        """⚠ 门店用的是 **Edge**，只写 Chrome 会让人以为"跟我无关"。"""
+        with mock.patch.object(browser, "_am_i_admin", lambda: True), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/p")
+        self.assertIn("Edge / Chrome", msg)
+
+
+class TestRetryKeepsTheFirstExitCode(unittest.TestCase):
+    """`launch()` 失败后会**降级重试一次**，而抛出去的是**重试**那个退出码。
+
+    ⚠ 两次的退出码含义完全不同（0 = 交棒/权限；21 = profile 被占），
+    第一次那个被吞掉的话，用户只看到一个 21，而真正的原因是第一次的 0 ——
+    实测就是这么被误导的。
+    """
+
+    def test_first_code_is_reported(self):
+        codes = [0, 21]          # 第一次 0，重试 21
+        procs = []
+
+        class _P:
+            def __init__(self, code):
+                self.returncode = code
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                pass
+
+        def fake_popen(*a, **k):
+            p = _P(codes[min(len(procs), len(codes) - 1)])
+            procs.append(p)
+            return p
+
+        with mock.patch.object(browser, "find_browser",
+                               lambda *a, **k: (r"C:\edge.exe", "Edge")), \
+                mock.patch.object(browser, "http_json",
+                                  mock.Mock(side_effect=browser.CdpError("没起来"))), \
+                mock.patch.object(browser.subprocess, "Popen", fake_popen), \
+                mock.patch.object(browser.time, "sleep", lambda s: None), \
+                mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            with self.assertRaises(browser.BrowserError) as cm:
+                browser.launch(Path("/tmp/prof-retry"))
+        msg = str(cm.exception)
+        self.assertIn("第一次", msg, "要把第一次的退出码补出来")
+        self.assertIn("0", msg)
+
+
+class TestVerifyResult(unittest.TestCase):
+    """⚠ 自检没过时，**必须把原因带出来**。
+
+    以前 `verify` 只返回 bool，而 `CbgClient.ping()` 的第二个返回值里写着真正的
+    病因（"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"）——
+    被 `.ping()[0]` 直接扔掉了。用户最后只看到一句"自检一直没过"，
+    只能反复说"就是抓不到"，谁也定位不了。实测就卡在这儿。
+    """
+
+    def test_pair_carries_the_reason(self):
+        ok, why = browser._verify_result(lambda s: (False, "会话/权限问题：没有权限"), None)
+        self.assertFalse(ok)
+        self.assertIn("没有权限", why)
+
+    def test_plain_bool_still_works(self):
+        """老写法（返回 bool）不能炸 —— 兼容它，只是原因未知。"""
+        self.assertEqual(browser._verify_result(lambda s: True, None), (True, ""))
+        self.assertEqual(browser._verify_result(lambda s: False, None), (False, ""))
+
+    def test_no_verify_means_pass(self):
+        self.assertEqual(browser._verify_result(None, None), (True, ""))
+
+    def test_verify_raising_is_its_own_reason(self):
+        """校验函数自己炸了 ≠ 校验没过 —— 混成一句会让人去查账号，其实是代码问题。"""
+        def boom(s):
+            raise RuntimeError("端口没了")
+        ok, why = browser._verify_result(boom, None)
+        self.assertFalse(ok)
+        self.assertIn("RuntimeError", why)
+        self.assertIn("端口没了", why)
+
+    def test_reason_reaches_the_timeout_message(self):
+        """最终报错里要**真的有那句话**，不然前面都白改。"""
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser",
+                                  return_value=("JSESSIONID=S; hwssot3=1", {})), \
+                mock.patch.object(browser, "csrf_from_page", return_value="CSRF1"), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser, "page_targets", lambda p: []), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            with self.assertRaises(CbgAuthError) as ctx:
+                browser.capture_session(
+                    Path("/x"), headless=True, timeout=1.2,
+                    verify=lambda s: (False, "会话/权限问题：没有门店或数据范围 SCN9 的权限"))
+        msg = str(ctx.exception)
+        self.assertIn("没有门店或数据范围 SCN9 的权限", msg,
+                      "自检给的原因必须出现在最终报错里")
+        self.assertIn("自检/接口说的是", msg)
+
+    def test_csrf_source_is_reported_when_csrf_is_missing(self):
+        """cookie 有、csrf 取不到 —— 这跟"没登录"是两回事，要说准。"""
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser",
+                                  return_value=("JSESSIONID=S; hwssot3=1", {})), \
+                mock.patch.object(browser, "csrf_from_page", return_value=None), \
+                mock.patch.object(browser, "csrf_from_api", return_value=None), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser, "page_targets", lambda p: []), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            with self.assertRaises(CbgAuthError) as ctx:
+                browser.capture_session(Path("/x"), headless=True, timeout=1.2,
+                                        verify=lambda s: True)
+        self.assertIn("csrf 取不到", str(ctx.exception))
+
+
+class TestWhereIsTheBrowser(unittest.TestCase):
+    """超时时要能说出"窗口现在停在哪一页"。
+
+    ⚠ 这是排查"抓不到会话"时最想知道的一件事，而原来恰恰没有 ——
+    用户只能说"就是抓不到"，我们只能猜。实测就卡在这儿。
+    """
+
+    def test_lists_the_open_pages(self):
+        with mock.patch.object(browser, "page_targets", lambda p: [
+                {"url": "https://cbg.huawei.com/#/login"},
+                {"url": "https://uniportal.huawei.com/uniportal1/?x=1"}]):
+            got = browser._where_is_the_browser(1234)
+        self.assertIn("cbg.huawei.com", got)
+        self.assertIn("uniportal.huawei.com", got,
+                      "SSO 页也要列出来 —— 那正是「卡在登录」的特征")
+
+    def test_skips_devtools_pages(self):
+        with mock.patch.object(browser, "page_targets", lambda p: [
+                {"url": "devtools://devtools/bundled/x.html"},
+                {"url": "https://cbg.huawei.com/ok"}]):
+            got = browser._where_is_the_browser(1)
+        self.assertNotIn("devtools://", got)
+
+    def test_no_pages_is_empty_not_an_error(self):
+        """⚠ 诊断信息**永远不该**让原本的报错变成另一个报错。"""
+        with mock.patch.object(browser, "page_targets", lambda p: []):
+            self.assertEqual(browser._where_is_the_browser(1), "")
+        with mock.patch.object(browser, "page_targets",
+                               mock.Mock(side_effect=RuntimeError("端口没了"))):
+            self.assertEqual(browser._where_is_the_browser(1), "")
+
+    def test_caps_the_list(self):
+        with mock.patch.object(browser, "page_targets",
+                               lambda p: [{"url": f"https://cbg.huawei.com/{i}"}
+                                          for i in range(20)]):
+            got = browser._where_is_the_browser(1)
+        listed = [ln for ln in got.splitlines() if ln.startswith("  · ")]
+        self.assertEqual(len(listed), 5, "最多列 5 条，别把报错刷成一屏")
+
+
+class TestLaunchFailureHint(unittest.TestCase):
+    """启动失败的提示必须**给证据**，不能写成"可能的原因"。
+
+    ⚠ 踩过：原来一律写"可能的原因（按可能性排）"，而第 1 条是"服务现在是管理员
+    身份"。门店看到会想"我没用管理员啊"，然后去试第 2、3 条，白折腾一轮 ——
+    而那条其实**不是猜的**：它只在 `IsUserAnAdmin()` 真返回真时才出现。
+    """
+
+    def test_elevated_says_confirmed_and_leads_with_it(self):
+        with mock.patch.object(browser, "_am_i_admin", lambda: True), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/prof")
+        self.assertIn("已确认", msg, "管理员那条是查出来的，不是猜的")
+        self.assertNotIn("可能的原因", msg, "别给用户「这是猜测」的印象")
+        self.assertLess(msg.index("管理员"), msg.index("profile 目录"),
+                        "确认的原因必须排在最前面")
+        self.assertIn("普通权限", msg, "要给出能照着做的下一步")
+
+    def test_not_elevated_does_not_mention_admin(self):
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: False):
+            msg = browser._launch_failure_hint("Edge", "/tmp/prof")
+        self.assertNotIn("管理员", msg, "不是就别提，免得指错方向")
+
+    def test_locked_profile_is_reported_when_present(self):
+        with mock.patch.object(browser, "_am_i_admin", lambda: False), \
+                mock.patch.object(browser, "profile_locked", lambda d: True):
+            msg = browser._launch_failure_hint("Edge", "/tmp/prof")
+        self.assertIn("profile 被占着", msg)
 
 
 class TestCaptureSession(unittest.TestCase):

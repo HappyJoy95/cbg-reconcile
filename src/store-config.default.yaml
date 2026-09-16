@@ -1,9 +1,17 @@
 # 本机配置：这台电脑负责核对哪家门店
 #
-# 部署到门店电脑时改这三行即可：store_code / marker / erp_store_name
-store_code: SCN231409        # 华为门店编码；留空则用会话自带的门店
-marker: Y                    # 串号标识里的本店码
-erp_store_name: 青岛新业广场店  # 云商里的门店名（卖出店/归属判定用）
+# ⚠ **这三行是空的，必须自己填** —— 装好之后到控制台「设置 → 门店」填，
+#    改完立刻生效、不用重启。
+#
+#    以前这个文件是**带着某一家店的真实配置**发出去的，于是别的店装上以后
+#    如果忘了改，就会拿别家的账来对 —— **而且看起来一切正常、不报错**。
+#    所以现在只发模板、值是空的；配错了程序会直接报出来。
+#
+#    也正因为如此，这个文件**不进安装包** —— 它是这台电脑自己的东西，
+#    手工拷贝/装包时绝不会被覆盖。
+store_code: ""               # 华为门店编码。必填 —— 空的话连会话自检都过不了
+marker: ""                   # 串号标识里的本店码（比如 Y）。必填
+erp_store_name: ""           # 云商里的门店名（卖出店/归属判定用）。必填
 
 timezone: Asia/Shanghai
 
@@ -19,7 +27,10 @@ check:
   return_status: 0           # 华为侧排除退货
 
 session:
-  file: .secrets/cbg-SCN231409.json   # 会话落盘位置（chmod 600）
+  # ⚠ 这里**故意不写 file** —— 会话文件名由 store_code 自动推出来
+  #   （`.secrets/cbg-<门店码>.json`）。写死的话，改了门店编码文件名还是旧的，
+  #   看起来像"会话没换"，很容易对错店。
+  #
   # 门店日常入口。未登录时它会自己跳到华为 SSO 登录页 ——
   # 不去硬编码登录地址，换域名/换 SSO 版本时不用改代码。
   login_url: "https://cbg.huawei.com/#/group/smart-store/homepage"
@@ -32,9 +43,12 @@ session:
   auto_refresh: true          # check 时若会话失效，自动静默续期一次
 
 browser:
-  # 自动抓会话用哪个浏览器 —— **不配也行，默认就是 Chrome 优先**：
-  #   装了 Chrome 就用 Chrome，没装才用 Edge（Edge 是 Windows 自带的）。
-  # 为什么 Chrome 优先：Edge 从**管理员**进程启动时自我降权重启更凶，
+  # 自动抓会话用哪个浏览器 —— **不配也行，默认 Chrome 优先**：
+  #   装了 Chrome 就用 Chrome，没装才用 Edge。
+  # ⚠ **Edge 不是所有 Windows 都自带** —— Win10 自带，**Win7 上不一定有**
+  #   （出厂只有 IE11，而 IE11 干不了这事）。用 Edge 的话建议显式写：
+  #     prefer: [edge, chrome]
+  # 为什么默认 Chrome 优先：Edge 从**管理员**进程启动时自我降权重启更凶，
   # 抓会话容易被中途掐断。
   #
   # 想换顺序就写一行（名字认：chrome / edge / brave / chromium）：

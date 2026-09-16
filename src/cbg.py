@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -110,6 +111,51 @@ class CbgClient:
         raise CbgError(f"{path} 重试 {self.retries} 次仍失败：{last}")
 
     # ------------------------------------------------------------------ 接口
+    def _warn_foreign_orders(self, codes, where: str) -> None:
+        """接口返回的订单里混了**别家店**的，就吼一声。**不拦、不丢。**
+
+        ## 为什么只警告不报错（改过一次，这是改回来的）
+
+        最初写的是"发现别家店就 raise" —— 那样**一次正常运行的每日对账会被直接
+        掐死**（`check` 里 `CbgError` → `EXIT_FETCH` → 不出报告）。
+        一个我今天才加的安全检查，**不该有能力弄挂一条本来能跑的产线**。
+        实测就出事了：加了之后定时任务跑不出结果。教训记在这儿。
+
+        ## 为什么也不把别家的那些**丢掉**
+
+        丢掉看起来"更干净"，其实更糟：报量集合少了几单 → 那几单的串号会被算成
+        「未报量」→ **报告反而是错的**，而且错得很合理（看起来就是漏报）。
+        报多少就认多少 —— 那才是这家店真实的报量口径。
+
+        ## 那这道检查还有用吗
+
+        有用：它把"门店编码可能填错了"这件事**写进日志**（`out/run.log` 和屏幕上），
+        而不是让它静默过去。真正会坑人的场景是**一个华为账号能看两个店**——
+        填成另一家自己有权限的店时，接口会欣然返回那家的数据、一声不吭。
+        所以这里给一句能照着查的话，但**绝不代替用户做决定**。
+
+        ⚠ 也说清楚：`storeCode` 是**真筛**，正常情况下这里什么都不会打印。
+        真出现了，先怀疑**输出的编码格式**跟输入不是同一个（很常见），
+        而不是一上来就认定配错了店。
+        """
+        want = (self.store_code or "").strip().upper()
+        if not want:
+            return
+        foreign = {}
+        for raw in codes:
+            got = str(raw or "").strip()
+            if got and got.upper() != want:
+                foreign[got] = foreign.get(got, 0) + 1
+        if not foreign:
+            return
+        detail = "、".join(f"{k}（{v} 单）" for k, v in sorted(foreign.items())[:5])
+        print(f"[警告] {where} 里混了不属于本店的数据："
+              f"配置的是「{self.store_code}」，实际还有 {detail}。"
+              f" —— 报量按接口给的照算（**没有丢弃**）。"
+              f"如果本店不该有这些，检查「设置 → 门店」的『华为门店编码』是不是填成了"
+              f"别的店；⚠ 一个账号能看多个店时，填错**不会报错**、只会静默算错。",
+              file=sys.stderr)
+
     def store_detail(self, store_code: str | None = None) -> dict:
         code = store_code or self.store_code
         if not code:
@@ -148,6 +194,8 @@ class CbgClient:
             body["curPage"] = page
             j = self._request("POST", LIST_PATH, payload=body)
             batch = j.get("result") or []
+            self._warn_foreign_orders((o.get("storeCode") for o in batch),
+                                      "订单列表")
             orders.extend(batch)
             pv = j.get("pageVO") or {}
             total_pages = pv.get("totalPages") or 1
@@ -166,6 +214,8 @@ class CbgClient:
             body["storeCode"] = self.store_code
         j = self._request("POST", DETAIL_PATH, payload=body)
         r = j.get("result") or {}
+        # 详情是**唯一带 SN 的投影**，报量数字最后就是从这里出来的 —— 也吼一声
+        self._warn_foreign_orders([r.get("storeCode")], "订单详情")
         created = None
         if r.get("docCreateTime"):
             created = datetime.datetime.fromtimestamp(r["docCreateTime"], CST)

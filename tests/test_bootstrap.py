@@ -11,6 +11,7 @@ import inspect
 import contextlib
 import importlib.util
 import io
+import json
 import pathlib
 import sys
 import tempfile
@@ -22,10 +23,54 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = (ROOT / "bootstrap.py").read_text(encoding="utf-8")
 
 
+
+def _js_code() -> str:
+    """app.js 去掉注释后的正文。
+
+    ⚠ **两种注释都要剥**：只剥 `//` 的话，解释"别写 X"的**块注释**会被当成违规
+    —— 真踩了，而且报错信息是把整个文件打出来，很难看出问题在哪。
+    """
+    import re
+    js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)          # /* ... */
+    return "\n".join(ln.split("//", 1)[0] for ln in js.splitlines())
+
 def _load():
     ns = {"__name__": "boot_test", "__file__": str(ROOT / "bootstrap.py")}
     exec(compile(SRC, "bootstrap.py", "exec"), ns)
+    # ⚠ 默认把 `ensure_layout` 换成空操作 —— 它是**真会往仓库根写文件**的
+    #   （`.secrets/`、`out/`、`config/store-*.yaml`）。不换的话：
+    #   1. 跑一趟测试就把工作区弄脏；
+    #   2. 更坏的是**藏起顺序依赖** —— 某个测试调 `main()` 顺手把门店配置建出来，
+    #      另一个正读这个文件的测试就"恰好"通过了，新克隆的仓库上却会挂。
+    #      （这个坑真踩了：模拟新克隆时测试全绿，其实是测试自己把文件补回来的。）
+    #   要测它本人的在 `TestEnsureLayout` 里换回 `_real_ensure_layout` 再调。
+    ns["_real_ensure_layout"] = ns["ensure_layout"]
+    ns["ensure_layout"] = lambda: None
     return ns
+
+
+# 扫全项目 .py 时跳过的目录。这些里面全是**别人写的**代码（venv 里的第三方包、
+# 缓存、打包产物），扫进来只会在旧解释器上误报。
+_SKIP_PARTS = {".venv", ".pythons", ".uv-cache", "__pycache__", "dist", "node_modules"}
+# ⚠ `.dsh/` **不能整个跳过**：它底下既有工具目录（venv / 缓存 / 备份），
+#   也有 `.dsh/workspace/` —— 那是"验证通过就搬进项目根"的代码，
+#   恰恰是最该被这些守卫看住的。所以只按前缀跳过工具那几个。
+_SKIP_REL = (".dsh/uv-cache/", ".dsh/uv-python/", ".dsh/tasks/",
+             ".dsh/backups/", ".dsh/archived/")
+
+
+def _scan_files():
+    """项目里**我们自己写的** .py，按路径排序。"""
+    out = []
+    for p in ROOT.rglob("*.py"):
+        if any(x in p.parts for x in _SKIP_PARTS):
+            continue
+        rel = p.relative_to(ROOT).as_posix()
+        if rel.startswith(_SKIP_REL):
+            continue
+        out.append(p)
+    return sorted(out)
 
 
 class TestBootstrapIsStdlibOnly(unittest.TestCase):
@@ -160,13 +205,19 @@ class TestMainRouting(unittest.TestCase):
 
 
 class TestWindowsElevation(unittest.TestCase):
-    """开机自启要「以管理员身份」，而注册这种东西**天生需要管理员权限**。
+    """⚠ **开机自启不再请求任何权限、不弹 UAC**（2026-09-16 改）。
 
-    这里钉住三件事：
+    注册的是注册表 `HKCU\\...\\Run` —— 当前用户自己的分支，任何用户都能写。
+    以前这里会用 UAC 提权去注册"以管理员身份启动"的计划任务，而管理员身份会让
+    **「自动抓华为会话」彻底不可用**：浏览器拒绝以管理员运行，把命令行交棒出去
+    就自己退 0，我们等不到调试端口。那次 UAC 除了一件坏事什么都换不来。
+
+    这里钉住四件事：
     1. 非 Windows 上 `is_admin()` 返回 True —— 别拿 Windows 的概念拦别的平台；
-    2. **只提权 autostart 这一步，不提权装依赖** —— 否则"标准用户 + 管理员密码"
-       的机器上，pip 会装进管理员账号的 site-packages，普通用户 import 不到；
-    3. UAC 被拒时**退回普通权限注册**，不能直接失败。
+    2. **装机这一步一次都不提权**（装依赖不提权、注册开机自启也不提权）；
+    3. 已设过且是普通权限 → 直接跳过，不瞎折腾；
+    4. 已设过但是**管理员**模式 → 提示它会弄坏抓会话，并问要不要改回普通权限；
+    5. 提权零件 `relaunch_as_admin` 还在（按需提权时要用），只是不再被这条流程调用。
     """
 
     def setUp(self):
@@ -201,21 +252,23 @@ class TestWindowsElevation(unittest.TestCase):
     def test_non_windows_is_admin(self):
         self.assertTrue(self.ns["is_admin"](), "macOS/Linux 上不该被管理员检查拦住")
 
-    def test_autostart_step_is_elevated(self):
-        """点「是」之后，Windows 上非管理员应该去请求 UAC，而不是直接注册。"""
+    def test_autostart_step_never_asks_for_uac(self):
+        """⚠ 注册开机自启**不许提权、不许弹 UAC**。
+
+        写的是 `HKCU\\...\\Run`，当前用户自己的注册表分支 —— 不需要管理员。
+        而且这里有个**连锁伤害**：一旦提权注册成"以管理员身份启动"，
+        服务以后就是管理员身份跑，它拉起来的 Edge / Chrome 也是管理员，
+        而浏览器拒绝以管理员运行 —— 「自动抓华为会话」从此彻底不可用。
+        """
         ns = _load()
         ns["os"] = types.SimpleNamespace(name="nt")
         ns["is_admin"] = lambda: False
         seen = {}
-
-        def fake_relaunch(cmd):
-            seen["cmd"] = cmd
-            return True
-
-        ns["relaunch_as_admin"] = fake_relaunch
+        ns["relaunch_as_admin"] = lambda cmd: seen.setdefault("cmd", cmd) or True
         self._fake_autostart()
         called = {"install": 0}
-        ns["do_autostart"] = lambda: called.__setitem__("install", called["install"] + 1) or 0
+        ns["do_autostart"] = lambda elevated=False, result_file="": \
+            called.__setitem__("install", called["install"] + 1) or 0
 
         old = sys.stdin
         sys.stdin = TTYInput("y\n")
@@ -226,9 +279,31 @@ class TestWindowsElevation(unittest.TestCase):
         finally:
             sys.stdin = old
 
-        self.assertEqual(seen.get("cmd"), "autostart", "提权时只能重跑 autostart 子命令")
-        self.assertEqual(called["install"], 0, "已经交给提权后的进程了，本进程不该再注册")
-        self.assertIn("UAC", buf.getvalue(), "要提前告诉用户会弹 UAC")
+        self.assertNotIn("cmd", seen, "注册开机自启不该提权")
+        self.assertEqual(called["install"], 1, "应该就地用普通权限注册")
+        self.assertIn("不需要管理员", buf.getvalue(), "要明说不弹 UAC")
+        self.assertNotIn("UAC 窗口", buf.getvalue())
+
+    def test_installed_but_elevated_is_offered_a_way_back(self):
+        """已经注册成"以管理员身份"的机器 → 要**提示它会弄坏抓会话**，并问要不要改回来。
+
+        ⚠ 这是升级路径上必然遇到的情况：老版本装出来的就是管理员模式，
+        不提示的话用户永远不知道抓会话为什么坏。
+        """
+        ns = _load()
+        self._fake_autostart(installed=True, elevated=True)
+        buf = io.StringIO()
+        old = sys.stdin
+        sys.stdin = TTYInput("y\n")
+        try:
+            with contextlib.redirect_stdout(buf):
+                ns["ask_autostart"]()
+        finally:
+            sys.stdin = old
+        out = buf.getvalue()
+        self.assertIn("以管理员身份", out)
+        self.assertIn("自动抓华为会话", out, "要说清楚代价是什么")
+        self.assertIn("普通权限", out, "要给出改回来的方向")
 
     def test_uac_denied_still_registers_without_elevation(self):
         """用户点了"否"也不能就放弃 —— 退回普通权限注册，功能照样可用。"""
@@ -317,7 +392,8 @@ class TestWindowsElevation(unittest.TestCase):
         ns = _load()
         ns["missing"] = lambda: ["requests", "yaml", "openpyxl"]
         called = {"n": 0}
-        ns["do_autostart"] = lambda: called.__setitem__("n", called["n"] + 1) or 0
+        ns["do_autostart"] = lambda elevated=False, result_file="": \
+            called.__setitem__("n", called["n"] + 1) or 0
         old = sys.argv
         sys.argv = ["bootstrap.py", "autostart"]
         try:
@@ -330,7 +406,7 @@ class TestWindowsElevation(unittest.TestCase):
     def test_pause_flag_is_stripped_before_routing(self):
         """`--pause` 是给提权窗口用的，不能被当成子命令传下去。"""
         ns = _load()
-        ns["do_autostart"] = lambda: 0
+        ns["do_autostart"] = lambda elevated=False, result_file="": 0
         old = sys.argv
         sys.argv = ["bootstrap.py", "autostart", "--pause"]
         try:
@@ -366,15 +442,20 @@ class TestWindowsElevation(unittest.TestCase):
             sys.stdin = old
         self.assertIn("普通权限", buf.getvalue())
 
-    def test_non_windows_already_installed_is_left_alone(self):
-        """macOS/Linux 上没有"提权注册"这回事 —— 已设过就直接跳过，别瞎升级。"""
+    def test_already_installed_normal_is_left_alone(self):
+        """已经装好了（普通权限）→ 直接跳过，别瞎折腾。
+
+        ⚠ 以前这里做的是**反过来的事**：已设成普通权限的会被"顺手升级"成
+        管理员模式。现在管理员模式会让抓会话不可用，所以那条逻辑整个删了。
+        """
         ns = _load()
         self._fake_autostart(installed=True, elevated=False)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             ns["ask_autostart"]()
-        self.assertIn("已经设过", buf.getvalue())
-        self.assertNotIn("普通权限", buf.getvalue())
+        out = buf.getvalue()
+        self.assertIn("已经设过", out)
+        self.assertIn("普通权限", out, "要说清现在是普通权限（一切正常）")
 
 
 class TestUninstall(unittest.TestCase):
@@ -430,23 +511,53 @@ class TestPythonVersionGuard(unittest.TestCase):
         self.assertEqual(ns["check_python"](), 0,
                          f"本机 {ns['python_version']()} 应该被认作可用")
 
-    def test_min_version_is_3_9(self):
+    def test_min_version_is_3_8(self):
+        """底线是 **3.8** —— 不是"随便多旧都行"，也不是 3.9。
+
+        为什么必须是 3.8：**Windows 7 只能装到 3.8.10**。3.9 起 CPython 用了
+        `api-ms-win-core-path-l1-1.0.dll`，Win7 上没有这个 DLL，安装包直接起不来
+        （bugs.python.org/issue40740）。门店还有 Win7 老电脑，卡在 3.9 就等于
+        把那台机器判死刑。
+
+        为什么要有一条测试钉这个数：门槛降下来之后很容易被"顺手"提回去
+        （"都 2026 年了谁还用 3.8"）—— 一提回去 Win7 那台就静默失效。
+        """
         ns = _load()
-        self.assertEqual(tuple(ns["MIN_PYTHON"]), (3, 9))
+        self.assertEqual(tuple(ns["MIN_PYTHON"]), (3, 8))
 
     def test_too_old_is_rejected_with_a_next_step(self):
         ns = _load()
         # sys.version_info 是真 namedtuple（能切片、能取属性）—— 假的也要像
-        vi = collections.namedtuple("version_info", "major minor micro")(3, 8, 10)
+        vi = collections.namedtuple("version_info", "major minor micro")(3, 7, 9)
         ns["sys"] = types.SimpleNamespace(version_info=vi, executable="python")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = ns["check_python"]()
         out = buf.getvalue()
         self.assertEqual(code, 2)
-        self.assertIn("3.8.10", out, "要说出用户现在是几")
-        self.assertIn("3.9", out, "要说出需要几")
+        self.assertIn("3.7.9", out, "要说出用户现在是几")
+        self.assertIn("3.8", out, "要说出需要几")
         self.assertIn("PATH", out, "要给出能照着做的下一步")
+
+    def test_win7_gets_the_only_python_that_works_there(self):
+        """Win7 上**只有 3.8.10 一个选择**，不能叫人家去装最新版。
+
+        ⚠ 这是踩过的：原来一律叫人装 3.14，而 Win7 上 3.9 以上根本装不上 ——
+        门店照着做会卡在安装包报错上，然后就没有下文了。
+        """
+        ns = _load()
+        ns["is_win7"] = lambda: True
+        out = ns["needs_python_help"]()
+        self.assertIn("3.8.10", out, "Win7 必须点名 3.8.10")
+        self.assertIn("python-3810", out, "要给 3.8.10 的下载页")
+        self.assertNotIn("3.14", out, "Win7 上装不了 3.14，别给错地址")
+
+    def test_non_win7_gets_the_latest(self):
+        ns = _load()
+        ns["is_win7"] = lambda: False
+        out = ns["needs_python_help"]()
+        self.assertIn("3.9", out)
+        self.assertNotIn("python-3810", out, "别的系统不用去下 3.8.10")
 
     def test_main_refuses_to_run_anything_on_an_old_python(self):
         ns = _load()
@@ -467,6 +578,469 @@ class TestPythonVersionGuard(unittest.TestCase):
         self.assertRegex(ns["python_version"](), r"^\d+\.\d+\.\d+$")
 
 
+class TestEnsureLayout(unittest.TestCase):
+    """运行时目录**不进包**，由 `ensure_layout()` 按需生成。
+
+    ⚠ 为什么不进包：`.secrets/`（云商账号）、`out/`（历史报告）、
+    `config/store-*.yaml`（门店配置）都是**这台电脑自己的东西**。
+    以前包里带着空模板（甚至某家店的真实配置），后果是**手工把新包拷到已有安装上
+    会把门店的设置冲掉** —— 每次拷贝都得记着「跳过这三个目录」，迟早出错。
+    现在包里一个都不带，整个目录直接覆盖就是安全的。
+
+    ⚠ 而生成时必须**只补缺的**：`erp.env` 里是账号密码，盖掉等于把门店账号抹了。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.dir.name)
+        # 模板是生成门店配置的来源，必须放进去
+        (self.root / "src").mkdir()
+        (self.root / "src" / "store-config.default.yaml").write_text(
+            (pathlib.Path(__file__).resolve().parent.parent
+             / "src" / "store-config.default.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def _ns(self):
+        ns = _load()
+        ns["ROOT"] = self.root
+        # `_load()` 默认把它换成了空操作（见那里的说明）—— 这个类要测真的
+        ns["ensure_layout"] = ns["_real_ensure_layout"]
+        return ns
+
+    def test_creates_the_three(self):
+        self._ns()["ensure_layout"]()
+        self.assertTrue((self.root / ".secrets").is_dir())
+        self.assertTrue((self.root / "out").is_dir())
+        self.assertTrue((self.root / ".secrets" / "erp.env").is_file())
+        self.assertTrue((self.root / ".secrets" / "README.txt").is_file())
+        self.assertTrue((self.root / "out" / "README.txt").is_file())
+        self.assertTrue((self.root / "config" / "store-SCN231409.yaml").is_file())
+
+    def test_never_overwrites_credentials(self):
+        """⚠ 这是最要命的一条：`erp.env` 里是云商账号密码。"""
+        (self.root / ".secrets").mkdir()
+        (self.root / ".secrets" / "erp.env").write_text("ERP_PASSWORD=真密码\n",
+                                                         encoding="utf-8")
+        self._ns()["ensure_layout"]()
+        self.assertIn("真密码", (self.root / ".secrets" / "erp.env").read_text(
+            encoding="utf-8"))
+
+    def test_never_overwrites_the_store_config(self):
+        (self.root / "config").mkdir()
+        (self.root / "config" / "store-SCN231409.yaml").write_text(
+            "store_code: 我的店\n", encoding="utf-8")
+        self._ns()["ensure_layout"]()
+        self.assertIn("我的店", (self.root / "config" / "store-SCN231409.yaml")
+                      .read_text(encoding="utf-8"))
+
+    def test_renamed_config_counts_as_present(self):
+        """门店可能把配置改名成自己店的编码（界面上能改）——
+
+        这时**不该**再补一个默认文件：多出一份没用的配置，还容易看错。
+        """
+        (self.root / "config").mkdir()
+        (self.root / "config" / "store-OTHER001.yaml").write_text(
+            "store_code: OTHER001\n", encoding="utf-8")
+        self._ns()["ensure_layout"]()
+        self.assertFalse((self.root / "config" / "store-SCN231409.yaml").exists(),
+                         "已有门店配置就不该再补默认的")
+
+    def test_missing_template_does_not_crash(self):
+        """模板没了也只是打一行 —— 这是启动路径，绝不能抛。"""
+        ((self.root / "src") / "store-config.default.yaml").unlink()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._ns()["ensure_layout"]()
+        self.assertIn("门店配置要自己建", buf.getvalue(),
+                      "模板没了要打一行说明，而且不能抛")
+
+    def test_uninstall_does_not_recreate_dirs(self):
+        """⚠ 卸载**不能**补目录 —— 用户正要删东西，我们却又建回来，很荒唐。"""
+        ns = self._ns()
+        ns["ensure_layout"] = lambda: done.append(1)
+        done = []
+        ns["do_uninstall"] = lambda yes=False, purge=False: 0
+        self._call(ns, ["uninstall", "--yes"])
+        self.assertEqual(done, [], "卸载路径不许补运行时目录")
+
+    def _call(self, ns, argv):
+        old = sys.argv
+        sys.argv = ["bootstrap.py", *argv]
+        try:
+            return ns["main"]()
+        finally:
+            sys.argv = old
+
+
+class TestConfigTemplate(unittest.TestCase):
+    """发出去的门店配置模板 —— 它决定新装的机器**开箱是什么状态**。"""
+
+    TEMPLATE = pathlib.Path(__file__).resolve().parent.parent / "src" / "store-config.default.yaml"
+
+    def _cfg(self):
+        import yaml
+        return yaml.safe_load(self.TEMPLATE.read_text(encoding="utf-8"))
+
+    def test_three_fields_are_empty(self):
+        """⚠ **三行必须是空的。**
+
+        以前发的是**某一家店的真实配置**，别的店装上忘了改就会拿别家账来对，
+        而且看起来一切正常、不报错 —— 这是这个项目最怕的失败模式。
+        """
+        cfg = self._cfg()
+        for k in ("store_code", "marker", "erp_store_name"):
+            self.assertIn(k, cfg)
+            self.assertEqual(cfg[k], "", f"模板里的 {k} 必须是空的")
+
+    def test_no_hardcoded_session_filename(self):
+        """会话文件名让代码按 store_code 推 —— 写死的话改了门店还是旧文件名。"""
+        self.assertNotIn("file", self._cfg().get("session") or {})
+
+    def test_has_every_key_the_app_edits(self):
+        """模板里必须有界面能编辑的**每一个**键，否则新机器一打开就是空的。"""
+        from src import config_io
+        cfg = self._cfg()
+        missing = []
+        for key in config_io.EDITABLE:
+            node = cfg
+            for part in key.split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+            if node is None:
+                missing.append(key)
+        self.assertEqual(missing, [], f"模板缺这些键：{missing}")
+
+    def test_check_defaults_are_zero(self):
+        cfg = self._cfg()
+        self.assertEqual(cfg["check"]["lookback_days"], 0)
+        self.assertEqual(cfg["check"]["report_lookahead_days"], 0)
+
+
+class TestLeftoverTaskHelp(unittest.TestCase):
+    """⚠ 旧提权任务删不掉时，提示必须**说到不可能被忽略**，而且要能照着做。
+
+    实测就是这么坑了一轮：那条任务留着 → 每次登录还是以管理员拉起服务 →
+    「自动抓华为会话」一直坏着、界面却写"普通权限"、连定时任务也建不了。
+    三条症状一个原因，而原来的提示只混在成功消息里一句带过，用户没当回事。
+    """
+
+    def test_task_name_matches_the_real_one(self):
+        """提示里拼进删除命令的那个名字，必须和 `autostart` 里的**同一个**。
+
+        硬写两处迟早对不上 —— 改了一处，另一处就成了"删一个不存在的任务"，
+        而用户会以为已经清干净了。
+        """
+        from src import autostart
+        ns = _load()
+        self.assertEqual(ns["AUTOSTART_TASK_NAME"], autostart.AUTOSTART_TASK)
+
+    def test_help_contains_a_pasteable_command(self):
+        ns = _load()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ns["print_leftover_task_help"]()
+        out = buf.getvalue()
+        self.assertIn("schtasks /delete /tn", out, "要给能直接粘的命令")
+        self.assertIn(ns["AUTOSTART_TASK_NAME"], out)
+        self.assertIn("以管理员身份运行", out, "要说清得用管理员命令行")
+        self.assertIn("start.bat", out, "要说清改完怎么重启")
+
+
+class TestScheduleInstallSubcommand(unittest.TestCase):
+    """`schedule-install` 存在的唯一理由：**能提权重跑一次**。
+
+    那条定时任务以前可能是管理员身份的服务建的，普通权限覆盖不了
+    （`schtasks ... /f` 拒绝访问）。所以界面失败时用它弹一次 UAC 重试。
+    """
+
+    def setUp(self):
+        self.ns = _load()
+        import src as src_pkg
+        self.src_pkg = src_pkg
+        self.orig = getattr(src_pkg, "schedule", None)
+
+    def tearDown(self):
+        # ⚠ 两边都要还原：`from src import schedule` 走的是**包属性**，
+        #   光清 sys.modules 不够 —— 别的测试会拿到我这个假模块。
+        if self.orig is not None:
+            self.src_pkg.schedule = self.orig
+        elif hasattr(self.src_pkg, "schedule"):
+            del self.src_pkg.schedule
+        sys.modules.pop("src.schedule", None)
+
+    def _fake(self, result):
+        """⚠ 两边都要塞：`from src import schedule` 走的是**包属性**，
+        不只是 sys.modules —— 只塞 sys.modules 的话假模块根本不会被用到，
+        测试会跑到真的 `schtasks` 上去（这里真踩了一次，而且是
+        "单跑绿、全量跑红"那种最难查的样子）。"""
+        import types as _t
+        fake = _t.ModuleType("src.schedule")
+        fake.DEFAULT_TIME = "21:00"
+        fake.DEFAULT_DAYS_AGO = 1
+
+        def _install(root, time_str, days_ago, config, name=None):
+            self.seen = dict(time=time_str, days=days_ago, config=config, name=name)
+            return result
+
+        fake.install = _install
+        sys.modules["src.schedule"] = fake
+        self.src_pkg.schedule = fake
+
+    def test_is_stdlib_only(self):
+        """它可能在依赖没装好的状态下被提权调起 —— 不能先去 import 第三方包。"""
+        self.assertIn("schedule-install", self.ns["STDLIB_ONLY"])
+
+    def test_parses_options(self):
+        self._fake({"ok": True, "message": "已注册"})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.ns["do_schedule_install"](
+                ["schedule-install", "--time", "20:30", "--days-ago", "2",
+                 "--config", "config/store-X.yaml", "--name", "我的任务"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.seen["time"], "20:30")
+        self.assertEqual(self.seen["days"], 2)
+        self.assertEqual(self.seen["config"], "config/store-X.yaml")
+        self.assertEqual(self.seen["name"], "我的任务")
+
+    def test_defaults_when_no_options_given(self):
+        self._fake({"ok": True, "message": "已注册"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.ns["do_schedule_install"](["schedule-install"])
+        self.assertEqual(self.seen["days"], 1)
+
+    def test_failure_prints_the_manual_command(self):
+        """失败要给一条能拿管理员权限直接粘的命令当退路。"""
+        self._fake({"ok": False, "message": "拒绝访问",
+                    "manual": "schtasks /create ..."})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.ns["do_schedule_install"](["schedule-install"])
+        self.assertEqual(code, 2)
+        self.assertIn("schtasks /create", buf.getvalue())
+
+
+class TestElevateArgvReachesBootstrap(unittest.TestCase):
+    """⚠ **两边的接口**：`/api/elevate` 拼出来的命令行，得被 bootstrap 正确读走。
+
+    提权是"另起一个进程"，参数**只走命令行** —— 两边靠字符串约定，
+    而这个约定**没有任何类型检查兜着**：一边写 `--days-ago`、另一边读 `--days`，
+    各自单测都是绿的，合起来就是**静默用默认值**（用户改了时间、注册出来还是 21:00）。
+    所以这里让 web.py **真的拼一遍**，再把拼出来的 argv 喂给 bootstrap 读。
+    """
+
+    def test_flags_round_trip_through_the_real_command_line(self):
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT))
+        from tests.test_web import _Server              # noqa: E402
+        from src import web as _web                     # noqa: E402
+        from unittest import mock as _mock              # noqa: E402
+        import tempfile as _tf
+
+        tmp = _tf.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        srv = _Server(pathlib.Path(tmp.name))
+        self.addCleanup(srv.close)
+
+        seen = {}
+
+        def runner(script, args, timeout=90):
+            seen["args"] = list(args)
+            return {"ok": True, "message": "已注册"}
+
+        with _mock.patch.object(_web.elevate, "run_elevated", runner), \
+                _mock.patch.object(_web.elevate, "is_admin", lambda: False), \
+                _mock.patch.object(_web.schedule, "status",
+                                   lambda root: {"installed": False, "tasks": []}):
+            srv.request("POST", "/api/elevate",
+                        {"what": "schedule", "time": "20:30", "days_ago": 3,
+                         "name": "CBG报量对账-20点30"})
+
+        argv = seen["args"]
+        self.assertEqual(argv[0], "schedule-install")
+
+        ns = _load()
+        fake = types.ModuleType("src.schedule")
+        fake.DEFAULT_TIME = "21:00"
+        fake.DEFAULT_DAYS_AGO = 1
+        fake.install = lambda root, time_str, days_ago, config, name=None: (
+            seen.update(got_time=time_str, got_days=days_ago, got_name=name)
+            or {"ok": True, "message": "已注册"})
+        sys.modules["src.schedule"] = fake
+        self.addCleanup(lambda: sys.modules.pop("src.schedule", None))
+        # ⚠ 只塞 sys.modules 不够 —— `from src import schedule` 走的是**包属性**，
+        #   两个都要换（这个坑本项目踩过，见上面 `_fake` 的注释）
+        import src as _srcpkg
+        old_attr = getattr(_srcpkg, "schedule", None)
+        _srcpkg.schedule = fake
+        self.addCleanup(lambda: setattr(_srcpkg, "schedule", old_attr))
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = ns["do_schedule_install"](argv)
+        self.assertEqual(code, 0)
+        # ⚠ 这三条才是重点：用户在界面上填的值，真的走到了注册那一步
+        self.assertEqual(seen.get("got_time"), "20:30", "时间丢在命令行上了")
+        self.assertEqual(seen.get("got_days"), 3, "天数丢在命令行上了")
+        self.assertEqual(seen.get("got_name"), "CBG报量对账-20点30", "任务名丢了")
+
+
+class TestResultFile(unittest.TestCase):
+    """提权子进程靠这个文件把结果回传给父进程 —— 写不成**不能反过来报错**。"""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_writes_json(self):
+        ns = _load()
+        p = pathlib.Path(self.dir.name) / "r.json"
+        ns["_write_result"](str(p), {"ok": True, "message": "好了"})
+        self.assertEqual(json.loads(p.read_text(encoding="utf-8"))["message"], "好了")
+
+    def test_empty_path_is_a_noop(self):
+        ns = _load()
+        ns["_write_result"]("", {"ok": True})      # 不该抛
+
+    def test_bad_path_does_not_raise(self):
+        """写不进去最多是"界面看不到结果"，不该让**已经做成的操作**报错。"""
+        ns = _load()
+        ns["_write_result"]("/definitely/not/a/dir/x.json", {"ok": True})
+
+    def test_main_strips_result_file_from_argv(self):
+        """⚠ `--result-file <路径>` 必须像 `--pause` 一样先摘掉。
+
+        摘漏了的话它会被当成子命令参数传下去 —— 路径一长就出各种怪问题，
+        而真正的原因是"路由把参数吃错了"。
+        """
+        ns = _load()
+        seen = {}
+        ns["do_autostart"] = lambda elevated=False, result_file="": \
+            seen.update(elevated=elevated, result_file=result_file) or 0
+        self._call(ns, ["autostart", "--result-file", "/tmp/x.json"])
+        self.assertEqual(seen.get("result_file"), "/tmp/x.json")
+
+    def _call(self, ns, argv):
+        old = sys.argv
+        sys.argv = ["bootstrap.py", *argv]
+        try:
+            return ns["main"]()
+        finally:
+            sys.argv = old
+
+
+class TestServicePanelHasNoPrivilegeChoice(unittest.TestCase):
+    """后台服务面板**不许再出现「启动方式」下拉**。
+
+    ⚠ 那个下拉是个**死选项**：选「以管理员身份」只是让当前这个（普通权限的）
+    进程去执行 `schtasks /create ... /rl HIGHEST`，**必然失败**，
+    而且**永远不会弹 UAC** —— 那条路上根本没有提权代码。
+    实测就是这么被卡住的：用户选了、保存了、什么都没发生，
+    然后开始怀疑"是不是没管理员权限所以不行"。
+
+    而且**就算成功了也是坏的**：服务以管理员跑 → 它拉起的 Edge / Chrome 也是
+    管理员 → 浏览器拒绝以管理员运行 →「自动抓会话」必坏。
+
+    真需要管理员的两件事（删旧的提权任务、建定时任务）走**按需提权**，
+    只在那一下弹一次 UAC（`src/elevate.py`）。
+    """
+
+    def test_no_privilege_dropdown(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn('id="svc-mode"', html,
+                         "别把「启动方式」下拉加回来 —— 它永远弹不出 UAC")
+
+    def test_frontend_never_asks_for_elevated(self):
+        """前端**永远不许**带 `elevated` 去注册开机自启。
+
+        ⚠ 用词边界匹配，别用 `assertNotIn("elevated")` —— 接口返回里有个字段叫
+        `self_elevated`（读它是**对的**，那是显示服务当前权限用的），
+        子串断言会把它一起判违规，然后你得去解释为什么"读"和"写"不一样。
+        `\belevated\b` 不会匹配 `self_elevated`（`_` 算单词字符）。
+        """
+        import re
+        code = _js_code()
+        self.assertNotIn("svc-mode", code)
+        self.assertIsNone(re.search(r"\belevated\b", code),
+                          "前端不该再往 /api/autostart 传 elevated")
+        self.assertIn("self_elevated", code, "但**读**它是对的，别一起删了")
+
+    def test_save_only_sends_enabled(self):
+        """保存开机自启时**只发 enabled** —— 让后端用它的默认（普通权限）。"""
+        self.assertIn("body: { enabled }", _js_code())
+
+    def test_app_js_does_not_claim_capture_still_works(self):
+        """⚠ 那句「自动抓会话不受影响」是**错的**，别再写回去。
+
+        真踩过：界面上写着"不受影响"，用户就照着这句话排除了权限这条线，
+        去试 profile、试沙箱，白折腾一轮。实际是**必坏**。
+        """
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        # ⚠ 先把 `//` 行注释剥掉再查 —— 不然**解释这条规则的注释本身**会被判违规
+        #   （真踩了：这条测试第一次跑就红在"别再说 X"那行注释上）。
+        code = "\n".join(ln.split("//", 1)[0] for ln in js.splitlines())
+        self.assertNotIn("自动抓会话不受影响", code)
+        self.assertNotIn("自动抓会话可能不稳定", code, "别用「可能」淡化它")
+
+    def test_repair_button_still_exists_for_legacy_machines(self):
+        """老机器上可能还留着提权任务 —— 那个「以管理员身份修复」按钮要留着。"""
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="btn-svc-repair"', html)
+        self.assertIn("/api/elevate", js)
+
+
+class TestInstallRecordsTheInterpreter(unittest.TestCase):
+    """安装成功时要把"这次用的解释器"记下来（`.secrets/python.txt`）。
+
+    少了这一步，几个 `.bat` 下次双击还是去 PATH 上碰运气 ——
+    而 PATH 上排第一的那个未必是装过依赖的那个。
+    """
+
+    def _ns(self, missing=(), returncode=0):
+        ns = _load()
+        ns["missing"] = lambda: list(missing)
+        ns["write_build_stamp"] = lambda: None
+        ns["subprocess"] = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=returncode))
+        return ns
+
+    def _run(self, ns):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            return ns["do_install"](), buf.getvalue()
+
+    def test_success_records_it(self):
+        ns = self._ns()
+        called = []
+        ns["record_runtime"] = lambda: called.append(1)
+        code, _ = self._run(ns)
+        self.assertEqual(code, 0)
+        self.assertEqual(called, [1], "装成功了就要把解释器记下来")
+
+    def test_pip_failure_does_not_record(self):
+        """装失败就别记 —— 记了等于把一个"装不上依赖的 Python"钉成以后要用的那个，
+        而且从"能退回探测"变成"每次都拉错的那个"。"""
+        ns = self._ns(returncode=1)
+        called = []
+        ns["record_runtime"] = lambda: called.append(1)
+        code, _ = self._run(ns)
+        self.assertEqual(code, 2)
+        self.assertEqual(called, [], "装失败了不该记")
+
+    def test_still_missing_after_install_does_not_record(self):
+        ns = self._ns(missing=("requests",))
+        called = []
+        ns["record_runtime"] = lambda: called.append(1)
+        code, _ = self._run(ns)
+        self.assertEqual(code, 2)
+        self.assertEqual(called, [],
+                         "装完还找不到依赖 = 装到别的环境去了，这时候记下来只会更乱")
+
+
 class TestNoForwardIncompatibleSyntax(unittest.TestCase):
     """别写"现在只是警告、以后会变成错误"的语法。
 
@@ -478,10 +1052,7 @@ class TestNoForwardIncompatibleSyntax(unittest.TestCase):
     def test_no_invalid_escape_sequences(self):
         import warnings
         bad = []
-        for p in sorted(ROOT.rglob("*.py")):
-            if any(x in p.parts for x in (".venv", ".pythons", ".uv-cache",
-                                          "__pycache__", "dist")):
-                continue
+        for p in _scan_files():
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 try:
@@ -507,10 +1078,7 @@ class TestNoForwardIncompatibleSyntax(unittest.TestCase):
         hits = []
         # ⚠ 连 tests/ 一起扫 —— 我自己就在测试里写下过 write_text(newline=)，
         #   而当时这个守卫只看 src/，是 3.9 上的 TypeError 才把它暴露出来的。
-        files = [p for p in ROOT.rglob("*.py")
-                 if not any(x in p.parts for x in
-                            (".venv", ".pythons", ".uv-cache", "__pycache__", "dist"))]
-        for p in sorted(files):
+        for p in _scan_files():
             tree = ast.parse(p.read_text(encoding="utf-8"), str(p))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -609,6 +1177,47 @@ class TestBatsArePureAscii(unittest.TestCase):
                 self.assertNotIn("\npython bootstrap.py", src,
                                  "还有地方硬写 python，会绕过探测")
 
+    def test_bats_prefer_the_recorded_interpreter(self):
+        """安装时记下的解释器优先 —— 一台电脑上有两个 Python 时的保命绳。
+
+        Win7 老机器只能装 3.8.10、新机器装 3.14、有的机器还有 Anaconda：
+        依赖是装进**某一个**的，而 bat 每次是重新去 PATH 上找的。
+        找到另一个就报 `No module named 'requests'`，看着像"当初没装成功"。
+        """
+        for name in ("install", "start", "stop", "selftest", "uninstall"):
+            with self.subTest(bat=name):
+                src = (ROOT / f"{name}.bat").read_text(encoding="ascii")
+                self.assertIn(".secrets\\python.txt", src)
+                self.assertIn("set /p PYBIN=", src, "要用 set /p 读那一行")
+                self.assertIn("goto :probepython", src, "没记录/记录坏了要能退回去")
+                self.assertIn(":probepython", src)
+                self.assertIn(":havepython", src)
+
+    def test_bat_pin_read_is_guarded_by_if_exist(self):
+        """⚠ 读记录**必须**包在 `if exist` 里。
+
+        第一次安装时还没有这个文件，而那是**最不能出错**的一步：
+        门店新机器上双击的就是 install.bat。`set /p` 指向不存在的文件会报错。
+        """
+        for name in ("install", "start", "stop", "selftest", "uninstall"):
+            with self.subTest(bat=name):
+                src = (ROOT / f"{name}.bat").read_text(encoding="ascii")
+                self.assertIn('if exist ".secrets\\python.txt" set /p PYBIN=', src)
+
+    def test_bats_do_not_name_a_specific_python_version(self):
+        """别再写死"装 3.14" —— **Win7 上 3.9 以上根本装不上**。
+
+        原文是 `Install Python 3.14 from https://www.python.org/downloads/`，
+        Win7 门店照着做会卡在安装包报错上，然后就没有下文了。
+        （3.9 起 CPython 依赖 api-ms-win-core-path-l1-1.0.dll，Win7 没有。）
+        """
+        for b in sorted(ROOT.glob("*.bat")):
+            with self.subTest(bat=b.name):
+                src = b.read_text(encoding="ascii")
+                self.assertNotIn("Python 3.14", src,
+                                 f"{b.name} 里写死了 3.14 —— Win7 装不了它")
+                self.assertNotIn("Python 3.9", src, f"{b.name} 里写死了版本号")
+
     def test_bats_never_fall_through_into_nopython(self):
         """⚠ 正常跑完**绝不能**穿透进 :nopython 块。
 
@@ -676,9 +1285,15 @@ class TestAutostartPrompt(unittest.TestCase):
     def _fake(self, installed=False, result=None):
         import types
         fake = types.ModuleType("src.autostart")
-        fake.status = lambda root: {"installed": installed, "platform": "TestOS"}
-        fake.install = lambda root: (self.called.setdefault("root", root),
-                                     result or {"ok": True, "message": "已加入开机启动"})[1]
+        fake.status = lambda root: {"installed": installed, "platform": "TestOS",
+                                    "elevated": False}
+        # ⚠ install 现在有第二个参数 `elevated`（默认 None=普通权限）——
+        #   替身必须收下它，否则 `TypeError` 会被当成"注册失败"，测试假过/假挂
+        def _install(root, elevated=None):
+            self.called["root"] = root
+            self.called["elevated"] = elevated
+            return result or {"ok": True, "message": "已加入开机启动"}
+        fake.install = _install
         # ⚠ 两边都要塞：`from src import autostart` 走的是**包属性**，不只是 sys.modules
         sys.modules["src.autostart"] = fake
         self.src_pkg.autostart = fake

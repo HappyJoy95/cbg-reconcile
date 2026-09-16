@@ -2,6 +2,11 @@
 .secrets/
 *.env
 config/store-*.local.yaml
+# 门店自己的配置：**这台电脑的**，不进仓库也不进包。
+# 安装时由 bootstrap.ensure_layout() 从 src/store-config.default.yaml 生成。
+# ⚠ 以前这个文件是跟踪的（拿它当「默认配置」发出去）—— 那会让手工拷贝/装包
+#   把门店已经填好的配置冲掉。现在只发模板。
+config/store-*.yaml
 
 # 运行产物
 out/
@@ -29,3 +34,6 @@ run-now.bat
 
 # macOS
 .DS_Store
+
+# DSH 隔离区：记忆/临时任务/归档/备份/文档，在库里但不进版本库
+.dsh/

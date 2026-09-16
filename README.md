@@ -263,7 +263,12 @@ python3 -m src.cli serve --no-open    # 别自动开浏览器
 `install.bat` 到底替你做了什么，以及它在某台机器上跑不起来时怎么手工接着做。
 
 ### 1. 装 Python
-装 **Python 3.14**（勾选 *Add to PATH*）。
+装 **Python 3.9 以上**（开发机 3.9、门店实测 3.14，勾选 *Add to PATH*）。
+
+> **Windows 7 只能用 3.8.10**：3.9 起 CPython 依赖 `api-ms-win-core-path-l1-1-0.dll`，
+> Win7 上没有这个 DLL，安装包直接起不来（bugs.python.org/issue40740）。
+> 3.8.10 是**最后一个支持 Win7 的版本**：
+> <https://www.python.org/downloads/release/python-3810/>
 
 > `install.bat` 会自己 `pip install -r requirements.txt`，**不用**手工装依赖。
 > 手工装是这一条：`pip install requests pyyaml openpyxl`。
@@ -447,7 +452,11 @@ schtasks /create /tn "CBG报量对账" /sc daily /st 21:00 /tr "D:\cbg-reconcile
 | 6 | **`inventory --mode imei --excel` 静默返回空** | 2026-09-15 实测：导出 23,593 行**全是空行**（XML 里 `<row r="2" />` 无单元格）；`--mode store-now` 正常（26,015 行）。本项目不依赖它，但别的地方别用 |
 | 7 | **xlsx 的 `dimension` 不可信** | 同上，读 xlsx 要直接遍历 `<row>`，`src/xlsx_io.py` 已经这么做 |
 | 8 | **串号标识顺序不固定** | 见过 `W,新` 也见过 `新,Y` → 必须按逗号拆开逐个比，别用 `startswith` |
-| 9 | **两头的 Python 版本都要照顾** | **门店装 3.14，开发机是 3.9** —— 所以代码按"3.9+ 都能跑"写，两头都实测过。`Path.write_text(newline=...)` 是 3.10+、`zip(strict=)` 是 3.10+，用了开发机上测试就炸。`bootstrap.py` 有 `MIN_PYTHON` 守卫，版本太旧会直接说清楚"你现在是几、要装几" |
+| 9 | **三个 Python 版本都要照顾** | **门店 Win7 老机器只能 3.8.10**（3.9 以上不支持 Win7）、开发机 3.9、门店新机器 3.14 —— 所以代码按"**3.8+** 都能跑"写，三头都实测过（3.8.20 / 3.9.25 / 3.14，各 708 条全绿）。`Path.write_text(newline=...)` 是 3.10+、`zip(strict=)` 是 3.10+，`list[str]` 这种内置泛型下标是 3.9+，用了旧解释器上就炸。`bootstrap.py` 有 `MIN_PYTHON = (3, 8)` 守卫 |
+| 9c | **给用户指版本号要按系统给，别一律说"装最新版"** | 原先四个 `.bat` 和 `bootstrap.py` 都写死"装 Python 3.14"，而 **Win7 上 3.9 以上根本装不上** —— 门店照着做会卡在安装包报错上，然后就没有下文了。现在 `bootstrap.py` 的 `needs_python_help()` 会看 `is_win7()` 分开说，bat 里的 `FIX` 段则不再点名具体版本（bat 是纯 ASCII 的，判断不了系统） |
+| 9d | **`from __future__ import annotations` 在这项目里是功能，不是风格** | `bootstrap.py` 里 `def missing() -> list[str]` 是 PEP 585（3.9+）。没有那行 future import 时，注解在 `def` 那一刻求值 → **3.8 上 import 本文件直接 `TypeError`**，而 `check_python()` 那句"版本太旧，请装 X"根本来不及打印。也就是说**那段友好提示在任何能触发它的解释器上都到不了** —— 3.8 及以下全都会先炸在这一行。测试抓不到（测试跑在 3.9+ 上，那时 `list[str]` 求值正常），是靠真装了个 3.8 才发现的 |
+| 9f | **别让服务以管理员身份跑 —— 它会把「自动抓会话」弄坏** | 服务是管理员 → 它拉起的 Edge / Chrome 也是管理员 → 浏览器（Chrome 138 起）**拒绝以管理员运行**：进程把命令行交棒出去就自己退 0，`--user-data-dir` / `--remote-debugging-port` 落不到活着的实例上，调试端口永远没人监听。实测报「Edge 启动后立刻退出（退出码 0）」，**链接还跑到了用户原来那个浏览器里**。所以 2026-09-16 起**默认改成普通权限**：开机自启写 `HKCU\...\Run`（任何用户都能写，一次 UAC 都不弹），装机那一次 UAC 取消了。`_win_install(elevated=None)` **不许再猜当前进程**（以前是 `is_elevated()`，从提权进程里调就静默注册成管理员模式） |
+| 9e | **一台电脑上可能有两个 Python：装到 A、却用 B 启动** | 依赖装进 `install.bat` 当时探测到的那个 Python，而 `start.bat` 每次是重新去 PATH 上找的 —— 找到另一个就报 `ModuleNotFoundError: No module named 'requests'`，看着像"当初没装成功"。现在安装成功时把解释器写进 `.secrets/python.txt`（**带引号**一行 + 版本号一行），五个 `.bat` 用 `set /p` 读它、`src/runtime.py` 给 `autostart` / `schedule` / `cli` 读它。放 `.secrets/` 是因为它属于 `selfupdate.NEVER_TOUCH`，**升级不会冲掉**。记录里的路径没了就自动退回探测 PATH |
 | 9b | **别写"现在只是警告、以后会变成错误"的语法** | Python 3.14 把非法转义序列从 `DeprecationWarning` 升级成了 `SyntaxWarning`，并明说 *"Such sequences will not work in the future"*。真变成 `SyntaxError` 的那天，门店双击 bat 会**直接起不来**。`tests/test_bootstrap.py` 里有一条测试扫全项目（3.9 查 DeprecationWarning、3.13+ 查 SyntaxWarning，两个都要查，否则开发机上这条等于没写） |
 | 10 | **未登录时 cbg 也发 `JSESSIONID`** | 所以"cookie 名字齐了"不能当登录判据，只能靠 `ping` 自检。抓 cookie 时**必须验证通过才落盘**，否则一次失败的续期会覆盖掉还能用的会话 |
 | 11 | **别去解密浏览器的 cookie 数据库** | Chrome 127+ 有 App-Bound 加密，版本一升就废。走 CDP 让我们自己的浏览器把 cookie 交出来 |

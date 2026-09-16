@@ -21,8 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (autostart, browser, config_io, mailer, schedule, selfupdate,
-               service, version, wecom)
+from . import (autostart, browser, config_io, elevate, mailer, schedule,
+               selfupdate, service, version, wecom)
 from .cbg import CbgClient, CbgError
 from .erp import (DEFAULT_ENV_FILE, ErpCaptchaRequired, ErpClient, ErpError,
                   describe_credentials, load_credentials, save_credentials)
@@ -111,11 +111,19 @@ def _capture_worker(app: "App", headless: bool):
         cfg = config_io.load_raw(app.config_path)
         store = cfg.get("store_code") or None
 
-        def verify(sess) -> bool:
+        def verify(sess):
+            """⚠ 返回 `(过没过, 为什么)`，**别只返回 bool**。
+
+            `ping()` 的第二个返回值里写着真正的病因
+            （"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"），
+            老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
+            实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
+            """
             try:
-                return CbgClient(sess, store_code=store, timeout=25).ping()[0]
-            except (CbgAuthError, CbgError):
-                return False
+                ok, why = CbgClient(sess, store_code=store, timeout=25).ping()
+                return ok, why
+            except (CbgAuthError, CbgError) as e:
+                return False, f"{type(e).__name__}: {e}"
 
         profile = browser.profile_path(cfg, app.root)
         found = browser.find_browser(cfg)
@@ -708,7 +716,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/autostart" and method == "POST":
             body = self._read_json()
             # elevated：显式指定"以管理员身份"还是"普通权限"。
-            # 不传（老前端）就按当前进程是不是管理员来猜。
+            # ⚠ **不传就是普通权限**（`autostart.install(elevated=None)`）。
+            #   这里以前是"不传就按当前进程是不是管理员来猜" —— 从提权进程里调
+            #   就会静默注册成管理员模式，而管理员模式会让自动抓会话不可用。
             want_elevated = body.get("elevated")
             if want_elevated is not None:
                 want_elevated = bool(want_elevated)
@@ -716,6 +726,86 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("enabled", True) is not False else autostart.remove()
             res["autostart"] = autostart.status(app.root)
             return self._json(res)      # 业务失败也是 200：请求处理成功了，只是操作没成
+
+        # ---- 按需提权：**只把这一步**提权重做一遍
+        #
+        # ⚠ 为什么需要：有两件事**只有管理员能做**，而它们都是"一次性清理/注册"：
+        #   1. 删掉**老版本留下的**那条提权计划任务（普通权限删不掉，留着的话
+        #      每次登录还是以管理员拉起服务 → 自动抓会话永远坏着）；
+        #   2. 覆盖一条**由管理员创建过**的定时任务。
+        #   逼用户"右键 install.bat 以管理员身份运行"是错的 ——
+        #   那会把 pip install 也一起提权跑掉（见 bootstrap.py 里的说明）。
+        #   所以这里只弹一次 UAC，把**那一个子命令**提权重跑。
+        #
+        # 返回：`{"ok":..., "message":...}`。拿不到提权子进程的结果（用户点了"否"、
+        # 超时）→ `elevated: None`，让界面告诉用户"要么没点「是」，要么超时了"。
+        if path == "/api/elevate" and method == "POST":
+            body = self._read_json()
+            what = (body.get("what") or "").strip()
+            if what == "autostart":
+                # 提权跑 `bootstrap.py autostart`：普通权限那条（注册表 Run 项）
+                # 会重新注册一遍，顺带把删不掉的旧提权任务删掉。
+                args = ["autostart"]
+            elif what in ("schedule", "schedule-remove"):
+                # ⚠ **这是"环境不允许"的兜底，不是首选路。**
+                #
+                # 首选是 `/api/schedule` POST —— **普通权限**注册。建出来的任务归当前用户，
+                # 以后读 / 改 / 删都不需要管理员。绝大多数机器到那一步就成了，
+                # **一次 UAC 都不弹**。只有那一步真的失败了才轮到本按钮。
+                #
+                # 失败就两种，而这两种**提权都能解**：
+                #   ① 以前用**管理员身份**建过同名任务 —— 普通权限连 `/f` 都覆盖不了
+                #      （门店实测报的就是 `错误: 拒绝访问。`）；
+                #   ② 那台机器上普通权限**根本建不了**任务 —— 账户被 UAC 过滤、
+                #      或组策略收紧了任务库的权限。
+                # 分不清是哪一种也没关系：两种情况提权都能做成。
+                #
+                # ⚠ 代价得认下来：提权建出来的任务所有者是 `Administrators`，
+                #   **之后普通权限连详情都读不到**（`schtasks /query /tn <名> /xml` 被拒），
+                #   界面上时间和命令会空着 —— 用户的原话是
+                #   「没有管理员权限就看不到定时执行设置了」。
+                #   → 所以**我们自己记一份注册参数**（`.secrets/schedule.json`），
+                #     界面显示走记录，不依赖 Windows 的 ACL 行为。
+                #     见 `schedule._remember` / `_recall` ——
+                #     **那份记录是"提权建任务"能成立的前提**，别绕过它。
+                time_str = str(body.get("time") or schedule.DEFAULT_TIME)
+                days_ago = int(body.get("days_ago", schedule.DEFAULT_DAYS_AGO))
+                # ⚠ 前端的修复按钮手上只有 `full_name`（`\CBG报量对账-21点20`），
+                #   而 `schedule.install` 会拒收带 `\` 的名字（那是防路径注入的）——
+                #   不取叶子名的话这个按钮**必然 400**，表现又是"点了没反应"。
+                name = str(body.get("name") or "").strip().rsplit("\\", 1)[-1]
+                if what == "schedule":
+                    # `/create` 带 `/f`，旧的同名任务（哪怕是管理员建的）一并覆盖掉，
+                    # 不需要先单独删一次
+                    args = ["schedule-install", "--time", time_str,
+                            "--days-ago", str(days_ago),
+                            "--config", str(app.config)]
+                else:
+                    args = ["schedule-remove"]
+                if name:
+                    args += ["--name", name]
+            else:
+                return self._json({"ok": False, "message": f"不认识的提权动作：{what!r}"}, 400)
+
+            if elevate.is_admin():
+                # 服务本身已经是管理员了 —— 不用再弹 UAC，直接跑效果一样，
+                # 但**不能装作是提权成功的**：管理员身份本身就是要修掉的问题。
+                return self._json({
+                    "ok": False, "elevated": None,
+                    "message": "服务现在本身就是以管理员身份在跑，不需要再提权。"
+                               "请先按上面的办法把服务改成普通权限。"})
+            got = elevate.run_elevated(app.root / "bootstrap.py", args, timeout=90)
+            if got is None:
+                return self._json({
+                    "ok": False, "elevated": None,
+                    "message": "没拿到提权窗口的结果 —— 要么你点了 UAC 的「否」，"
+                               "要么窗口还没关（它在等你按回车）。"
+                               "关掉那个窗口再点一次本按钮。"})
+            got["elevated"] = True
+            if what == "autostart":
+                got["autostart"] = autostart.status(app.root)
+            got["status"] = schedule.status(app.root)
+            return self._json(got)
 
         # ---- 自动抓 cookie
         if path == "/api/session/auto" and method == "GET":
@@ -875,7 +965,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/schedule" and method == "DELETE":
             # 按名字删**选中的那一个**；不传名字才退回删默认任务（兼容老前端）
             name = (query.get("name") or [""])[0].strip() or None
-            res = schedule.remove(name)
+            # 传 root：删成功就顺手抹掉我们自己的注册记录，
+            # 否则界面上会"删了还显示时间和命令"
+            res = schedule.remove(name, app.root)
             res["status"] = schedule.status(app.root)
             return self._json(res)      # 业务失败也是 200：请求处理成功了，只是操作没成
 
@@ -1009,9 +1101,11 @@ def serve(port: int = 8787, host: str = "127.0.0.1", open_browser: bool = True,
         print(f"  · 更新检查线程没起来（不影响对账）：{type(e).__name__}: {e}")
 
     # 管理员身份是浏览器自动化的**已知杀手**：Edge / Chrome 拒绝以管理员运行，
-    # 会在跑到一半时把自己降权重启（AutoDeElevate），调试端口随之短暂失灵。
+    # 会把命令行交棒出去然后自己退 0 —— 「自动抓会话」拿不到调试端口，**必坏**。
     #
-    # ⚠ 这件事**只提示、不阻拦** —— 门店那台机器就是管理员身份在跑，必须能用。
+    # ⚠ 从 2026-09-16 起，**正常装出来的服务就是普通权限**（开机自启走注册表 Run 项）。
+    #   所以走到下面这个分支说明这台机器上是**老版本装出来的管理员模式**，
+    #   或者有人手动用了 `autostart --elevated` —— 是异常，要说明白并给解法。
     #   整块包在 try 里，而且**不用 emoji / 特殊符号**：后台服务是 pythonw 起的，
     #   stdout 没有控制台（或被重定向），这时 Python 按 locale 编码（中文 Windows
     #   是 GBK）写输出，`⚠`（U+26A0）这类字符编不出来会抛 UnicodeEncodeError ——
@@ -1019,10 +1113,10 @@ def serve(port: int = 8787, host: str = "127.0.0.1", open_browser: bool = True,
     try:
         if autostart.is_elevated():
             print()
-            print("  提示：现在以管理员身份运行 —— 自动抓会话可能不稳定")
-            print("        （Edge 拒绝以管理员运行，会中途把自己降权重启）")
-            print("        对账本身不受影响。想更稳：到「设置 - 后台服务」把开机自启")
-            print("        改成普通权限，再用普通双击 start.bat 启动。")
+            print("  注意：这个服务是**以管理员身份**在跑。")
+            print("        「自动抓华为会话」会失败（Edge / Chrome 拒绝以管理员运行）。")
+            print("        对账本身不受影响。改法：到「设置 - 后台服务」把「启动方式」")
+            print("        改成「普通权限」保存，然后停掉服务、用普通权限双击 start.bat。")
             print()
     except Exception:                                       # noqa: BLE001
         pass          # 提示打不出来不是问题，**服务起不来才是问题**

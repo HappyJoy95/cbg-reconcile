@@ -751,40 +751,86 @@ async function loadService() {
     : '<span style="color:var(--bad)">未运行</span>';
   const a = d.autostart || {};
   $('#svc-autostart').checked = !!a.installed;
-  if (a.mode) $('#svc-mode').value = (a.mode === 'task') ? 'elevated' : 'normal';
-  // 注册方式分两种，界面上必须说清是哪种 —— 只有"计划任务"那种才是管理员身份
-  const how = a.mode === 'task'
-    ? '<span style="color:var(--ok)">✅ 计划任务（登录触发）· 以管理员身份运行 · 不弹 UAC</span>'
-    : (a.mode === 'runkey'
-        ? '<span style="color:var(--warn)">⚠️ 注册表启动项 · <b>普通权限</b>（不是管理员）</span>'
+  // 注册方式分两种。**普通权限是正常状态**，管理员是要劝退的 ——
+  // 管理员身份会让「自动抓会话」失败（浏览器拒绝以管理员运行），所以那边标黄。
+  const how = a.mode === 'runkey'
+    ? '<span style="color:var(--ok)">✅ 注册表启动项 · 普通权限 · 不需要管理员</span>'
+    : (a.mode === 'task'
+        ? '<span style="color:var(--warn)">⚠️ 计划任务 · <b>以管理员身份运行</b>（会让「自动抓会话」失败）</span>'
         : '');
   $('#svc-detail').innerHTML =
     (a.installed ? `注册方式：${how}<br>开机命令：<span class="mono">${esc(a.registered || a.command || '')}</span>` : '') +
-    (a.installed && a.mode === 'runkey'
-      ? '<br><span class="hint">改成管理员身份：右键 <code>install.bat</code> →「以管理员身份运行」，'
-        + '或在管理员命令行里跑 <code>python bootstrap.py autostart</code>。'
-        + '<br>（注册"以管理员身份启动"这一步<b>必须</b>有管理员权限 —— 这是 Windows 的安全边界）</span>'
+    // ⚠ 这里以前写的是"改成管理员身份：右键 install.bat 以管理员身份运行" ——
+    //   **方向反了**。管理员身份不是升级，是会把抓会话弄坏的降级。
+    (a.installed && a.mode === 'task'
+      ? '<br><span class="hint">建议改回<b>普通权限</b>：把上面那个「启动方式」选成「普通权限」，'
+        + '点「保存」，然后停掉服务、用普通权限双击 <code>start.bat</code>。'
+        + '<br>（对账本身不受影响；普通权限完全够用）'
+        + '<br>⚠️ 如果「保存」之后提示"旧的提权任务没删掉"，'
+        + '就右键 <code>install.bat</code> →「以管理员身份运行」再操作一次 —— '
+        + '删那条任务需要管理员权限。</span>'
       : '') +
     (a.stale ? '<br><span style="color:var(--warn)">⚠️ 注册的还是老路径（项目挪过位置？）—— 重新保存一次</span>' : '') +
     (a.boot_script_exists ? '' : '<br><span style="color:var(--bad)">⚠️ 缺少 boot.py，没法注册开机自启</span>') +
-    (d.this_pid && a.self_elevated === false && a.mode === 'task'
-      ? '<br><span class="hint">当前这个进程不是管理员（可能你是双击 start.bat 起来的）——'
-        + ' 不影响开机自启，下次登录走的是计划任务那条路，会是管理员。</span>'
-      : '') +
-    // 服务是管理员时，Chrome/Edge 会**把自己降权重启**（AutoDeElevate，Chrome 138+）。
-    // 抓取本身没问题（我们靠调试端口判断死活），但浏览器里可能弹一个询问框。
+    // ⚠ 别再说"自动抓会话不受影响" —— 那是错的。服务以管理员跑时，
+    //   Edge / Chrome 拒绝以管理员运行：进程把命令行交棒出去就自己退 0，
+    //   我们给的 --user-data-dir / --remote-debugging-port 落不到活着的实例上，
+    //   调试端口永远没人监听。实测报错就是「Edge 启动后立刻退出（退出码 0）」，
+    //   而链接跑到了用户原来那个浏览器里。这是**必坏**，不是"可能不稳定"。
     (a.self_elevated
-      ? '<br><span class="hint">服务以管理员身份运行。<b>Chrome / Edge 会把自己降权重启</b>'
-        + '（浏览器自己的安全机制，Chrome 138 起）—— 自动抓会话不受影响，'
-        + '但如果浏览器里弹出询问是否降权的提示，点「确定」。</span>'
+      ? '<br><span style="color:var(--bad)">⚠️ 当前服务是<b>管理员身份</b>在跑 —— '
+        + '<b>「自动抓会话」会失败</b>（Edge / Chrome 拒绝以管理员运行）。'
+        + '对账本身不受影响。'
+        // ⚠ 如果这台电脑**根本没法不管理员**（内置 Administrator 账户 / UAC 关着），
+        //   就别说"改成普通权限"了 —— 改了也没用，只会让人白试一轮。
+        //   后端查得到就直接把原因和解法摆出来。
+        + (a.always_admin_reason
+            // ⚠ 后端给的是**纯文本**（带 \n），要 `pre-line` 才保留换行；
+            //   别在这儿套 Markdown —— esc() 只转义 HTML，`**` 会原样显示出来。
+            ? '<br><span style="color:var(--bad);white-space:pre-line;display:block">'
+              + esc(a.always_admin_reason) + '</span>'
+            : '按上面那条改回普通权限即可。')
+        + '</span>'
       : '');
+  // 「以管理员身份修复」只在**确实需要管理员**时露出来：
+  // 注册方式还是计划任务（旧版本留下的提权任务没删掉）——
+  // 删它必须有管理员权限，而这是**一次性**的，所以只弹这一次 UAC。
+  // ⚠ 平时藏起来：这个项目绝大多数操作都不该提权，摆一个常驻按钮会误导人。
+  // ⚠ 服务**本身就是管理员**时要把这个按钮藏起来 —— 那个按钮的全部意义
+  //   是"弹一次 UAC 去删掉旧的提权任务"，而服务已经是管理员说明
+  //   它**本来就有权限**（普通「保存」就能删），而且这台机器上 UAC 可能
+  //   根本弹不出来（内置 Administrator 账户）。摆着它只会让人反复点、反复没反应
+  //   —— 实测就是这么被卡住的。
+  $('#svc-repair-row').hidden = !(a.installed && a.mode === 'task' && !a.self_elevated);
 }
+
+$('#btn-svc-repair').addEventListener('click', async () => {
+  const btn = $('#btn-svc-repair');
+  btn.disabled = true;
+  $('#svc-msg').textContent = '已弹出 UAC 窗口 —— 请点「是」，跑完那个黑窗口会停住等你按回车…';
+  try {
+    const r = await api('/api/elevate', { method: 'POST', body: { what: 'autostart' } });
+    $('#svc-msg').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '');
+    toast(r.ok ? '已修复' : (r.message || '没成'), r.ok ? 'ok' : 'bad');
+    loadService();
+    loadOverview();
+  } catch (e) {
+    $('#svc-msg').textContent = '❌ ' + e.message;
+    toast('修复失败：' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('#btn-svc-save').addEventListener('click', async () => {
   const enabled = $('#svc-autostart').checked;
-  const elevated = $('#svc-mode').value === 'elevated';
+  // ⚠ **永远不带 `elevated`** —— 这个项目现在全程普通权限。
+  //   以前这里读 `#svc-mode` 下拉，而那个选项是死的：选"以管理员身份"只是让
+  //   当前这个普通权限的进程去执行 `schtasks /create /rl HIGHEST`，必然失败，
+  //   **而且永远不会弹 UAC**（那条路上根本没有提权代码）。
+  //   真需要管理员的地方走"按需提权"，只弹一次，见 src/elevate.py。
   try {
-    const r = await api('/api/autostart', { method: 'POST', body: { enabled, elevated } });
+    const r = await api('/api/autostart', { method: 'POST', body: { enabled } });
     $('#svc-msg').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '');
     toast(r.ok ? (enabled ? '已注册开机自启' : '已取消开机自启') : (r.message || '失败'),
           r.ok ? 'ok' : 'bad');
@@ -1074,7 +1120,11 @@ function renderSchedule(sch) {
   //   否则用户会看到 `<span class="hint">` 这种源码（踩过一次）
   const rows = tasks.map((t) => [
     t.name,
-    t.time ? `每天 ${t.time}` : { html: '<span class="hint">时间没读出来</span>' },
+    // ⚠ 读不到时间**不等于**没设时间：任务多半是**以管理员身份建**的，
+    //   所有者是 Administrators，而服务现在是普通权限（过滤令牌）→ /query 被拒。
+    //   原来只写一句"时间没读出来"，用户看到的就是
+    //   "没有管理员权限就看不到定时任务的设置"。这里把原因和修法一起给出来。
+    t.time ? `每天 ${t.time}` : { html: t.unreadable ? '<span class="hint" style="color:var(--warn)">读不到（权限不够）</span>' : '<span class="hint">时间没读出来</span>' },
     t.enabled === false ? { html: '<span class="bad-text">已停用</span>' } : '已启用',
     { html: `<span class="hint mono">${esc((t.command || '').slice(-70))}</span>` },
     schedRowButtons(t),
@@ -1092,6 +1142,19 @@ function renderSchedule(sch) {
         🔧 运行脚本（<code>run.bat</code>）是旧版留下的，已按当前版本<b>自动重建</b> ——
         之前那个黑窗、日志格式的问题就是它造成的。明天到点跑的就是新的了。
       </div>` : '')
+    + (tasks.some((t) => t.unreadable) ? `<div class="banner warn">
+        ⚠️ 有一个定时任务**读不到详情**（时间和命令都是空的）。
+        <br><span class="hint">它不是"没设"，而是**以前用管理员身份建的** ——
+        任务归 <code>Administrators</code> 所有，而现在服务是<b>普通权限</b>，
+        所以连查都查不动。这不影响它到点自己跑。</span>
+        <br><span class="hint">要能看、能删、能改：点下面这个按钮，
+        它会<b>弹一次 UAC</b>，用管理员权限把这条任务<b>按上面「执行时间」里的值重新注册一遍</b>。
+        <br>重注册之后 Windows 那边还是读不到详情（任务归 <code>Administrators</code> 所有），
+        但<b>注册用的参数我们记了一份</b>，所以时间、命令照常显示、删除照常可用。</span>
+        <br><span class="hint">⚠ 点之前先确认上面的<b>「执行时间」</b>是你想要的 —— 修复就是拿它去重建的。</span>
+        <br><button class="btn" id="btn-sched-fix">以管理员身份修复定时任务</button>
+        <span class="hint" id="btn-sched-fix-msg"></span>
+      </div>` : '')
     + (legacy.length ? `<div class="banner warn">
         ⚠️ 表里有一条<b>旧任务「${esc(sch.task_name)}」</b>（名字里没有执行时间）——
         它也会每天跑一次，等于<b>一天对账两遍</b>。
@@ -1105,6 +1168,39 @@ function renderSchedule(sch) {
   const nameBox = $('#sched-name');
   if (nameBox && !nameBox.value && tasks.length === 1 && tasks[0].name !== sch.task_name) {
     nameBox.value = tasks[0].name;
+  }
+
+  // 「以管理员身份修复定时任务」—— 只在真读不到详情时才出现。
+  // ⚠ 每次重渲染都要重新绑（上面刚 innerHTML 覆盖过）。
+  const fixBtn = document.getElementById('btn-sched-fix');
+  if (fixBtn) {
+    fixBtn.addEventListener('click', async () => {
+      fixBtn.disabled = true;
+      const msg = document.getElementById('btn-sched-fix-msg');
+      if (msg) msg.textContent = '已弹出 UAC 窗口 —— 请点「是」…';
+      // ⚠ 发**叶子名**（`t.name`），不是 `full_name` ——
+      //   full_name 带反斜杠，后端注册时会当非法字符拒掉（400），
+      //   表现是"点了完全没反应"。这正是这个按钮以前的样子。
+      const target = tasks.find((t) => t.unreadable) || tasks[0] || {};
+      try {
+        const r = await api('/api/elevate', {
+          method: 'POST',
+          body: { what: 'schedule', time: $('#sched-time').value || '21:00',
+                  days_ago: Number($('#sched-days-ago').value),
+                  name: target.name || '' },
+        });
+        const text = r.ok
+          ? '✅ 已注册。注册用的参数我们记下来了，界面上照常显示时间和命令。'
+          : ('❌ ' + (r.message || '没成'));
+        if (msg) msg.textContent = text;
+        toast(r.ok ? '定时任务已修复' : '没成', r.ok ? 'ok' : 'bad');
+        loadOverview();
+      } catch (e) {
+        if (msg) msg.textContent = '❌ ' + e.message;
+      } finally {
+        fixBtn.disabled = false;
+      }
+    });
   }
 }
 
@@ -1235,16 +1331,51 @@ syncSchedPlaceholder();
 $('#btn-sched-install').addEventListener('click', async () => {
   const time = $('#sched-time').value || '21:00';
   const name = ($('#sched-name').value || '').trim();
+  const daysAgo = Number($('#sched-days-ago').value);
   try {
     const r = await api('/api/schedule', {
       method: 'POST',
-      body: { time, days_ago: Number($('#sched-days-ago').value), name },
+      body: { time, days_ago: daysAgo, name },
     });
+    // ⚠ 注册失败多半是**权限**一条：这条定时任务以前可能是管理员身份的
+    //   服务建的，普通权限覆盖不了（`schtasks ... /f` 拒绝访问）。
+    //   所以失败时直接把「以管理员身份重试」摆在眼前 —— 而不是丢一条
+    //   要用户自己去开管理员命令行的命令（那个也留着，作为退路）。
+    const retry = !r.ok
+      ? `<br><button class="btn" id="btn-sched-elevate">以管理员身份重试</button>
+         <span class="hint">只弹这一次 UAC，注册完就结束，不影响别的操作</span>`
+      : '';
     $('#sched-result').innerHTML = r.ok
       ? `<div class="banner ok">✅ 已注册「${esc(r.task || name || '')}」，每天 ${esc(r.time)} 跑。
            <br><span class="hint mono">${esc(r.script || '')}</span></div>`
       : `<div class="banner bad">注册失败：${esc(r.message || '')}
-           ${r.manual ? `<br>可以手动跑：<br><span class="mono">${esc(r.manual)}</span>` : ''}</div>`;
+           ${retry}
+           ${r.manual ? `<br><span class="hint">也可以拿管理员权限手动跑：</span>
+             <br><span class="mono">${esc(r.manual)}</span>` : ''}</div>`;
+    const elev = $('#btn-sched-elevate');
+    if (elev) {
+      elev.addEventListener('click', async () => {
+        elev.disabled = true;
+        $('#sched-result').innerHTML =
+          '<div class="banner warn">已弹出 UAC 窗口 —— 请点「是」，跑完那个黑窗口会停住等你按回车…</div>';
+        try {
+          const e2 = await api('/api/elevate', {
+            method: 'POST',
+            body: { what: 'schedule', time, days_ago: daysAgo, name },
+          });
+          $('#sched-result').innerHTML = e2.ok
+            ? `<div class="banner ok">✅ 已注册（管理员权限）。
+                 <br><span class="hint">提权建的任务归 <code>Administrators</code> 所有，
+                 Windows 那边读不到详情 —— 但注册参数我们记了一份，
+                 界面上的时间和命令照常显示。</span></div>`
+            : `<div class="banner bad">还是没成：${esc(e2.message || '')}</div>`;
+          toast(e2.ok ? '已注册定时任务' : '注册失败', e2.ok ? 'ok' : 'bad');
+          loadOverview();
+        } catch (err) {
+          $('#sched-result').innerHTML = `<div class="banner bad">${esc(err.message)}</div>`;
+        }
+      });
+    }
     toast(r.ok ? '已注册定时任务' : '注册失败', r.ok ? 'ok' : 'bad');
     loadOverview();
   } catch (e) { toast('注册失败：' + e.message, 'bad'); }

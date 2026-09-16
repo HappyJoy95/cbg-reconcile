@@ -311,17 +311,23 @@
     </div>
     <div class="form-row">
       <label style="min-width:0"><input type="checkbox" id="svc-autostart">
-        <b>开机自动启动</b>（<b>以管理员身份</b>运行，登录 Windows 后自动在后台跑起来，不弹 UAC）</label>
+        <b>开机自动启动</b>（登录 Windows 后自动在后台跑起来，不弹窗、<b>不需要管理员</b>）</label>
     </div>
-    <div class="form-row" id="svc-mode-row">
-      <label style="min-width:0">启动方式</label>
-      <select id="svc-mode">
-        <option value="elevated">以管理员身份（计划任务，不弹 UAC）</option>
-        <option value="normal">普通权限（注册表启动项）</option>
-      </select>
-      <span class="hint">浏览器抓会话出问题时，换成普通权限试试</span>
-    </div>
+    <!-- ⚠ 这里原来有一个「启动方式」下拉：普通权限 / 以管理员身份。
+         2026-09-16 拿掉了，两个原因：
+         ① **它是个死选项** —— 选「以管理员身份」只是让当前这个（普通权限的）
+            进程去执行 `schtasks /create ... /rl HIGHEST`，**必然失败**，
+            而且**永远不会弹 UAC**（那条路上根本没有提权代码）。
+            用户点完只会看到"没成"，不知道为什么 —— 实测就是这么被卡住的。
+         ② **就算成了也是坏的** —— 服务以管理员跑，它拉起的 Edge / Chrome
+            也会是管理员，而浏览器拒绝以管理员运行 →「自动抓会话」必坏。
+         真需要管理员的那两件事（删旧的提权任务、建定时任务）走"按需提权"：
+         只在那一刻弹一次 UAC，见 `src/elevate.py`。 -->
     <div class="hint" id="svc-detail" style="margin:-4px 0 10px 0"></div>
+    <div class="form-row" id="svc-repair-row" hidden>
+      <button class="btn" id="btn-svc-repair">以管理员身份修复</button>
+      <span class="hint">只弹这一次 UAC，删掉旧版本留下的提权任务；装依赖、跑对账都不提权</span>
+    </div>
     <div class="form-row">
       <button class="btn primary" id="btn-svc-save">保存</button>
       <span class="hint" id="svc-msg"></span>

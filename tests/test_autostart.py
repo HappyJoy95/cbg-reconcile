@@ -217,6 +217,49 @@ class TestInstall(_WinCase):
             self.assertNotIn("/create", a,
                              "选了普通权限还去注册计划任务了")
 
+    def test_default_is_normal_even_from_an_elevated_process(self):
+        """⚠ **默认必须是普通权限，不许再"猜当前进程"。**
+
+        这里以前是 `elevated = is_elevated()` —— 从提权进程里调，就会**静默**注册成
+        "以管理员身份启动"，而管理员身份会让**自动抓会话彻底不可用**：
+        Edge / Chrome 拒绝以管理员运行，进程把命令行交棒出去就自己退 0，
+        我们给的 `--user-data-dir` / `--remote-debugging-port` 落不到活着的实例上。
+
+        真踩过：门店装机时那次 UAC 提权 → 注册成管理员模式 → 抓会话报
+        「Edge 启动后立刻退出（退出码 0）」，而用户坚信"我没用管理员"。
+
+        `_WinCase` 里 `is_elevated` 被 patch 成 **True**，所以这条正好钉住"不许猜"。
+        """
+        calls = self._schtasks([_ok()])
+        res = autostart._win_install(self.root)          # ← 不传 elevated
+        self.assertEqual(res["mode"], "runkey", "不传 elevated 就应该是普通权限")
+        self.assertFalse(res["elevated"])
+        for a in calls:
+            self.assertNotIn("/create", a, "默认不该去注册提权的计划任务")
+
+    def test_switching_back_reports_a_leftover_task(self):
+        """从管理员切回普通权限、但**旧任务删不掉**时，必须报出来。
+
+        删那条提权任务需要管理员权限，而"切回普通权限"这个动作常常正好是在
+        非管理员进程里做的。删不掉还不吭声的话：界面上写着"普通权限"，
+        下次登录却照样以管理员把服务拉起来，抓会话的报错又说是"管理员" ——
+        比不切还难查。
+        """
+        calls = self._schtasks([_ok(), _fail(stderr="错误: 拒绝访问。")])
+        res = autostart._win_install(self.root, elevated=False)
+        self.assertTrue(res["ok"], "注册表那条本身还是成功的")
+        self.assertTrue(res.get("task_leftover"), "要标记出来，界面才提示得到")
+        self.assertIn("旧的提权任务没删掉", res["message"])
+        self.assertIn("以管理员身份运行", res["message"], "要给能照着做的下一步")
+
+    def test_elevated_mode_carries_the_warning(self):
+        """显式选管理员模式时要**带着警告返回** —— 界面和命令行能原样显示。"""
+        self._schtasks([_ok()])
+        res = autostart._win_install(self.root, elevated=True)
+        self.assertEqual(res.get("warning"), autostart.ELEVATED_BREAKS_CAPTURE)
+        self.assertIn("自动抓华为会话", res["warning"])
+        self.assertIn("普通权限", res["warning"], "要给出改回来的方向")
+
     def test_degrades_to_runkey_without_admin(self):
         """想提权但提不到时**不能假装成功** —— 要退回注册表并说清楚不是管理员。"""
         calls = self._schtasks([_fail("拒绝访问"), _fail("拒绝访问")])
@@ -313,11 +356,39 @@ class TestStatus(_WinCase):
 class TestRemove(_WinCase):
     def test_clears_both_task_and_runkey(self):
         self.reg.store[autostart.APP_NAME] = "old"
-        calls = self._schtasks([_ok()])
+        # 现在先 `/query` 问任务在不在，再 `/delete` —— 两次调用
+        calls = self._schtasks([_ok(), _ok()])
         res = autostart._win_remove()
         self.assertTrue(res["ok"])
-        self.assertIn("/delete", calls[0])
+        self.assertTrue(any("/query" in c for c in calls), "要先问任务在不在")
+        self.assertIn("/delete", calls[-1])
         self.assertNotIn(autostart.APP_NAME, self.reg.store, "注册表项没清掉")
+
+    def test_leftover_task_is_reported(self):
+        """⚠ 提权任务删不掉时**必须报出来**，不能静默。
+
+        从"以管理员身份启动"切回"普通权限"时，如果这条任务没删掉，下次登录它
+        照样以管理员把服务拉起来 —— 界面上写着"普通权限"、抓会话的报错却说是
+        "管理员"，比不切还难查。而删它**需要管理员权限**，偏偏"切回普通权限"
+        这个动作常常正好是在非管理员进程里做的，删不掉是常态。
+        """
+        calls = self._schtasks([_ok(), _fail(stderr="错误: 拒绝访问。")])
+        res = autostart._win_remove()
+        self.assertIn("没删掉", res.get("message", ""),
+                      "删不掉要让用户看见，而不是当成功")
+        self.assertIn("任务计划程序", res.get("message", ""), "要给能照着做的下一步")
+
+    def test_task_missing_is_not_a_failure(self):
+        """任务本来就不存在 → 不算失败，别报一个吓人的错。
+
+        ⚠ 靠 `/query` 的退出码判断，不解析错误文案 —— 那个文案是本地化的
+        （中文 Windows 是「错误: 系统找不到指定的文件。」），
+        按它判断等于把逻辑绑死在某一种系统语言上。
+        """
+        self._schtasks([_fail(stderr="错误: 系统找不到指定的文件。")])
+        res = autostart._win_remove()
+        self.assertTrue(res["ok"])
+        self.assertNotIn("没删掉", res.get("message", ""))
 
     def test_removing_when_nothing_registered_is_ok(self):
         self._schtasks([_fail()])

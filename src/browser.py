@@ -54,7 +54,13 @@ _COOKIE_DOMAINS = ("cbg.huawei.com", ".huawei.com", "login.huawei.com", ".huawei
 #     管理员进程启动时自我降权重启（AutoDeElevate）更凶，抓会话更容易断；
 #   * 想换别的浏览器不用改代码：config 里写 `browser.prefer: [edge, chrome]` 即可
 #     （见 `_browser_prefer`）。
-# 注意 Windows 上 Edge 是**系统自带**的，所以没装 Chrome 的机器仍然会用到它。
+# ⚠ 别把"Edge 是系统自带的"当成前提：**Win10 是，Win7 不是**。
+#   Win7 出厂只有 IE11 —— IE11 既跑不了控制台前端（`fetch` / `async` 一个都不支持），
+#   也没有 CDP，抓会话完全靠不上。Chromium Edge 是 2020 年微软通过 Windows Update
+#   推过去的，那之后一直没更新过的 Win7 上就没有。
+#   而 Win7 上最高只能到 **Edge 109**（微软 2023-01 停了 Win7/Win8.1 支持），之后不再更新
+#   —— 109 是 Chromium 内核，前端和 CDP 都够用，但**不会再收到安全更新**。
+#   下面按"文件在不在"找，找不到会明确报错，不会静默失败。
 _WIN_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -411,10 +417,15 @@ def profile_locked(profile_dir) -> bool:
     return False
 
 
-def _launch_failure_hint(name: str, profile_dir=None, reason: str = "") -> str:
+def _launch_failure_hint(name: str, profile_dir=None, reason: str = "",
+                         returncode=None) -> str:
     """启动失败时给一句**能照着做**的话。
 
-    别只说"受限制的环境" —— 门店电脑上最可能的是管理员权限那条。
+    ⚠ **说"已确认"别说"可能的原因"**（2026-09-16 改）。原来一律写成"可能的原因
+    （按可能性排）"，结果门店看到"服务现在是管理员身份"那条时会想
+    "我没用管理员啊" —— 然后去试第 2、3 条，白折腾一轮。
+    其实这条**不是猜的**：它只在 `IsUserAnAdmin()` 真返回真的时候才出现。
+    把"已确认"和实测过的现象写出来，人才会信。
 
     `reason` 非空表示**不是启动失败，而是跑到一半浏览器没了**：
     这时两条"启动"相关的建议（profile 被占、沙箱）都不对症，先别列出来，
@@ -423,32 +434,77 @@ def _launch_failure_hint(name: str, profile_dir=None, reason: str = "") -> str:
     lines = []
     if reason:
         if _am_i_admin():
-            lines.append("服务现在是**管理员**身份，而 Edge / Chrome 拒绝以管理员运行"
-                         "——它会在跑到一半时把自己降权重启。"
-                         "到「设置 → 后台服务」把开机自启改成**普通权限**，"
-                         "或者右键 stop.bat 以管理员身份停止后，"
-                         "再用**普通权限**双击 start.bat 重试")
+            lines.append("**已确认：服务是以管理员身份在跑的**"
+                         "（`IsUserAnAdmin()` 返回真）—— 而 Edge / Chrome 拒绝以管理员"
+                         "运行，会在跑到一半时把命令行交棒出去然后自己退出。"
+                         "改法看下面第 1 条")
         lines.append("**是不是把浏览器窗口手动关掉了？** 登录完**别关那个窗口** —— "
                      "程序还要从它那里读 cookie，读完它自己会关。"
                      "重新点一次「打开浏览器抓取」就行")
-        lines.append("浏览器自己崩了或降权重启 —— 重新点一次「打开浏览器抓取」")
-        return "\n可能的原因（按可能性排）：\n" + "\n".join(
-            f"  {i}. {x}" for i, x in enumerate(lines, 1))
+        lines.append("浏览器自己崩了 —— 重新点一次「打开浏览器抓取」")
+        return "\n" + "\n".join(f"  {i}. {x}" for i, x in enumerate(lines, 1))
 
-    if profile_dir is not None and profile_locked(profile_dir):
-        lines.append("**profile 被占着**（检测到 SingletonLock）—— 有 Chrome/Edge "
-                     "实例正在用这个 profile。关掉**所有** Chrome/Edge 窗口再试。"
-                     "如果找不到窗口，打开任务管理器把残留的 chrome.exe / msedge.exe 结束掉")
     if _am_i_admin():
-        lines.append("服务现在是**管理员**身份，而 Chrome 拒绝以管理员运行"
-                     "（它会把自己降权重启，这次没成功）—— "
-                     "到「设置 → 后台服务」把开机自启改回普通权限，或右键 stop.bat "
-                     "以管理员身份停止后，用普通权限双击 start.bat 再试")
+        # ⚠ 这条放在**最前面**，而且写成"已确认"不是"可能"：
+        #   管理员身份下这个功能是**必坏**的，不是"可能出问题"。
+        lines.append("**已确认：服务是以管理员身份在跑的。** 这是本次失败的原因 —— "
+                     "Edge / Chrome 拒绝以管理员运行：进程起来以后把命令行交棒出去、"
+                     "自己退 0，我们给的 `--user-data-dir` / `--remote-debugging-port` "
+                     "落不到活着的实例上，调试端口永远没人监听"
+                     # ⚠ 别把它写死成"你看到的是退出码 0"：那说的是**典型**表现，
+                     #   而这一次可能先撞上 profile 被占（21）。写死了就跟下面第 2 条
+                     #   自相矛盾，用户会以为程序在胡说。（实测真撞上过。）
+                     "（典型表现是「启动后立刻退出（退出码 0）」，"
+                     "而且链接跑到了你原来那个浏览器里）。\n"
+                     "     改法：控制台「设置 → 后台服务」→「启动方式」选"
+                     "**普通权限** → 保存 → 双击 `stop.bat` → 用**普通权限**双击 "
+                     "`start.bat` → 再抓一次。"
+                     + _always_admin_note())
+    # ⚠ **退出码 21 是"profile 被占着"的铁证**，比翻锁文件可靠 ——
+    #   21 就是 Chromium 的 `RESULT_CODE_PROFILE_IN_USE`。
+    #   实测踩过：报错写着"退出码 21"，可 `profile_locked()` 翻不到锁文件
+    #   （那一版 Edge / 那台机器上文件名不一样），于是这条提示**没出现**，
+    #   用户看到的是一堆不相干的建议。**退出码是浏览器直接告诉我们的，优先信它。**
+    locked = (returncode == 21) or (profile_dir is not None and profile_locked(profile_dir))
+    if locked:
+        why21 = "（退出码 21 = Chromium 的 PROFILE_IN_USE）" if returncode == 21 else ""
+        # ⚠ 残留的那个浏览器**很可能看不见**：静默续期走的是**无头模式**，
+        #   根本没有窗口 —— 用户"关掉所有浏览器窗口"之后照样撞 21，
+        #   然后完全不知道还能干什么。所以这里必须给一条**能直接粘的命令**。
+        lines.append(f"**profile 被占着**{why21} —— 有 Edge / Chrome 实例正在用这个 "
+                     "profile。"
+                     "\n     ⚠ 它**多半是看不见的**：静默续期用的是**无头模式**"
+                     "（没有窗口），所以「关掉所有浏览器窗口」不一定管用。"
+                     "\n     最省事的做法 —— 打开「命令提示符」粘这一条（会把**所有**"
+                     "Edge 一起关掉，包括你自己开着的，先存好网页）："
+                     "\n       taskkill /f /im msedge.exe"
+                     "\n     用 Chrome 的话把 msedge.exe 换成 chrome.exe。"
+                     "\n     也可以：任务管理器 →「详细信息」选项卡 → 把所有 "
+                     "`msedge.exe` 结束掉（有十几个是正常的，全结束）。"
+                     "\n     ⚠ 上一次抓取失败时如果浏览器没被关掉，它会一直占着，"
+                     "之后**每次**抓取都撞这个 —— 这个坑会连锁")
     lines.append("profile 目录有问题（坏掉了？）—— 删掉 .secrets\\browser-profile 让它重建")
-    lines.append("受限环境（服务器 / 沙箱）里 Chrome 建不了子进程沙箱 —— "
+    lines.append("受限环境（服务器 / 沙箱）里 Edge / Chrome 建不了子进程沙箱 —— "
                  "设环境变量 CBG_BROWSER_NO_SANDBOX=1 再试")
-    return "\n可能的原因（按可能性排）：\n" + "\n".join(
-        f"  {i}. {x}" for i, x in enumerate(lines, 1))
+    # ⚠ 统一写"Edge / Chrome"：门店用的是 Edge，只提 Chrome 会让人以为"跟我无关"。
+    lines = [ln.replace("Chrome 拒绝以管理员运行", "Edge / Chrome 拒绝以管理员运行")
+             for ln in lines]
+    return "\n" + "\n".join(f"  {i}. {x}" for i, x in enumerate(lines, 1))
+
+
+def _always_admin_note() -> str:
+    """如果这台电脑**根本没法不管理员**（内置 Administrator / UAC 关着），补一句。
+
+    ⚠ 少了这句，用户会照着上面"改成普通权限"折腾半天 ——
+    而那台机器上**改了也没用**，因为每个进程都注定是管理员。
+    实测就是这么来回好几轮的。能查出来就直说，别让人白试。
+    """
+    try:
+        from .elevate import always_admin_reason
+        reason = always_admin_reason()
+    except Exception:                              # noqa: BLE001
+        return ""
+    return f"\n     ⚠ **但这台电脑改不了**：{reason}" if reason else ""
 
 
 def _am_i_admin() -> bool:
@@ -536,6 +592,65 @@ class DetachedBrowser:
         return 0
 
 
+def forced_user_data_dir() -> tuple:
+    """浏览器被**组策略**强制指定了 user-data-dir 吗。返回 `(名字, 路径)`，没有就 `("", "")`。
+
+    ## ⚠ 这一条会让"独立 profile"整个失效
+
+    `UserDataDir` 是浏览器的**强制策略**（Edge 和 Chrome 都有）。一旦设了它，
+    浏览器**直接忽略命令行上的 `--user-data-dir`** —— 于是我们那套全废：
+
+    * 我们给的独立目录根本没被用上；
+    * 浏览器开在**用户日常那个 profile** 里；
+    * URL 跑到用户已经开着的浏览器里，我们等的调试端口**永远没人监听**；
+    * 报出来的是「启动后立刻退出（退出码 21）」或者干脆链接跑到别处去了。
+
+    **这条是门店实测查出来的**（用户找的，不是我们）—— 前面好几轮我们一直在
+    查权限、查 profile 残留、查版本，全都不对。
+
+    ⚠ 这里必须**硬失败**，不能"退而求其次用那个被强制的目录"：那等于去读
+    **用户日常浏览器的 cookie** —— 本模块顶部写明的那条隐私边界
+    （只读我们自己启动的 profile）就是这么破的。
+
+    读不到注册表就返回空 —— 这是启动路径，**不抛异常**。
+    """
+    if os.name != "nt":
+        return ("", "")
+    import winreg
+    for name, key in (("Edge", r"SOFTWARE\Policies\Microsoft\Edge"),
+                      ("Chrome", r"SOFTWARE\Policies\Google\Chrome")):
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, key) as k:
+                    val, _ = winreg.QueryValueEx(k, "UserDataDir")
+                val = str(val or "").strip()
+                if val:
+                    return (name, val)
+            except OSError:
+                continue
+    return ("", "")
+
+
+def _forced_dir_error() -> str:
+    """被强制策略挡住时的说明 —— 要说清"这不是你操作的问题"和怎么查。"""
+    name, path = forced_user_data_dir()
+    if not name:
+        return ""
+    return (f"{name} 被**组策略**强制指定了 user-data-dir：\n"
+            f"    {path}\n"
+            f"    设了这个策略之后，浏览器会**忽略命令行上的 `--user-data-dir`**，"
+            f"所以「用独立 profile 抓会话」这条路根本走不通 —— "
+            f"而且会去读你日常浏览器的登录态（我们不碰那个）。\n"
+            f"    怎么确认（命令提示符里跑）：\n"
+            f"      reg query \"HKLM\\SOFTWARE\\Policies\\Microsoft\\{name}\" /v UserDataDir\n"
+            f"      reg query \"HKCU\\SOFTWARE\\Policies\\Microsoft\\{name}\" /v UserDataDir\n"
+            f"    怎么去掉：这两条各跑一次（哪条有就删哪条），然后**重启浏览器**：\n"
+            f"      reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\{name}\" /v UserDataDir /f\n"
+            f"      reg delete \"HKCU\\SOFTWARE\\Policies\\Microsoft\\{name}\" /v UserDataDir /f\n"
+            f"    （这策略一般是单位用域/组策略推下来的。删不掉的话问一下 IT —— "
+            f"『Edge 的 UserDataDir 策略把浏览器的用户数据目录锁死了』。）")
+
+
 def launch(profile_dir: Path, url: str = PORTAL_URL, headless: bool = False,
            port: int | None = None, no_sandbox: bool | None = None,
            settle: float | None = None, cfg: dict | None = None):
@@ -550,11 +665,24 @@ def launch(profile_dir: Path, url: str = PORTAL_URL, headless: bool = False,
     所以这里通完端口还要再观察 `settle` 秒；真死了就用 `--no-sandbox` 重试一次。
     门店电脑上不会触发这条，只有受限制的环境才需要。
     """
+    # ⚠ **先查组策略**：被强制指定了 user-data-dir 的话，后面全是白忙 ——
+    #   浏览器会忽略我们的 `--user-data-dir`，我们等的调试端口永远不会有人监听。
+    #   实测就是这么卡了好几轮（最后是用户自己查出来的）——
+    #   所以宁可现在就硬失败、把原因说清楚，也别让用户再看一遍"启动后立刻退出"。
+    _forced = _forced_dir_error()
+    if _forced:
+        raise BrowserError(_forced)
+
     found = find_browser(cfg)
     if not found:
-        raise BrowserError("没找到 Chrome / Edge。Windows 上 Edge 是系统自带的，"
-                           "要是都没有，就在 config 里写 browser.prefer 指定，"
-                           "或把完整路径填进 browser.path")
+        # ⚠ 别提"Edge 是系统自带的" —— **Win7 上不是**，那台机器的店员会照着
+        #   去"开始菜单里找 Edge"然后找不到。Win7 出厂只有 IE11，而 IE11
+        #   既跑不了控制台页面也没有 CDP，两个功能都用不了。
+        raise BrowserError(
+            "没找到 Chrome / Edge。这两种浏览器都行，装一个再试；"
+            "装好之后如果还是没有，就在 config 里写 "
+            "`browser.prefer: [edge, chrome]` 指定，或把完整路径填进 browser.path。"
+            "（Windows 7 上出厂只有 IE11 —— 它**不行**，得另外装 Edge 109 或 Chrome 109）")
     exe, name = found
     profile_dir = Path(profile_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -574,6 +702,11 @@ def launch(profile_dir: Path, url: str = PORTAL_URL, headless: bool = False,
         "--window-size=1100,860",
     ]
     if headless:
+        # ⚠ `--headless=new` 这个写法对老的 Chromium 也是安全的，别"顺手"改成 `--headless`。
+        #   新式无头是 Chrome/Edge **112** 才有的；在更老的版本上（Win7 最高 109），
+        #   `--headless=new` 会被当成"headless 开关 + 值 new"，解析成**老式无头**——
+        #   功能照样有，只是实现是旧的。反过来写成裸 `--headless`，
+        #   在 112~131 上会走**老式**无头（跟新机器的预期不一致）。
         args.append("--headless=new")
     if no_sandbox:
         args += ["--no-sandbox", "--disable-gpu"]
@@ -626,11 +759,25 @@ def launch(profile_dir: Path, url: str = PORTAL_URL, headless: bool = False,
         pass
     if not no_sandbox:
         # 自动降级重试一次：受限环境里 Chrome 建不了自己的子进程沙箱
-        return launch(profile_dir, url, headless, port, no_sandbox=True,
-                      settle=settle, cfg=cfg)
+        #
+        # ⚠ **要把第一次的退出码带下去**：两次的退出码**含义完全不同** ——
+        #   0  = 交棒给别的实例后正常退出（典型的"管理员身份"那种）
+        #   21 = Chromium 的 PROFILE_IN_USE（profile 被占着）
+        #   而重试自己也会产生一个退出码，**抛出去的是重试那个** ——
+        #   于是"第一次是 0"这个关键线索被吞掉了。
+        #   实测踩过：用户只看到一个 21，而真正的原因是第一次那个 0。
+        first_code = proc.returncode
+        try:
+            return launch(profile_dir, url, headless, port, no_sandbox=True,
+                          settle=settle, cfg=cfg)
+        except BrowserError as e:
+            raise BrowserError(
+                f"{e}\n（补充：不加 `--no-sandbox` 的那**第一次**，退出码是 {first_code}。"
+                "两次退出码含义不同 —— 0 多半是权限那条，21 是 profile 被占，"
+                "对着上面逐条看）") from e
     raise BrowserError(
         f"{name} 启动后立刻退出（退出码 {proc.returncode}）。"
-        + _launch_failure_hint(name, profile_dir))
+        + _launch_failure_hint(name, profile_dir, returncode=proc.returncode))
 
 
 # --------------------------------------------------------------- 从浏览器取
@@ -780,6 +927,9 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
 
     deadline = time.time() + timeout
     last = ""
+    last_reason = ""            # 自检/接口给出的**原因** —— 最后要一起报出去
+    specific = ""               # 循环里查到的**更具体**的卡点（见下面的 csrf 那条）
+    csrf_src = ""
     said_invalid = False
     tries = 0
     nav_at = time.time()
@@ -807,17 +957,34 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
 
             names = {c.split("=", 1)[0] for c in cookies.split("; ") if c}
             if names & {"JSESSIONID", "HWSTORE-SESSION", "hwssot3", "WPSESSIONID"}:
-                csrf = csrf_from_page(port) or csrf_from_api(cookies)
+                # ⚠ 两条路都记下来源：页面 localStorage 里可能是**过期的** csrf
+                #   （老 profile 留下的），而接口换的一定是当前的。
+                #   报错时带上它，能一眼看出是不是这个原因。
+                csrf = csrf_from_page(port)
+                csrf_src = "页面 localStorage"
+                if not csrf:
+                    csrf = csrf_from_api(cookies)
+                    csrf_src = "接口换的" if csrf else ""
                 if csrf:
                     sess = CbgSession(cookies=cookies, csrf=csrf, source="browser",
-                                      extra={"cookies_detail": detail})
-                    if verify is None or verify(sess):
-                        say(f"✅ 抓到 {len(names)} 个 cookie + csrf token，自检通过")
+                                      extra={"cookies_detail": detail,
+                                             "csrf_source": csrf_src})
+                    ok, why = _verify_result(verify, sess)
+                    if ok:
+                        say(f"✅ 抓到 {len(names)} 个 cookie + csrf token（{csrf_src}），自检通过")
                         return sess
+                    last_reason = why or last_reason
                     if not said_invalid:
                         # ⚠ 未登录时 cbg 也会发 JSESSIONID —— 名字齐 ≠ 能用
-                        say("已拿到 cookie，但自检没过 —— 继续等登录完成…")
+                        #   把**自检给的原因**一起说出来：少了它这句等于没说，
+                        #   用户只知道"没过"，不知道是权限、过期还是接口异常。
+                        say("已拿到 cookie，但自检没过"
+                            + (f"：{why}" if why else "（原因未知）")
+                            + " —— 继续等登录完成…")
                         said_invalid = True
+                else:
+                    specific = (f"cookie 有了（{len(names)} 个），但 csrf 取不到 —— "
+                                "页面 localStorage 和接口两条路都试过了")
 
             # ---- 自动登录 ----
             if user and pwd and tries < MAX_LOGIN_TRIES:
@@ -855,6 +1022,10 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                 nav_at = time.time()
 
             # 把"到底卡在哪一步"说准 —— 这两种情况的排查方向完全不同
+            # ⚠ 这段是**兜底总结**，只在循环里没查出更具体的原因时才用。
+            #   原来它无条件覆盖 `last`，于是循环里刚查到的"csrf 取不到"这类
+            #   精确卡点被冲掉，用户看到的还是那句笼统的"没看到登录 cookie" ——
+            #   而那句会把人指去查登录，实际卡在别处。（写测试时被逮住的。）
             if said_invalid:
                 # 拿到 cookie 了但自检没过：**静默续期时最常见的原因**是这台机器
                 # 还没有过一次"有界面"的登录（profile 里没有有效 SSO 登录态），
@@ -864,14 +1035,72 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                         + ("；静默续期要求这台电脑**之前用「打开浏览器抓取」"
                            "成功登录过**，没有的话请改用它" if headless else
                            " —— 请在窗口里完成登录"))
+            elif specific:
+                last = specific
             else:
                 last = "始终没看到登录 cookie" + (
                     "（窗口开着，请在窗口里完成登录）" if not (user and pwd) else "（自动登录没成功）")
             time.sleep(3)
     finally:
+        # ⚠ "浏览器停在哪一页"要在 `_shutdown` **之前**问 —— 关掉之后就问不到了。
+        #   所以放在 finally 里取，报错在 finally 外面抛。
+        where = _where_is_the_browser(port)
         _shutdown(proc)
 
-    raise CbgAuthError(f"{int(timeout)} 秒内没抓到可用会话：{last}")
+    # ⚠ **把自检给的原因附在最前面**：那句话里通常直接写着病因
+    #   （"没有门店或数据范围 XXX 的权限" / "接口异常：…" / csrf 取不到），
+    #   而原来的报错把它丢了，只留一句"自检没过" —— 用户只能反复说"就是抓不到"。
+    reason = f"\n自检/接口说的是：{last_reason}" if last_reason else ""
+    if not last_reason and csrf_src:
+        reason = f"\ncsrf 来源：{csrf_src}"
+    raise CbgAuthError(f"{int(timeout)} 秒内没抓到可用会话：{last}{reason}{where}")
+
+
+def _verify_result(verify, sess) -> tuple:
+    """跑校验，归一成 `(过没过, 没过的话为什么)`。
+
+    ⚠ **以前这里只要一个 bool，于是最有用的那句话被丢掉了。**
+    `CbgClient.ping()` 返回的是 `(ok, msg)`，而 `msg` 里写着真正的病因——
+    比如「会话/权限问题：没有门店或数据范围 XXX 的权限」「接口异常：…」。
+    老写法 `verify=lambda s: client.ping()[0]` 把 `msg` 直接扔掉，
+    用户最后只能看到一句"拿到了 cookie，但自检一直没过" ——
+    对排查**毫无帮助**（实测就卡在这儿：只能反复说"就是抓不到"）。
+
+    约定：`verify` 返回 `bool`（老写法，原因未知）或 `(bool, str)`（推荐）。
+
+    没给 `verify` 时按"通过"—— 那是调用方自己放弃校验，不是我们的判断。
+    """
+    if verify is None:
+        return True, ""
+    try:
+        got = verify(sess)
+    except Exception as e:                   # noqa: BLE001
+        # 校验函数自己炸了也要报出来：这跟"校验没过"是两回事，
+        # 混成一句"自检没过"会让人去查账号，而其实是代码问题。
+        return False, f"自检函数自己报错：{type(e).__name__}: {e}"
+    if isinstance(got, tuple) and len(got) == 2:
+        return bool(got[0]), str(got[1] or "")
+    return bool(got), ""
+
+
+def _where_is_the_browser(port: int) -> str:
+    """超时时补一句：**浏览器现在停在哪一页**。
+
+    ⚠ 这是排查"抓不到会话"时最想知道的一件事，而原来恰恰没有：
+    窗口是卡在登录页？还是已经登进去了、但停在一个我们没预期的页面
+    （比如**多门店账号**登录后的「选择门店」）？
+    没有这一句，用户只能说"就是抓不到"，我们只能猜 —— 实测就卡在这儿。
+
+    拿不到就返回空串：诊断信息**永远不该**让原本的报错变成另一个报错。
+    """
+    try:
+        urls = [t.get("url") or "" for t in page_targets(port)]
+    except Exception:                        # noqa: BLE001
+        return ""
+    urls = [u for u in urls if u and not u.startswith("devtools://")]
+    if not urls:
+        return ""
+    return "\n窗口里现在的页面：\n" + "\n".join(f"  · {u}" for u in urls[:5])
 
 
 def _shutdown(proc):

@@ -46,6 +46,25 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn("data-sched-del", APP_JS)
         self.assertIn("/api/schedule?name=", APP_JS)
 
+    def test_repair_button_sends_the_leaf_name(self):
+        """⚠ 修复按钮发的是**叶子名**（`t.name`），不是 `full_name`。
+
+        `full_name` 带反斜杠（`\\CBG报量对账-21点20`），而
+        `schedule.install` 会拒收带反斜杠的名字（防路径注入）→
+        这个按钮**必然 400**，表现是"点了完全没反应"。
+        行内「删除」按钮发 full_name 没问题（那条路不做名字校验），
+        但修复这条路必须收敛 —— 两条差别就在这里。
+        """
+        # ⚠ 从 `const fixBtn` 开始截 —— `btn-sched-fix` 在 banner 的 HTML 里
+        #   还出现过一次，从那儿截会**截不到真正发请求的那段**，
+        #   断言就变成假绿
+        i = APP_JS.index("const fixBtn = document.getElementById")
+        block = APP_JS[i:i + 1400]
+        self.assertIn("name: target.name", block,
+                      "修复按钮要把叶子名发过去")
+        self.assertNotIn("name: target.full_name", block,
+                         "发 full_name 会被后端判非法字符，点了没反应")
+
     def test_no_leftover_single_delete_button(self):
         """老的单删按钮已经拆成行内按钮，别再被谁加回来。"""
         self.assertNotIn("btn-sched-remove", APP_JS)
@@ -784,6 +803,236 @@ class TestRunLogIsFlushed(unittest.TestCase):
         self.assertEqual(b.getvalue(), "x")
 
 
+class TestHiddenAttributeActuallyHides(unittest.TestCase):
+    """⚠ `hidden` 属性必须**真的**能藏住元素。
+
+    HTML 的 `hidden` 靠浏览器内置样式 `[hidden] { display: none }` 生效，
+    而那条内置规则**优先级最低** —— 任何 `.form-row { display: flex }`、
+    `.btn { display: inline-block }` 都能压过它。
+
+    真踩过：后台服务那个「以管理员身份修复」按钮**一直显示着**，
+    不管条件满不满足 —— 用户连着两轮截图里都有它，还去点了；
+    `#btn-update-apply`（立即更新）也一样，哪怕根本没有新版本。
+    这类 bug 的特点是：**JS 逻辑全对、测试全绿，只有肉眼看得出来**。
+    """
+
+    CSS = Path(__file__).resolve().parent.parent / "web" / "style.css"
+    HTML = Path(__file__).resolve().parent.parent / "web" / "index.html"
+
+    def _css(self) -> str:
+        """style.css **去掉注释**后的正文。
+
+        ⚠ 必须剥注释：解释这条规则的注释里**也写着 `[hidden]`**，
+        直接 `split("[hidden]")` 会先命中注释那一处，
+        然后拿到一段没有 `!important` 的文字 —— 测试假红。
+        （这个坑在 JS 那边已经踩过一次了，见 `_js_code()`。）
+        """
+        import re
+        css = self.CSS.read_text(encoding="utf-8")
+        return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+    def test_style_sheet_has_a_hidden_fallback(self):
+        css = self._css()
+        self.assertIn("[hidden]", css,
+                      "style.css 要有 [hidden] 兜底，否则类选择器会压过它")
+        self.assertIn("!important", css.split("[hidden]")[1][:60],
+                      "不加 !important 压不过 .form-row / .btn 那些规则")
+
+    def test_every_hidden_element_has_a_display_rule_covered(self):
+        """逐个核对：**带 `hidden` 的元素，它的类有没有设 display**。
+
+        这条比上一条更实在 —— 上一条只证明"兜底在"，
+        这条证明"兜底是必要的、而且覆盖到了真实元素"。
+        """
+        import re
+        html = self.HTML.read_text(encoding="utf-8")
+        css = self._css()
+        # 抽出所有 <tag ... hidden ...>，拿到它的 class
+        tags = re.findall(r"<[a-z][^>]*\bhidden\b[^>]*>", html)
+        self.assertTrue(tags, "一个 hidden 元素都没有？那这条测试没意义了")
+        at_risk = []
+        for tag in tags:
+            m = re.search(r'class="([^"]*)"', tag)
+            if not m:
+                continue                      # 没类 → 内置规则就够
+            for cls in m.group(1).split():
+                # 精确找 `.cls {` 这种规则里有没有 display
+                for body in re.findall(r"(?:^|[},])\s*\." + re.escape(cls) + r"\s*\{([^}]*)\}",
+                                       css):
+                    if "display" in body:
+                        at_risk.append((cls, tag[:60]))
+        # 有兜底规则在，这些就都不怕了 —— 所以断言的是"兜底必须在"
+        self.assertTrue(at_risk, "这条测试的前提变了（没有危险的类了）—— 复核一下")
+        self.assertIn("[hidden]", css, f"这些类会压过 hidden：{at_risk}")
+
+
+class TestElevateApi(unittest.TestCase):
+    """按需提权那个端点（`/api/elevate`）—— **只把需要管理员的那一步**弹一次 UAC。
+
+    ⚠ 这条路由在 Windows 上的提权行为**没法在本机验**（`ShellExecuteW` 那一套），
+    但路由本身、参数传递、失败分支**必须**是真的 —— 界面上那两个按钮
+    （「以管理员身份修复」「以管理员身份重试」）全靠它，
+    写错了表现是"点了没反应"，门店完全无从下手。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.srv = _Server(self.tmp)
+        self.addCleanup(self.srv.close)
+
+    def _post(self, body, runner):
+        """打这个端点，把 `run_elevated` 换掉 —— 本机没有 UAC 可弹。"""
+        with mock.patch.object(web.elevate, "run_elevated", runner), \
+                mock.patch.object(web.elevate, "is_admin", lambda: False):
+            return self.srv.request("POST", "/api/elevate", body)
+
+    def test_autostart_repair_runs_the_autostart_subcommand(self):
+        seen = {}
+
+        def runner(script, args, timeout=90):
+            seen["script"] = script
+            seen["args"] = list(args)
+            return {"ok": True, "message": "已注册"}
+
+        st, body = self._post({"what": "autostart"}, runner)
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        self.assertTrue(str(seen["script"]).endswith("bootstrap.py"))
+        self.assertEqual(seen["args"], ["autostart"],
+                         "修复开机自启＝提权跑普通权限那条 autostart（顺带删掉旧提权任务）")
+
+    def _fake_schedule(self, existing=()):
+        """把 schedule 那层换掉，记下**提权子命令**收到了什么。
+
+        ⚠ 这里**故意不去 mock `schedule.install`** —— 因为这条路根本不调它：
+        提权那一步是"另起一个进程跑 `bootstrap.py`"，参数只能从命令行过去。
+        mock 掉 install 会让测试"看起来很对"，实际什么都没验到。
+        """
+        seen = {}
+        patches = [
+            mock.patch.object(web.schedule, "status",
+                              lambda root: {"installed": bool(existing),
+                                            "tasks": list(existing)}),
+            mock.patch.object(web.schedule, "DEFAULT_TIME", "21:00"),
+            mock.patch.object(web.schedule, "DEFAULT_DAYS_AGO", 1),
+        ]
+        for q in patches:
+            q.start()
+            self.addCleanup(q.stop)
+        return seen
+
+    @staticmethod
+    def _arg(args, flag, default=None):
+        """从命令行参数里取值 —— 替掉"直接看函数参数"的断言。"""
+        return args[args.index(flag) + 1] if flag in args and \
+            args.index(flag) + 1 < len(args) else default
+
+    def test_schedule_repair_elevates_the_create(self):
+        """⚠ **这个按钮必须真的去"建"**，不能只是删旧的。
+
+        门店实测过：普通权限点注册，`schtasks /create` 直接报
+        `错误: 拒绝访问。`（旧任务被管理员建过时 `/f` 覆盖不了；账户被 UAC
+        过滤时更是压根建不了）。所以"提权只删、建还是普通权限建"那条路
+        **在那台机器上走不通** —— 用户点「以管理员身份重试」会毫无反应。
+
+        → 提权那一步直接跑 `schedule-install`（`/create` 自带 `/f`，
+          旧同名任务一并覆盖），参数全部从命令行过去。
+        """
+        self._fake_schedule(existing=[{"name": "CBG报量对账-21点00"}])
+        seen = {}
+
+        def runner(script, args, timeout=90):
+            seen["args"] = list(args)
+            return {"ok": True, "message": "已注册"}
+
+        st, body = self._post({"what": "schedule", "time": "20:30",
+                               "days_ago": 2, "name": "CBG报量对账-20点30"}, runner)
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        a = seen["args"]
+        self.assertEqual(a[0], "schedule-install",
+                         "要跑的是「注册」，不是「删」")
+        self.assertEqual(self._arg(a, "--time"), "20:30")
+        self.assertEqual(self._arg(a, "--days-ago"), "2")
+        self.assertEqual(self._arg(a, "--name"), "CBG报量对账-20点30")
+
+    def test_repair_button_accepts_the_full_name_the_ui_sends(self):
+        """⚠ 修复按钮手上只有 `full_name`（`\\CBG报量对账-21点20`）。
+
+        而 `schedule.install` **拒收带 `\\` 的名字**（防路径注入）→
+        不收敛成叶子名的话这个按钮**必然 400**，表现还是"点了没反应"。
+        """
+        self._fake_schedule()
+        seen = {}
+        st, body = self._post({"what": "schedule", "name": "\\CBG报量对账-21点20"},
+                              lambda script, args, timeout=90:
+                              seen.update(args=list(args)) or {"ok": True})
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(self._arg(seen["args"], "--name"), "CBG报量对账-21点20",
+                         "带反斜杠的全名要收敛成叶子名")
+
+    def test_schedule_remove_is_its_own_action(self):
+        """删也要能提权 —— 管理员建的任务，普通权限连 `/delete` 都会被拒。"""
+        self._fake_schedule()
+        seen = {}
+        st, body = self._post({"what": "schedule-remove", "name": "CBG报量对账-中午"},
+                              lambda script, args, timeout=90:
+                              seen.update(args=list(args)) or {"ok": True})
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(seen["args"][0], "schedule-remove")
+        self.assertEqual(self._arg(seen["args"], "--name"), "CBG报量对账-中午")
+
+    def test_schedule_uses_defaults_when_not_given(self):
+        """不传参数就用默认值 —— 别把 `None` 或空串一路传下去。"""
+        self._fake_schedule()
+        seen = {}
+        self._post({"what": "schedule"},
+                   lambda script, args, timeout=90:
+                   seen.update(args=list(args)) or {})
+        self.assertEqual(self._arg(seen["args"], "--time"), "21:00")
+        self.assertEqual(self._arg(seen["args"], "--days-ago"), "1")
+        self.assertNotIn("--name", seen["args"],
+                         "没给名字就别传空串，让 bootstrap 用它的默认命名")
+
+    def test_denied_or_timed_out_uac_explains_itself(self):
+        """用户点了「否」/ 忘了关那个窗口 → **要说清是哪一种**，别只报个失败。
+
+        提权子进程的窗口会停住等回车；用户不关它，父进程就等不到结果。
+        这条提示是唯一能让他反应过来"哦我还开着个窗口"的东西。
+        """
+        st, body = self._post({"what": "autostart"},
+                              lambda script, args, timeout=90: None)
+        self.assertEqual(st, 200)
+        self.assertFalse(body["ok"])
+        self.assertIsNone(body["elevated"], "拿不到结果要如实标出来")
+        self.assertIn("UAC", body["message"])
+        self.assertIn("窗口", body["message"], "要点明可能有个窗口还开着")
+
+    def test_unknown_action_is_rejected(self):
+        st, body = self._post({"what": "rm-rf"}, lambda *a, **k: {})
+        self.assertEqual(st, 400)
+        self.assertIn("不认识", body["message"])
+
+    def test_refuses_when_already_elevated(self):
+        """⚠ 服务本身就是管理员时**不许再弹 UAC** —— 那只会让人更糊涂。
+
+        管理员身份本身就是要修掉的问题；再提一次权什么都解决不了。
+        这条分支以前没有，是"怎么点都没反应"那类投诉的常见来源。
+        """
+        with mock.patch.object(web.elevate, "is_admin", lambda: True), \
+                mock.patch.object(web.elevate, "run_elevated",
+                                  mock.Mock(side_effect=AssertionError("不该走到提权"))):
+            st, body = self.srv.request("POST", "/api/elevate", {"what": "autostart"})
+        self.assertEqual(st, 200)
+        self.assertFalse(body["ok"])
+        self.assertIn("管理员", body["message"])
+        self.assertIn("普通权限", body["message"], "要给出改回去的方向")
+
+
 class TestScheduleApi(unittest.TestCase):
     def setUp(self):
         # ⚠ 不能用 enterContext —— 那是 Python 3.11+，门店电脑上是 3.9
@@ -801,8 +1050,9 @@ class TestScheduleApi(unittest.TestCase):
         """
         seen = {}
 
-        def fake_remove(name=None):
+        def fake_remove(name=None, root=None):
             seen["name"] = name
+            seen["root"] = root
             return {"ok": True, "task": name or "默认", "message": "已删除"}
 
         with mock.patch.object(web.schedule, "remove", fake_remove), \
@@ -818,8 +1068,9 @@ class TestScheduleApi(unittest.TestCase):
         """不传名字 → None → schedule.remove 用默认任务名（兼容老前端）。"""
         seen = {}
 
-        def fake_remove(name=None):
+        def fake_remove(name=None, root=None):
             seen["name"] = name
+            seen["root"] = root
             return {"ok": True}
 
         with mock.patch.object(web.schedule, "remove", fake_remove), \

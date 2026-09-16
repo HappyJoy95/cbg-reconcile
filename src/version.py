@@ -25,7 +25,15 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "CBG报量对账"
-VERSION = "1.4.11"          # 功能有增删就动这个；打包时间看 BUILD.txt
+VERSION = "1.6.0"           # 功能有增删就动这个；打包时间看 BUILD.txt
+                            # 1.6.0（主线：**兼容 Windows 7**）
+                            #        ① 支持 Windows 7 / Python 3.8.10（代码降到 3.8 能跑，
+                            #           三头 3.8.20 / 3.9.25 / 3.14 各自跑全套测试）
+                            #        ② 安装时记住解释器（多 Python 机器不装错）
+                            #        ③ 全程不再需要管理员权限（装机那次 UAC 也取消了）
+                            #        ④ 定时任务：提权注册 + 自己记一份注册参数
+                            #           （`.secrets/schedule.json`），提权建的任务
+                            #           照样看得到时间和命令
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_FILE = ROOT / "BUILD.txt"

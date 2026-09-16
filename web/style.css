@@ -162,3 +162,16 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
 .runlog { background: #0f172a; color: #cbd5e1; padding: 12px 14px; border-radius: 9px;
   font-family: var(--mono); font-size: 12px; line-height: 1.55; max-height: 320px;
   overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0 0 12px 0; }
+
+/* ───────────────────────────── hidden 兜底 ───────────────────────────── */
+/* ⚠ HTML 的 `hidden` 属性靠浏览器内置样式 `[hidden] { display: none }` 生效，
+   而那条内置规则的**优先级最低** —— 任何 `.form-row { display: flex }`、
+   `.btn { display: inline-block }` 都能压过它，于是"设了 hidden 却照样显示"。
+
+   真踩过：后台服务那个「以管理员身份修复」按钮**一直显示着**，
+   不管条件满不满足（用户连着两轮截图里都有它，还点了）；
+   `#btn-update-apply`（立即更新）同样一直显示，哪怕根本没有新版本。
+
+   这条兜住**所有**这种情况 —— 别再靠"记得给每个元素单独处理"。
+   （JS 里没有用 `style.display` 操作这些元素，所以 `!important` 不会误伤。） */
+[hidden] { display: none !important; }

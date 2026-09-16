@@ -10,14 +10,15 @@
 
 from __future__ import annotations
 
+import json
 import platform
 import re
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from .autostart import AUTOSTART_TASK
+from . import runtime
 from .winutil import decode as _decode, parse_xml, schtasks as _schtasks, xml_text
 
 TASK_NAME = "CBG报量对账"
@@ -50,8 +51,13 @@ def manual_script_path(root: Path) -> Path:
 
 
 def _python() -> str:
-    """计划任务里用什么解释器。用绝对路径，免得计划任务的环境变量跟交互式不一样。"""
-    return sys.executable or ("python" if kind() == "windows" else "python3")
+    """计划任务里用什么解释器。用绝对路径，免得计划任务的环境变量跟交互式不一样。
+
+    优先用**安装时记下的那一个**（`src/runtime.py`）—— 一台电脑上有两个 Python 时，
+    计划任务必须拉起"装过依赖的那一个"。用错了的表现是：每天到点了，
+    任务计划程序里显示"上次运行成功"，而 `out/` 里压根没有新报告。
+    """
+    return runtime.current() or ("python" if kind() == "windows" else "python3")
 
 
 def _pythonw() -> str:
@@ -269,10 +275,26 @@ def _win_list_names() -> list[str]:
     return out
 
 
-def _win_task_info(name: str) -> dict:
-    """单个任务的详情。**优先用 /xml** —— 里面的标签名是固定的英文，不受系统语言影响。"""
+def _win_task_info(name: str, record: dict = None) -> dict:
+    """单个任务的详情。**优先用 /xml** —— 里面的标签名是固定的英文，不受系统语言影响。
+
+    ## ⚠ `unreadable` 这个标记是有来历的
+
+    任务**列得出来**（`/query /fo CSV` 只读名字，普通权限就能列），
+    但**读不到详情** —— 因为它是**以管理员身份建**的：
+
+    * 任务的所有者是 `Administrators`；
+    * 而我们的服务现在是**普通权限**（过滤令牌，不在那个组里）
+      → `schtasks /query /tn <名> /xml` 直接被拒。
+
+    结果是界面上的时间/命令全空，显示成「时间没读出来」——
+    用户看到的就是**"没有管理员权限就看不到定时执行的设置"**。
+
+    所以这里要把"读不到"和"根本没有"**分开**：前者是权限问题（有救），
+    后者才该提示去注册。标出来，界面才能给出对症的话。
+    """
     info = {"name": _leaf(name), "full_name": name, "time": "", "command": "",
-            "enabled": None, "detail_source": ""}
+            "enabled": None, "detail_source": "", "unreadable": False}
     r = _schtasks(["/query", "/tn", name, "/xml"])
     if r is not None and r.returncode == 0:
         root = parse_xml(r.stdout)
@@ -291,6 +313,18 @@ def _win_task_info(name: str) -> dict:
     # 退路：解析 `字段名: 值`（中文/英文两套都试）
     r = _schtasks(["/query", "/tn", name, "/fo", "LIST", "/v"])
     if r is None or r.returncode != 0:
+        # 两条路都读不到 —— 名字明明在列表里（调用方就是这么拿到它的），
+        # 那就是**权限不够**，不是"没有这个任务"。
+        #
+        # ⚠ 但我们**自己记过**注册参数（提权建的任务读不到详情，这是常态）——
+        #   有记录就把它填上，界面照样能显示时间和命令，
+        #   再标一句"这份是注册时记下的，不是刚从系统读的"。
+        if record and record.get("time"):
+            info["time"] = record["time"]
+            info["detail_source"] = "record"
+            info["unreadable"] = False
+            return info
+        info["unreadable"] = True
         return info
     text = _decode(r.stdout)
 
@@ -310,6 +344,70 @@ def _win_task_info(name: str) -> dict:
     return info
 
 
+# ---------------------------------------------------------------- 注册记录
+# 我们**自己**记一份"注册了什么"。
+#
+# ⚠ 为什么必须有这个：那台机器上（过滤令牌的管理员）**普通权限连建都建不了**
+#   计划任务（`schtasks /create` 直接「拒绝访问」），所以只能**提权建**；
+#   而提权建出来的任务所有者是 `Administrators` —— 之后普通权限
+#   `schtasks /query /tn <名> /xml` **又被拒**，界面上时间和命令全空。
+#
+#   **那就别去问 Windows 了**：注册的时候是我们自己传的参数，记下来就行。
+#   这条不依赖任何 ACL 行为、任何系统语言、任何 schtasks 版本 ——
+#   比解析它的输出可靠得多。
+#
+# 放 `.secrets/`（selfupdate 的 NEVER_TOUCH）：它是**这台电脑的**运行状态，
+# 不该被"照仓库原样铺"的升级冲掉，也不该跟着包走。
+RECORD_FILE = ".secrets/schedule.json"
+
+
+def record_path(root) -> Path:
+    return Path(root) / RECORD_FILE
+
+
+def _recall(root) -> dict:
+    """读注册记录。读不到/坏了都给空 dict —— 这是显示用的，**绝不抛**。"""
+    try:
+        d = json.loads(record_path(root).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, TypeError, ValueError):
+        return {}
+
+
+def _remember(root, task: str, *, time_str: str = "", days_ago=None,
+              config: str = "") -> None:
+    """记下"这个任务是我们用这些参数注册的"。**写不成不影响注册本身。**"""
+    try:
+        d = _recall(root)
+        d[task] = {"time": time_str, "days_ago": days_ago, "config": config,
+                   "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        p = record_path(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _forget(root, task: str) -> None:
+    """抹掉一条注册记录。
+
+    ⚠ 要**两个键都试**：界面上删除按钮发的是 `full_name`
+    （`\\CBG报量对账-21点20`，带反斜杠），而记录里的键是**叶子名**。
+    只 `pop(task)` 的话永远删不掉 —— 表现就是"删了之后时间和命令还挂在那儿"。
+    """
+    try:
+        d = _recall(root)
+        hit = False
+        for key in {task, _leaf(task)}:
+            if key and d.pop(key, None) is not None:
+                hit = True
+        if hit:
+            record_path(root).write_text(
+                json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 # `schtasks` 每次要起一个进程（列任务 ~几百毫秒，XML 再一个进程）。
 # 概览页每 30 秒刷一次，不缓存的话光是看页面就在不停 fork。
 # 10 秒足够短 —— 用户点完注册/删除我们会**主动作废缓存**，看到的还是实时的。
@@ -321,18 +419,21 @@ def invalidate_cache() -> None:
     _LIST_CACHE["at"] = 0.0
 
 
-def _win_list(force: bool = False) -> list[dict]:
+def _win_list(force: bool = False, root=None) -> list[dict]:
     now = time.time()
     if not force and now - _LIST_CACHE["at"] < _LIST_TTL:
         return _LIST_CACHE["tasks"]
-    tasks = [_win_task_info(n) for n in _win_list_names() if _is_ours(n)]
+    rec = _recall(root)
+    tasks = [_win_task_info(n, rec.get(_leaf(n)) or rec.get(n))
+             for n in _win_list_names() if _is_ours(n)]
     _LIST_CACHE["at"] = now
     _LIST_CACHE["tasks"] = tasks
     return tasks
 
 
-def _win_status() -> dict:
-    tasks = _win_list()
+def _win_status(root=None) -> dict:
+    """`root` 用来读我们自己的注册记录（提权建的任务读不到详情时靠它兜底）。"""
+    tasks = _win_list(root=root)
     if not tasks:
         return {"installed": False, "tasks": []}
     return {"installed": True, "tasks": tasks,
@@ -357,9 +458,28 @@ def _win_install(root: Path, time_str: str, days_ago: int, config: str,
     ok = r.returncode == 0
     msg = _decode(r.stdout or r.stderr).strip()[:400]
     if not ok:
+        # ⚠ 这条提示以前写的是"试试右键 start.bat → 以管理员身份运行" —— **错的**。
+        #   start.bat 是"启动服务"，跟建计划任务没有半点关系，照着做只会白跑一趟。
+        #
+        #   真实原因有两种，而且经常叠加：
+        #   1. **旧的、由管理员建的**同名任务还在 —— 非提权进程用 `/f` 也覆盖不了它
+        #      （拒绝访问）。这条最坑：用户刚从"以管理员身份跑"切过来，旧任务必然在。
+        #   2. 非提权进程本来就建不了任务 —— 微软文档原话：
+        #      *"Only Administrators can schedule tasks"*。
+        #      **这跟开机自启不一样**：开机自启写的是当前用户自己的注册表分支
+        #      （`HKCU\\...\\Run`），任何用户都能写；计划任务建在**系统任务库**里。
+        #
+        #   好在**只有建这一下**要权限：
+        #   `/rl` 默认就是 `Limited`，所以哪怕提权去建，建出来的任务
+        #   **照样是普通权限运行的** —— 不会把"服务变管理员"那个坑带回来。
         msg = (f"{msg or 'schtasks 返回非 0'}"
-               "（注册计划任务失败 —— 可能是权限不够，"
-               "试试右键 start.bat → 以管理员身份运行；或用下面这条命令手动注册）")
+               "（注册计划任务失败。两件事要一起看："
+               "① 这个动作**需要管理员权限** —— 计划任务建在系统任务库里，"
+               "跟开机自启不一样（那个写自己的注册表，不需要权限）；"
+               "② 如果以前用**管理员身份**建过同名任务，普通权限连 `/f` 覆盖不了它。"
+               "点上面的「以管理员身份重试」即可 —— **只弹这一次 UAC**，"
+               "而且建出来的任务照样是**普通权限运行**的（schtasks 的 /rl 默认 Limited）。"
+               "或用下面这条命令在管理员命令行里手动注册）")
     return {
         "ok": ok, "task": task, "message": msg, "script": str(bat),
         "manual": " ".join(f'"{a}"' if " " in a else a for a in (["schtasks"] + args)),
@@ -453,7 +573,7 @@ def _unix_remove(name: str | None = None) -> dict:
 
 # ------------------------------------------------------------------------ API
 def status(root: Path) -> dict:
-    info = _win_status() if kind() == "windows" else _unix_status()
+    info = _win_status(root) if kind() == "windows" else _unix_status()
     info.setdefault("time", "")
     tasks = info.get("tasks") or []
     info.update({
@@ -487,14 +607,23 @@ def install(root: Path, time_str: str, days_ago: int = DEFAULT_DAYS_AGO,
     fn = _win_install if kind() == "windows" else _unix_install
     res = fn(Path(root), time_str, days_ago, config, task)
     res["time"] = time_str
+    if res.get("ok"):
+        # ⚠ 注册成功就**立刻**记下参数 —— 这是整个记录机制的意义：
+        #   一旦是提权建的（任务所有者 Administrators），普通权限以后
+        #   `schtasks /query /xml` 会被拒，界面上的时间和命令就全靠这份记录。
+        #   失败**不记**：没建成的任务不该在界面上装作存在。
+        _remember(root, task, time_str=time_str, days_ago=days_ago, config=config)
     return res
 
 
-def remove_all() -> dict:
+def remove_all(root=None) -> dict:
     """删掉**所有**我们的定时任务 —— 卸载时用。
 
     ⚠ 跟 `remove(name)` 不一样：那个只删一条（界面上点哪行删哪行），
     这个是"把整套东西撤干净"，连开机自启那个任务也一起。
+
+    `root` 传了就顺带把注册记录整个删掉（`_forget` 逐条不如直接删文件，
+    因为注册记录里可能还留着**已经不存在**的任务）。
     """
     gone, failed = [], []
     if kind() == "windows":
@@ -512,6 +641,13 @@ def remove_all() -> dict:
                 gone = [_cron_task_name(x) for x in lines if CRON_MARK in x]
             else:
                 failed.append(msg)
+    if root is not None and not failed:
+        # ⚠ **删干净了才抹记录**：还有任务没删掉的话，那份记录是界面
+        #   唯一能显示它的东西，抹了就真成"看不见也删不掉"了。
+        try:
+            record_path(root).unlink()
+        except OSError:
+            pass
     return {"ok": not failed, "removed": gone, "failed": failed,
             "message": (f"已删除 {len(gone)} 个定时任务"
                         + (f"，{len(failed)} 个删不掉：{'、'.join(failed)}" if failed else ""))}
@@ -562,7 +698,13 @@ def run_now(name: str | None = None) -> dict:
     return {"ok": False, "task": task, "message": f"没找到任务「{task}」"}
 
 
-def remove(name: str | None = None) -> dict:
-    if kind() == "windows":
-        return _win_remove(name)
-    return _unix_remove(name)
+def remove(name: str | None = None, root=None) -> dict:
+    """删掉一个定时任务。删掉了就顺手抹掉我们自己的注册记录。
+
+    ⚠ `root` 不传时**不动记录**（老调用方 / 提权子进程删完就退出，
+    记录在父进程那边抹）。传了就一并维护，免得界面上"删了还显示时间"。
+    """
+    res = _win_remove(name) if kind() == "windows" else _unix_remove(name)
+    if res.get("ok") and root is not None:
+        _forget(root, name or TASK_NAME)
+    return res

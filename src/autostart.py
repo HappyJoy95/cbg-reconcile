@@ -1,22 +1,30 @@
 """开机自动启动的注册与取消。
 
-| 平台 | 机制 | 提权 |
+| 平台 | 机制 | 权限 |
 |---|---|---|
-| Windows | **登录触发的计划任务**，`RunLevel=HighestAvailable` | ✅ 以管理员身份，**不弹 UAC** |
-| Windows（退路） | 注册表 `HKCU\\...\\Run` | ❌ 普通权限 |
+| Windows（**默认**） | 注册表 `HKCU\\...\\Run` | 普通权限，**不需要管理员、不弹 UAC** |
+| Windows（可选） | 登录触发的计划任务，`RunLevel=HighestAvailable` | 以管理员身份，注册时要一次 UAC |
 | macOS | `~/Library/LaunchAgents/com.cbg-reconcile.plist` | — |
 | Linux | `~/.config/autostart/cbg-reconcile.desktop` | — |
 
-**为什么 Windows 不用注册表 Run 项**：Run 项**没法提权**。想让服务以管理员身份
-跑，只能在兼容性标记里加 `RUNASADMIN`（`AppCompatFlags\\Layers`）—— 但那**每次开机
-都会弹一次 UAC**，门店电脑上没人会去点。
+**默认为什么是注册表 Run 项**：写的是 `HKEY_CURRENT_USER` —— 当前用户自己的
+注册表分支，跟写自己的"文档"目录一个性质，**任何用户都能写，一次 UAC 都不用弹**。
 
-登录触发的计划任务 + `HighestAvailable` 是 Windows 上唯一"静默提权"的正规做法：
-开机登录后由任务计划程序直接以高完整性级别拉起，**全程无 UAC 弹窗**。
+⚠ **这里以前默认是"以管理员身份启动"（计划任务那条），2026-09-16 改掉了。**
+原因不是洁癖，是那条路会把**自动抓华为会话彻底弄坏**：
+服务以管理员身份跑 → 它拉起来的 Edge / Chrome 也是管理员 → 而浏览器
+（Chrome 138 起明确禁止）**拒绝以管理员运行**，把命令行交棒出去就自己退 0 ——
+我们给的 `--user-data-dir` / `--remote-debugging-port` 落不到任何活着的实例上，
+调试端口永远没人监听。实测症状是「Edge 启动后立刻退出（退出码 0）」，
+而链接跑到了用户原来那个浏览器里。
 
-代价：**注册这个任务本身需要管理员权限**（这是 Windows 的安全边界，绕不过去）。
-所以 `install.bat` 会先要一次 UAC；如果拿不到（用户点了"否"，或者账号不是管理员），
-我们**退回注册表 Run 项**，功能可用但服务不是管理员，界面上会明说。
+更要命的是这个代价**换不来任何东西**：查过一遍，整个项目除了"把自己设成管理员"
+之外没有任何一处真需要管理员 ——
+每天那条定时对账任务的 `schtasks /create` **不带 `/rl`**，本来就是普通权限跑的；
+程序目录在 `D:\\cbg-reconcile`，普通用户就能写。
+
+计划任务那条路**保留着**（`elevated=True`，界面上还能选），因为它是 Windows 上
+唯一"静默提权"的正规做法，将来真有需要时还在；但界面上会明说它会让抓会话不可用。
 
 启动的是项目根目录下的 `boot.py`，它自己 `chdir` 到项目根再起服务 ——
 **不依赖任务/注册表里配工作目录**。
@@ -27,16 +35,24 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 from .winutil import decode, schtasks, xml_text
+from . import runtime
 
 APP_ID = "cbg-reconcile"
 APP_NAME = "CBG报量对账"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+# 选了"以管理员身份启动"时要跟着一起返回的警告。
+# ⚠ 单独拎出来是因为**三处都要说同一句话**（界面、命令行、发布说明），
+#   分散写迟早漏一处 —— 而漏掉的那处正好就是把人坑了的那处。
+ELEVATED_BREAKS_CAPTURE = (
+    "⚠️ 注意：以管理员身份运行时，**「自动抓华为会话」会失败** —— "
+    "Edge / Chrome 拒绝以管理员运行，会把命令行交棒出去然后自己退出，"
+    "我们等不到调试端口。真要用抓会话，把「启动方式」改回**普通权限**。")
 
 # 开机自启用的计划任务名。带后缀，跟「定时执行」那个（CBG报量对账）区分开 ——
 # 用户在任务表里一眼能看出哪个是"开机常驻"、哪个是"每天跑一次"。
@@ -58,13 +74,19 @@ def boot_script(root) -> Path:
 
 
 def _python_exe() -> str:
-    """Windows 上用 pythonw.exe —— 它**不带控制台窗口**，开机时不会闪黑框。"""
+    """开机自启用哪个解释器。
+
+    **优先用安装时记下的那一个**（`src/runtime.py`）—— 这台电脑上可能有两个
+    Python（Win7 老机器只有 3.8.10 能装，新机器 3.14），依赖只装在其中一个里。
+    开机自启用错的那个，表现是"每天开机都静静地起不来"，界面上什么都看不到，
+    只有 `out/autostart.log` 里一行 ImportError。
+
+    Windows 上再换成 `pythonw.exe` —— 它**不带控制台窗口**，开机时不会闪黑框。
+    """
+    exe = runtime.current()
     if platform.system() == "Windows":
-        exe = Path(sys.executable)
-        pyw = exe.with_name("pythonw.exe")
-        if pyw.exists():
-            return str(pyw)
-    return sys.executable or "python3"
+        return runtime.pythonw_for(exe)
+    return exe
 
 
 def command(root) -> str:
@@ -247,25 +269,33 @@ def _win_install(root, elevated: bool | None = None) -> dict:
     """注册开机自启。
 
     `elevated`：
-      * `True`  —— 登录触发的计划任务 + `HighestAvailable`（**不弹 UAC 的提权**）
-      * `False` —— 直接写注册表 Run 项（普通权限）
-      * `None`  —— 按当前进程是不是管理员来猜（老调用方）
+      * `False` 或 `None` —— 写注册表 `HKCU\\...\\Run`（普通权限）。**这是默认。**
+      * `True` —— 登录触发的计划任务 + `HighestAvailable`（以管理员身份，注册时要 UAC）
 
-    提权那条路是**默认**，但**必须留一条普通权限的路**：
-    Chrome / Edge（138+，`AutoDeElevate`）从管理员进程启动时会把自己降权重启，
-    个别机器上这一步会失败，那时唯一的解法就是让服务别以管理员跑。
-    界面上有「启动方式」下拉，就是给这个用的。
+    ⚠ **`None` 走普通权限，不猜当前进程**。这里以前是 `elevated = is_elevated()` ——
+    从提权进程里调就会静默注册成"以管理员身份启动"，而管理员身份会让
+    **自动抓会话彻底不可用**（浏览器拒绝以管理员运行，见模块顶部的说明）。
+    "猜"这个默认值踩过一次，别再改回去。
 
     两条路**互斥** —— 装一条就把另一条清掉，否则会互相打架
     （虽然 pidfile 挡住第二个实例，但任务列表里会多一条没人认识的）。
     """
-    if elevated is None:
-        elevated = is_elevated()
-
     if not elevated:
         res = _install_runkey(root)
         if res.get("ok"):
-            _drop_task()                      # 换回普通权限：把提权任务清掉
+            # 从"管理员"切回普通权限：必须把旧的提权任务清掉。
+            # ⚠ 删不掉**一定要报出来** —— 否则界面上写着"普通权限"，
+            #   开机照样被那条任务以管理员拉起来，问题原样存在还更难查。
+            gone, msg = _drop_task()
+            if not gone:
+                res = dict(res)
+                res["message"] = (
+                    f"{res['message']}，但**旧的提权任务没删掉**：{msg}。"
+                    "那条任务会在下次登录时以管理员身份把服务拉起来，"
+                    "「自动抓会话」会因此失败 —— 请右键 install.bat →「以管理员身份运行」"
+                    "再保存一次，或到「任务计划程序」里手动删掉"
+                    f"「{AUTOSTART_TASK}」。")
+                res["task_leftover"] = True
         return res
 
     # ---- 一级：登录触发 + HighestAvailable 的计划任务（不弹 UAC 的提权）
@@ -274,7 +304,8 @@ def _win_install(root, elevated: bool | None = None) -> dict:
     if r is not None and r.returncode == 0:
         _drop_runkey()
         return {"ok": True, "mode": "task", "elevated": True,
-                "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC"}
+                "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC",
+                "warning": ELEVATED_BREAKS_CAPTURE}
     xml_err = decode(r.stdout or r.stderr).strip()[:300] if r is not None else "调用 schtasks 失败"
 
     # ---- 二级：命令行形式（同样要管理员，但绕开 XML 校验差异）
@@ -284,7 +315,8 @@ def _win_install(root, elevated: bool | None = None) -> dict:
     if r2 is not None and r2.returncode == 0:
         _drop_runkey()
         return {"ok": True, "mode": "task", "elevated": True, "script": str(bat),
-                "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC"}
+                "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC",
+                "warning": ELEVATED_BREAKS_CAPTURE}
 
     # ---- 三级：注册表 Run 项（不需要权限，但**不是管理员**）
     res = _install_runkey(root)
@@ -296,9 +328,11 @@ def _win_install(root, elevated: bool | None = None) -> dict:
            if not is_elevated() else "计划任务注册被系统拒绝")
     res.update({
         "mode": "runkey", "elevated": False,
-        "message": (f"已注册开机启动，但**是普通权限**（{why}）。"
-                    "右键 install.bat →「以管理员身份运行」，或在管理员命令行里跑 "
-                    "`python bootstrap.py autostart` 可改为管理员身份启动。"),
+        "message": (f"已注册开机启动，**普通权限**（想以管理员身份启动但没成：{why}）。"
+                    "普通权限就够用，不用管这条；真想让服务以管理员跑，"
+                    "右键 install.bat →「以管理员身份运行」，"
+                    "或在管理员命令行里跑 `python bootstrap.py autostart --elevated`"
+                    f"（但那样「自动抓会话」会不可用）。"),
         "task_error": xml_err,
     })
     return res
@@ -327,8 +361,43 @@ def _drop_runkey() -> None:
         pass
 
 
-def _drop_task() -> None:
-    schtasks(["/delete", "/tn", AUTOSTART_TASK, "/f"])
+def _task_exists() -> bool:
+    """那条开机自启的计划任务现在在不在。
+
+    ⚠ **先问再删**，不要靠解析 `schtasks /delete` 的报错文案来判断"任务本来就没有"——
+    那个文案是**本地化**的（中文 Windows 上是「错误: 系统找不到指定的文件。」），
+    按它判断等于把逻辑绑死在某一种系统语言上。`/query` 只看退出码，跟语言无关。
+    """
+    r = schtasks(["/query", "/tn", AUTOSTART_TASK])
+    return r is not None and r.returncode == 0
+
+
+def _drop_task() -> tuple:
+    """删掉开机自启的**计划任务**。
+
+    返回 `(删干净了没, 说明)`，三种情况：
+      * 任务本来就不存在 → `(True, "")` —— 不算失败，`_win_remove` 也据此判断"要不要报一声"
+      * 删掉了           → `(True, "已删除开机启动任务")`
+      * 没删掉           → `(False, "<schtasks 给的原因>")`
+
+    ⚠ **删失败必须报出来**，不能像以前那样静默丢掉返回值。
+    从"以管理员身份启动"切回"普通权限"时，如果这条任务没删掉，
+    下次登录它照样以管理员把服务拉起来 —— 界面上写着"普通权限"、抓会话的报错
+    却说是"管理员"，比不切还难查。而删它**需要管理员权限**，偏偏"切回普通权限"
+    这个动作常常是在非管理员进程里做的，正好删不掉。
+
+    ⚠ 只在这一个函数里查一次存在性。调用方（`_win_remove`）以前自己也先查一遍，
+    等于每次卸载都白跑一条 `schtasks /query`。
+    """
+    if not _task_exists():
+        return True, ""
+    r = schtasks(["/delete", "/tn", AUTOSTART_TASK, "/f"])
+    if r is not None and r.returncode == 0:
+        return True, "已删除开机启动任务"
+    if r is None:
+        return False, "调不动 schtasks（找不到它？）"
+    out = decode(r.stdout or b"").strip() or decode(r.stderr or b"").strip()
+    return False, (out.splitlines()[0][:160] if out else "schtasks 返回非零但没给原因")
 
 
 def _win_remove() -> dict:
@@ -337,9 +406,10 @@ def _win_remove() -> dict:
     卸载也走这里，所以**两种模式都要能清干净**（用户可能中途换过方式）。
     """
     notes = []
-    r = schtasks(["/delete", "/tn", AUTOSTART_TASK, "/f"])
-    if r is not None and r.returncode == 0:
-        notes.append("已删除开机启动任务")
+    gone, msg = _drop_task()
+    if msg:
+        notes.append(msg if gone
+                     else f"⚠️ 开机启动任务没删掉（{msg}）—— 到「任务计划程序」里手动删")
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
@@ -443,6 +513,9 @@ def status(root) -> dict:
         # 可能注册成了管理员任务，但你现在是从普通双击的 start.bat 在看页面
         "self_elevated": is_elevated(),
         "self_admin": is_elevated(),
+        # ⚠ 这台电脑是不是**根本没法不管理员**（内置 Administrator / UAC 关着）。
+        #   有值的话，界面上就别再让人"改成普通权限"了 —— 改了也没用。
+        "always_admin_reason": _always_admin_reason(),
     })
     info.setdefault("elevated", False)
     info.setdefault("mode", None)
@@ -456,6 +529,15 @@ def status(root) -> dict:
     return info
 
 
+def _always_admin_reason() -> str:
+    """问 `elevate` 要一句"为什么这台机器上所有程序都是管理员"。查不到就空串。"""
+    try:
+        from .elevate import always_admin_reason
+        return always_admin_reason()
+    except Exception:                        # noqa: BLE001
+        return ""
+
+
 def _norm(s: str) -> str:
     """比较注册的命令时去掉引号和多余空格 —— XML 里是 `Command` + `Arguments` 两段拼的，
     跟 `command()` 拼出来的字符串在引号上可能不完全一致，但那不是"路径变了"。"""
@@ -463,6 +545,11 @@ def _norm(s: str) -> str:
 
 
 def install(root, elevated: bool | None = None) -> dict:
+    """注册开机自启。Windows 上**默认是普通权限**（注册表 Run 项），不弹 UAC。
+
+    `elevated=True` 是显式选择"以管理员身份启动"（计划任务，注册时要一次 UAC）——
+    那条路会让「自动抓会话」失败，返回结果里会带上 `ELEVATED_BREAKS_CAPTURE` 警告。
+    """
     if not boot_script(root).exists():
         return {"ok": False, "message": f"缺少 {boot_script(root).name}，没法注册"}
     k = kind()

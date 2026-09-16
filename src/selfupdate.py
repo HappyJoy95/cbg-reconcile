@@ -115,7 +115,13 @@ def _log(msg: str) -> None:
 #
 # ⚠ 万一哪天有人把 `config/` 提交进仓库了，这个名单是最后一道闸 ——
 #   tests/test_selfupdate.py 里有一条测试专门验它。
-NEVER_TOUCH = ("config", ".secrets", "out", "dist", "tools", "__pycache__")
+NEVER_TOUCH = ("config", ".secrets", "out", "dist", "tools", "__pycache__", ".dsh")
+
+# ⚠ `.dsh/` 也在名单里：它是**工作区隔离区**（记忆日志 / 备份 / 临时任务 /
+#   本机 venv），跟 `.secrets/` 一样是"这台电脑自己的东西"。
+#   它本来就在 `.gitignore` 里、进不了仓库，所以自更新拿到的 zip 里不会有它；
+#   列在这里是**明说这件事**，顺便让 `tools/build_package.sh` 的排除项
+#   跟这里对得上（那边以前漏了 `.dsh/`，把本机 venv 打进过包，被自检逮住）。
 
 # 例外：这几个虽然在 NEVER_TOUCH 底下，但它们是**随程序走的**，不是门店自己的数据。
 #   config/stores.yaml —— 14 家体验店的映射表（串号标识 → 门店）。加了新店，

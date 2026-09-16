@@ -19,7 +19,8 @@ from pathlib import Path
 
 import yaml
 
-from . import autostart, browser, config_io, lockfile, mailer, service, version, wecom
+from . import (autostart, browser, config_io, lockfile, mailer, runtime,
+               service, version, wecom)
 from .cbg import CbgClient, CbgError
 from .erp import (ErpCaptchaRequired, ErpClient, ErpError, describe_credentials,
                   effective_env_file, load_credentials)
@@ -91,11 +92,19 @@ def cmd_auth(args) -> int:
     if args.auto or args.refresh:
         headless = bool(args.refresh)
 
-        def _verify(s) -> bool:
+        def _verify(s):
+            """⚠ 返回 `(过没过, 为什么)`，**别只返回 bool**。
+
+            `ping()` 的第二个返回值里写着真正的病因
+            （"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"），
+            老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
+            实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
+            """
             try:
-                return CbgClient(s, store_code=cfg.get("store_code") or None, timeout=25).ping()[0]
-            except (CbgAuthError, CbgError):
-                return False
+                ok, why = CbgClient(s, store_code=cfg.get("store_code") or None, timeout=25).ping()
+                return ok, why
+            except (CbgAuthError, CbgError) as e:
+                return False, f"{type(e).__name__}: {e}"
 
         creds = browser.load_login_credentials(cfg, ROOT)
         if creds[0] and creds[1]:
@@ -295,11 +304,19 @@ def _run_check(args, cfg: dict) -> int:
         print("      会话失效 → 用浏览器 profile 静默续期（自检通过才会覆盖）…")
         store = cfg.get("store_code") or None
 
-        def _verify(s) -> bool:
+        def _verify(s):
+            """⚠ 返回 `(过没过, 为什么)`，**别只返回 bool**。
+
+            `ping()` 的第二个返回值里写着真正的病因
+            （"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"），
+            老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
+            实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
+            """
             try:
-                return CbgClient(s, store_code=store, timeout=25).ping()[0]
-            except (CbgAuthError, CbgError):
-                return False
+                ok, why = CbgClient(s, store_code=store, timeout=25).ping()
+                return ok, why
+            except (CbgAuthError, CbgError) as e:
+                return False, f"{type(e).__name__}: {e}"
 
         try:
             creds = browser.load_login_credentials(cfg, ROOT)
@@ -552,12 +569,17 @@ def _spawn_detached(argv: list[str]):
 
 
 def _python_for_background() -> str:
-    """Windows 上用 pythonw.exe —— 它不带控制台窗口，不会闪黑框。"""
-    exe = sys.executable or "python"
+    """后台服务用哪个解释器。
+
+    **优先用安装时记下的那一个**（`src/runtime.py`）：一台电脑上有两个 Python 时，
+    后台服务必须拉起来装过依赖的那个，否则 `start.bat` 报了"启动失败"，
+    而真正的原因只是拉错了 Python。
+
+    Windows 上再换成 `pythonw.exe` —— 它不带控制台窗口，不会闪黑框。
+    """
+    exe = runtime.current()
     if platform.system() == "Windows":
-        pyw = Path(exe).with_name("pythonw.exe")
-        if pyw.exists():
-            return str(pyw)
+        return runtime.pythonw_for(exe)
     return exe
 
 
@@ -655,8 +677,25 @@ def cmd_selftest(args) -> int:
         print("  门店　 ⚠️ 没配全（store_code / erp_store_name）—— "
               "到控制台「设置 → 门店」里填")
         print("          ⚠️ 配错门店会对到别的店账上去，而且看起来一切正常")
-    # 门店电脑上是 3.14，开发机是 3.9 —— 出问题时这一行能省很多来回
+    # 门店电脑上可能是 3.14，也可能是 Win7 老机器的 3.8.10 —— 出问题时这一行能省很多来回。
+    # ⚠ **两个都要打印**：现在跑着的这个，和安装时记下的那个。不一样就说明
+    #   "双击 bat 用错 Python 了"，那是门店最常见的一类"装没成功"。
     print(f"  Python {platform.python_version()}（{sys.executable}）")
+    try:
+        from .elevate import always_admin_reason
+        _why = always_admin_reason()
+    except Exception:                                      # noqa: BLE001
+        _why = ""
+    if _why:
+        # 这不是"提示"，是**这台电脑上抓会话注定失败的原因** —— 单独一行说清楚
+        print(f"  ⚠️ {_why}")
+    _pin = runtime.describe(ROOT)
+    if _pin.get("pinned"):
+        same = runtime.same_install(str(_pin["python"]), sys.executable or "")
+        print(f"  安装时用的是 {_pin['version']}（{_pin['python']}）"
+              + ("" if same else "　⚠️ 跟现在跑的不是同一个"))
+    else:
+        print("  安装时用的 Python：没记录（双击 install.bat 会补上）")
     print(f"  系统　 {platform.system()} {platform.release()}")
     import importlib.metadata as md
     for pkg in ("requests", "PyYAML", "openpyxl"):

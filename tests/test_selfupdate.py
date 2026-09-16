@@ -281,6 +281,73 @@ class TestWhitelist(unittest.TestCase):
                     "out/run.log", "dist/x.zip", "tools/build_package.sh"):
             self.assertNotIn(bad, targets, f"黑名单漏了，会覆盖 {bad}")
 
+    def test_packaging_script_never_ships_the_workspace_dir(self):
+        """打包脚本必须排除 `.dsh/` —— 那是工作区隔离区。
+
+        ⚠ **真出过事**：`rsync` 的排除列表里一直没有 `.dsh/`，只是因为那阵子
+        里面恰好没东西，所以谁都没发现。有一天本机 venv 建在了
+        `.dsh/tasks/` 下，整个 venv 被塞进包里，最后是
+        「包里不能有本机绝对路径」那条自检把它拦下来的。
+
+        `.dsh/` 里有记忆日志、备份、临时任务、本机 venv —— 跟 `.secrets/`
+        一样是"这台电脑自己的东西"，发给门店既没用也不合适。
+
+        这里同时钉住**两处**：脚本里的 rsync 排除项，和 `NEVER_TOUCH`。
+        两处对不上就是下次踩坑的开始。
+
+        ⚠ **打包脚本本身不进包**（`rsync` 排除 `tools/`），而门店那边 `selftest`
+        会跑测试 —— 所以装出来的包里要**跳过**这条，否则门店每次自检都红一条，
+        而它红得毫无意义（那条脚本根本不在那台电脑上）。
+        ⚠ 只在 `tools/` **整个目录都没有**时跳过。目录在、脚本不在 = 有人挪走了它，
+        那是真问题，**要让它炸**，别用"文件不存在就跳过"把真问题一起吞掉。
+        """
+        tools = Path(__file__).resolve().parent.parent / "tools"
+        if not tools.is_dir():
+            self.skipTest("装出来的包里没有 tools/（打包脚本不进包）—— 这条只在仓库里跑")
+        script = (tools / "build_package.sh").read_text(encoding="utf-8")
+        self.assertIn("--exclude '.dsh/'", script, "打包脚本没排除 .dsh/")
+        self.assertIn('check_absent "${STAGE}/.dsh"', script,
+                      "还缺一条自检 —— 排除项哪天被删了没人会发现")
+        self.assertIn(".dsh", selfupdate.NEVER_TOUCH,
+                      "自更新也该明说不碰 .dsh/")
+
+    def test_release_notes_python_has_no_invalid_escapes(self):
+        """⚠ 发布说明那段 Python 里的反斜杠必须**写两个**。
+
+        它在 `build_package.sh` 里是个 f-string，而正文里到处是 Windows 路径
+        （`.secrets` 下面那个 json）和带反斜杠的任务名。写一个的话
+        Python 会当成「无效转义」：现在只是每次打包刷一条 `SyntaxWarning`，
+        以后版本会直接报错 —— **而打包脚本报错是在发版那一刻才发现**。
+        这条把它提前到 `pytest` 里。
+
+        ⚠ 已有的 `test_no_invalid_escape_sequences` 只扫 `.py` 文件，
+        **扫不到这个 `.sh`** —— 所以这条不是重复。
+        """
+        import re as _re
+        tools = Path(__file__).resolve().parent.parent / "tools"
+        if not tools.is_dir():
+            self.skipTest("装出来的包里没有 tools/")
+        script = (tools / "build_package.sh").read_text(encoding="utf-8")
+        m = _re.search(r"<<'RELNOTES'\n(.*?)\nRELNOTES\n", script, _re.S)
+        self.assertIsNotNone(m, "找不到发布说明那段 heredoc —— 打包脚本动过了？")
+        code = m.group(1)
+        import warnings as _w
+        with _w.catch_warnings(record=True) as got:
+            _w.simplefilter("always")
+            compile(code, "release-notes", "exec")
+        # ⚠ **两个 category 都要查**：3.9 上是 `DeprecationWarning`，
+        #   3.13+ 才升级成 `SyntaxWarning`。只查后者的话，
+        #   **开发机（3.9）上这条测试等于没写** —— 这个坑本项目已经踩过一次，
+        #   见 `test_no_invalid_escape_sequences` 里的同一句提醒。我真又踩了一次：
+        #   第一版只查 SyntaxWarning，故意把反斜杠改成单个，测试照样绿。
+        # ⚠ `SyntaxWarning` / `DeprecationWarning` 是**内置**的，不在 `warnings` 里 ——
+        #   `_w.SyntaxWarning` 会 AttributeError（写错过一次）
+        bad = [f"release-notes:{x.lineno}: {x.message}" for x in got
+               if issubclass(x.category, (SyntaxWarning, DeprecationWarning))
+               and "invalid escape sequence" in str(x.message)]
+        self.assertEqual(bad, [], "发布说明里有无效转义（反斜杠要写成两个）：\n"
+                                  + "\n".join(bad))
+
     def test_stores_yaml_is_updated_but_its_neighbour_is_not(self):
         """⚠ `config/` 里住着两种东西，必须分开对待：
 
