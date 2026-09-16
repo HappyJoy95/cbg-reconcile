@@ -1289,3 +1289,54 @@ class TestCaptchaDuringManualLogin(unittest.TestCase):
     def test_no_captcha_means_no_callback(self):
         need, _ = self._run(False, json.dumps({"captcha": False}))
         self.assertEqual(need, [])
+
+
+class TestDeleteProfile(unittest.TestCase):
+    """⚠ 删目录是**破坏性**操作，先自检再删。
+
+    `session.browser_profile` 是可配的（可以配成任意绝对路径）——
+    配错了就是 `rmtree` 掉一个不相干的目录。所以只认"看起来像 Chromium
+    profile"的目录（里面有 `Local State` 或 `Default/`）。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.base = Path(self.dir.name)
+
+    def _profile(self, name="browser-profile"):
+        d = self.base / name
+        (d / "Default").mkdir(parents=True)
+        (d / "Local State").write_text("{}", encoding="utf-8")
+        return d
+
+    def test_deletes_a_real_profile(self):
+        d = self._profile()
+        ok, msg = browser.delete_profile(d)
+        self.assertTrue(ok, msg)
+        self.assertFalse(d.exists())
+
+    def test_refuses_a_directory_that_is_not_a_profile(self):
+        """⚠ 这条是防 `browser_profile` 配错路径把别的东西删了。"""
+        d = self.base / "重要资料"
+        d.mkdir()
+        (d / "合同.txt").write_text("x", encoding="utf-8")
+        ok, msg = browser.delete_profile(d)
+        self.assertFalse(ok)
+        self.assertTrue(d.exists(), "不是 profile 就不许删")
+        self.assertIn("browser_profile", msg, "要指出可能是配置配错了")
+
+    def test_missing_dir_counts_as_done(self):
+        ok, _ = browser.delete_profile(self.base / "从来没有过")
+        self.assertTrue(ok, "本来就不在 = 目的已达到")
+
+    def test_delete_failure_is_reported_not_swallowed(self):
+        """删不掉时**如实报出来** —— 不假装删干净了。"""
+        d = self._profile()
+        with mock.patch.object(browser.shutil, "rmtree",
+                               side_effect=OSError("being used by another process")), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            ok, msg = browser.delete_profile(d)
+        self.assertFalse(ok)
+        self.assertIn("删不掉", msg)
+        self.assertIn("being used", msg, "把系统的原话带出来，人才知道去关什么")

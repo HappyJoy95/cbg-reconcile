@@ -472,6 +472,51 @@ DE_ELEVATE_GRACE = 8.0   # 启动进程死了之后，还给端口多少次机�
 DEATH_GRACE = 1.2        # 判"浏览器关掉了"之前，连续探这么久才认（见 DetachedBrowser.poll）
 
 
+# 一个目录像不像 Chromium 的 profile。删之前拿它自检 ——
+# `session.browser_profile` 配错路径的话，这里就是最后一道闸。
+_PROFILE_MARKERS = ("Local State", "Default")
+
+
+def delete_profile(profile_dir) -> tuple:
+    """整个删掉一个浏览器 profile 目录。返回 `(删掉了没, 说明)`。
+
+    ## 为什么要删
+
+    自动登录撞上验证码时，这个 profile 是个**半成品**：没有可用登录态，
+    留着只会让下次从脏状态开始（历史上它还制造过
+    `RESULT_CODE_PROFILE_IN_USE = 21` 那种"profile 被占着"的连锁失败）。
+
+    ## ⚠ 两条硬要求
+
+    1. **先自检再删**：只认里面有 `Local State` 或 `Default/` 的目录。
+       `browser_profile` 是可配的，配错就是删掉一个不相干的目录。
+    2. **删不掉要如实说**：Windows 上还开着浏览器/杀软占着就删不掉。
+       不许假装删干净了 —— 那会让人以为环境是干净的，下次更难查。
+
+    ⚠ 调用方必须**等浏览器真的关掉之后**再调它（`capture_session` 的 `finally`
+    里 `_shutdown` 跑完）。Windows 上有句柄就删不掉，重试也没用。
+    """
+    d = Path(profile_dir)
+    if not d.exists():
+        return True, "profile 目录本来就不在"
+    if not d.is_dir():
+        return False, f"{d} 不是目录，没动它"
+    if not any((d / m).exists() for m in _PROFILE_MARKERS):
+        return False, (f"{d} 里没有浏览器 profile 的痕迹"
+                       f"（{'、'.join(_PROFILE_MARKERS)} 都没有），**没删** —— "
+                       "顺便检查一下配置里的 session.browser_profile 是不是配错了")
+    last = ""
+    for _ in range(5):
+        try:
+            shutil.rmtree(d)
+            return True, f"已重置 profile（{d}）"
+        except OSError as e:
+            last = str(e)
+            time.sleep(0.4)          # Windows 上句柄释放慢，等一下再试
+    return False, (f"删不掉 profile（{d}）：{last}。"
+                   "关掉所有浏览器窗口再试，或手动删掉这个目录")
+
+
 def profile_locked(profile_dir) -> bool:
     """profile 是不是**正被别的浏览器实例占着**。
 
