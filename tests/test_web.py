@@ -491,10 +491,17 @@ class TestServiceStartWait(unittest.TestCase):
 
     def test_the_default_wait_is_long_enough_for_a_cold_start(self):
         """默认等待别退回 25 秒 —— 门店冷启动会超。"""
-        import inspect
+        # ⚠ 原来的写法是 `inspect.getsource(cli.main)` 里找 'default=60' ——
+        #   解析器搬进 `build_parser()` 之后那个取样点就空了。
+        #   改成**内省解析器本身**：源码怎么挪都不影响，而且量的是真值不是文本。
         from src import cli
-        src = inspect.getsource(cli.main)
-        self.assertIn('default=60', src, "service-start 的等待时间不该短于 60 秒")
+        ap = cli.build_parser()
+        sub = [a for a in ap._actions
+               if hasattr(a, "choices") and a.choices and "service-start" in a.choices][0]
+        opt = [a for a in sub.choices["service-start"]._actions
+               if "--timeout" in a.option_strings][0]
+        self.assertGreaterEqual(opt.default, 60,
+                                "service-start 的等待时间不该短于 60 秒")
 
 
 class TestRunLogFeed(unittest.TestCase):
@@ -1227,3 +1234,86 @@ class TestCaptchaInCaptureWorker(unittest.TestCase):
         snap = self._run(other)
         self.assertEqual(snap["state"], "error")
         self.assertTrue(self.profile.exists(), "不是验证码就别删 profile")
+
+
+class TestRunnerScriptSelfHeal(unittest.TestCase):
+    """⚠ **发版阻断的解法**（方案 B）：概览页顺手自愈 `run.bat`。
+
+    `run.bat` / `run-now.bat` 是**安装时生成、不进版本库**的，
+    自更新**不会重写它们**。而 2.0.0 的日常流程换了命令
+    （`check` → `daily`）—— 门店那份 bat 不改的话，`check` 会每天
+    以「库不新鲜」失败。
+
+    `schedule.refresh_runner_scripts()` 本来就是干这个的，**但它从来没跑过**：
+    它挂在 `GET /api/schedule` 上，而前端**从不 GET 那个路径**
+    （只有 POST 注册 / POST 运行 / DELETE 删除）。
+    改挂到概览页 —— 概览是每次开界面都会拉的。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        # ⚠ `script_path()` 按平台给 `run.bat` 还是 `run.sh` ——
+        #   整类都得当成 Windows，否则 fixture 写的是 run.sh、
+        #   而重建去找的是 run.bat，两边对不上（第一版就这么错的）。
+        p = mock.patch.object(schedule, "kind", lambda: "windows")
+        p.start()
+        self.addCleanup(p.stop)
+        self.app = web.App(self.root, "config/store-X.yaml")
+
+    def _legacy_bat(self):
+        """写一份老门店那样的 v4 脚本（命令是 check）。"""
+        p = schedule.script_path(self.root)
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write("@echo off\r\nrem cbg-runner v4\r\n"
+                    '"py" -m src.cli -c "config/store-X.yaml" check --days-ago 1\r\n')
+        return p
+
+    def test_过时的脚本会被重建(self):
+        p = self._legacy_bat()
+        self.app.overview()
+        body = p.read_text(encoding="utf-8")
+        self.assertIn("daily --days-ago 1", body)
+        self.assertIn(schedule.RUNNER_MARK, body)
+
+    def test_重建过就在返回里说一声(self):
+        """界面可以据此提一句 —— 免得门店发现命令悄悄变了会懵。"""
+        self._legacy_bat()
+        self.assertTrue(self.app.overview()["runner_rebuilt"])
+
+    def test_没改动就不说重建了(self):
+        schedule.write_runner_script(self.root, "config/store-X.yaml", 1)
+        self.assertFalse(self.app.overview()["runner_rebuilt"])
+
+    def test_每进程只试一次(self):
+        """⚠ 概览 30 秒轮询一次。不收敛的话每次都要读一遍 run.bat，
+        而且升级那一刻可能**正跑着任务去覆盖 bat**
+        （Windows 上 cmd 正在执行的 .bat 未必能覆盖掉）。
+        """
+        self._legacy_bat()
+        with mock.patch.object(schedule, "refresh_runner_scripts",
+                               wraps=schedule.refresh_runner_scripts) as m:
+            for _ in range(5):
+                self.app.overview()
+        self.assertEqual(m.call_count, 1, "概览轮询时反复重建了启动脚本")
+
+    def test_自愈炸了也不能拖垮概览(self):
+        """概览是最重要的接口 —— 它挂了整个界面就白屏。
+
+        （真失败也不怕：`run_check.py` 里那个垫片还兜着。）
+        """
+        with mock.patch.object(schedule, "refresh_runner_scripts",
+                               side_effect=OSError("磁盘只读")):
+            ov = self.app.overview()          # 不许抛
+        self.assertIn("version", ov)
+        self.assertFalse(ov["runner_rebuilt"])
+
+    def test_失败之后不再重试(self):
+        """失败也把标志置上 —— 否则每次轮询都去撞同一堵墙。"""
+        with mock.patch.object(schedule, "refresh_runner_scripts",
+                               side_effect=OSError("磁盘只读")) as m:
+            self.app.overview()
+            self.app.overview()
+        self.assertEqual(m.call_count, 1)

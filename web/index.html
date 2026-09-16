@@ -28,6 +28,7 @@
 
 <nav class="tabs">
   <button class="tab active" data-tab="reports">报告</button>
+  <button class="tab" data-tab="pos">POS 合规</button>
   <button class="tab" data-tab="run">运行</button>
   <button class="tab" data-tab="session">会话</button>
   <button class="tab" data-tab="settings">设置</button>
@@ -57,6 +58,29 @@
     </div>
     <div class="subtabs" id="sheet-tabs"></div>
     <div id="sheet-body"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── POS 合规 ───────────────────────────── -->
+<section class="panel" id="panel-pos">
+  <div class="cards" id="pos-cards"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>月度 POS 合规率 <span class="hint" id="pos-meta"></span></h2>
+      <button class="btn ghost small" id="btn-refresh-pos">刷新</button>
+    </div>
+    <div id="pos-table"></div>
+    <div class="hint" style="margin-top:10px;line-height:1.7">
+      <b>口径</b>：分母 = 非国补、非即时零售、非 Care+ 的订单金额
+      （<b>团单保留</b>，它走单独申诉）；
+      分子 = 其中的<b>非现金</b>支付金额（微信/支付宝/花呗/刷卡…只要是现金以外都算）。<br>
+      <b>退货</b>：在<b>退货发生当月</b>扣减原单的金额与非现金部分。<br>
+      <b>两个口径并排</b>：「按标签」认 <code>orderLabelList</code>、「按备注」认 <code>remark == '国补'</code>
+      —— 实测两者会不一致，所以两个数都要看。<br>
+      ⚠ <b>暂定</b>：退货在退货当月扣减 ⇒ <b>上一个月的分数还会被这个月的退货改</b>，
+      所以最近两个月标暂定，等它过完才定稿。
+    </div>
   </div>
 </section>
 

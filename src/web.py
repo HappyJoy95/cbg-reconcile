@@ -192,6 +192,9 @@ class App:
         self.config = config
         self.server = None                  # serve() 里塞进来，/api/shutdown 要用
         self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 启动脚本自愈只做一次（见 `_selfheal_runner_script`）
+        self._runner_healed = False
+        self._runner_rebuilt = False
 
     @property
     def config_path(self) -> Path:
@@ -356,9 +359,64 @@ class App:
         return wc
 
     # ------------------------------------------------------------------ 总览
+    def pos(self) -> dict:
+        """「POS 合规」tab 的数据 —— **纯读盘，一个网络请求都不发**。
+
+        依据就是上面那条注释（概览页 30 秒刷一次，不能每次都戳网）。
+        POS 分数由 `python -m src.cli pos`（或日常流程）算好落 `out/pos-<年>.json`，
+        看板只负责把它读出来。**看板不做计算，也不登任何系统。**
+        """
+        files = sorted(self.out_dir.glob("pos-[0-9][0-9][0-9][0-9].json"))
+        if not files:
+            return {"exists": False, "rows": [],
+                    "hint": "还没算过 —— 先抓数（dump）再算分（pos）"}
+        newest = files[-1]
+        try:
+            d = json.loads(newest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return {"exists": False, "rows": [], "error": "%s：%s" % (newest.name, e)}
+        d["exists"] = True
+        d["file"] = newest.name
+        return d
+
+    def _selfheal_runner_script(self) -> None:
+        """`run.bat` 过时就按当前模板重建 —— **每进程只试一次**。
+
+        ## 为什么必须挂在这儿
+
+        `run.bat` / `run-now.bat` 是**安装时生成、不进版本库**的，
+        自更新**不会重写它们**。而 2.0.0 的日常流程换了命令
+        （`check` → `daily`：先抓华为当月写进库，再做两个分析）——
+        门店那份 bat 不改的话，`check` 会每天以「库不新鲜」失败。
+
+        `schedule.refresh_runner_scripts()` 本来就是干这个的，
+        **但它挂在 `GET /api/schedule` 上，而前端从不 GET 那个路径**
+        （只有 POST 注册 / POST 运行 / DELETE 删除）—— 从来没跑过。
+        挂到概览页上：概览是**每次开界面都会拉**的，于是它真的会跑。
+
+        ## 为什么只试一次
+
+        概览 30 秒轮询一次，`refresh_runner_scripts` 每次都要读一遍 `run.bat`。
+        一次文件读不算什么，但**重建**只在升级后发生一次 ——
+        用一个实例标志把它收敛掉，顺带避免"正跑着任务时去覆盖 bat"
+        （Windows 上 cmd 正在执行的 .bat 未必能覆盖掉）。
+        失败也不再重试：真失败了，`run_check.py` 里那个垫片还兜着。
+        """
+        if getattr(self, "_runner_healed", False):
+            return
+        self._runner_healed = True
+        try:
+            rebuilt = schedule.refresh_runner_scripts(self.root, self.config)
+        except Exception:                       # noqa: BLE001 - 自愈失败不该拖垮概览
+            return
+        if rebuilt:
+            # 让界面能提一句"启动脚本已更新" —— 门店下次看到命令变了不会懵
+            self._runner_rebuilt = True
+
     def overview(self) -> dict:
         cfg = config_io.load_raw(self.config_path)
         latest = manager.latest()
+        self._selfheal_runner_script()
         return {
             "root": str(self.root),
             "version": version.VERSION,
@@ -371,6 +429,9 @@ class App:
             "config": {"path": self.config, "values": config_io.pick(cfg)},
             "session": self.session_info(),
             "schedule": schedule.status(self.root),
+            # "启动脚本这次被重建过" —— 界面可以据此提一句，
+            # 免得门店发现定时任务的命令悄悄变了会懵
+            "runner_rebuilt": self._runner_rebuilt,
             "reports": list_reports(self.out_dir),
             "run": latest.snapshot(0) if latest else None,
             "running": bool(manager.current()),
@@ -483,6 +544,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/overview" and method == "GET":
             return self._json(app.overview())
+
+        if path == "/api/pos" and method == "GET":
+            return self._json(app.pos())
 
         # ---- 报告
         if path == "/api/report" and method == "GET":

@@ -78,9 +78,66 @@ $$('.tab').forEach((b) => b.addEventListener('click', () => {
   $$('.tab').forEach((x) => x.classList.toggle('active', x === b));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + b.dataset.tab));
   if (b.dataset.tab === 'reports') loadOverview();
+  if (b.dataset.tab === 'pos') loadPos();
   if (b.dataset.tab === 'session') { renderSession(); loadBrowserInfo(); loadHwLogin(); }
   if (b.dataset.tab === 'settings') loadConfig();
 }));
+
+/* ───────────────────────────── POS 合规 ───────────────────────────── */
+
+// ⚠ 不按达标线染色 —— **达标线还没定**，染了就是编一个阈值出来。
+//   等用户给了线，再在 pct() 里加 .ok/.warn/.bad。
+const pct = (v) => (v == null ? '—' : v.toFixed(2) + '%');
+const money = (v) => (v == null ? '—' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
+function posKpi(title, cur, appeal, den, provisional) {
+  return `<div class="kpi"><div class="k">${esc(title)}${provisional ? ' ⚠暂定' : ''}</div>`
+    + `<div class="v">${pct(cur)}</div>`
+    + `<div class="k" style="margin-top:4px">申诉后 ${pct(appeal)} · 分母 ${money(den)}</div></div>`;
+}
+
+async function loadPos() {
+  let d;
+  try {
+    d = await api('/api/pos');
+  } catch (e) {
+    toast('读取 POS 数据失败：' + e.message, 'bad');
+    return;
+  }
+  const meta = $('#pos-meta');
+  if (!d.exists) {
+    meta.textContent = '';
+    $('#pos-cards').innerHTML = '';
+    $('#pos-table').innerHTML = '<div class="empty">' + esc(d.hint || d.error || '还没有数据') + '</div>';
+    return;
+  }
+  renderPos(d);
+}
+
+function renderPos(d) {
+  const rows = d.rows || [];
+  $('#pos-meta').textContent =
+    `${d.year} 年 · ${d.orders} 单 / 退货 ${d.returns} 张 · 算于 ${d.generated_at}`;
+
+  // 最近一个有分数的月（最老的月可能因为全是国补而分母为 0）
+  const withRate = rows.filter((r) => r.label && r.label.rate != null);
+  const last = withRate[withRate.length - 1] || rows[rows.length - 1] || null;
+  $('#pos-cards').innerHTML = last
+    ? posKpi(last.month + ' 按标签', last.label.rate, last.label.ap_rate, last.label.den, last.provisional)
+      + posKpi(last.month + ' 按备注', last.remark.rate, last.remark.ap_rate, last.remark.den, last.provisional)
+    : '';
+
+  const head = ['月份', '按标签', '按标签·申诉后', '按备注', '按备注·申诉后', '分母(标签)', '进分母单数'];
+  const body = rows.map((r) => [
+    r.month + (r.provisional ? ' ⚠暂定' : ''),
+    pct(r.label.rate), pct(r.label.ap_rate),
+    pct(r.remark.rate), pct(r.remark.ap_rate),
+    money(r.label.den), r.label.orders,
+  ]);
+  $('#pos-table').innerHTML = table(head, body, ['', 'num', 'num', 'num', 'num', 'num', 'num']);
+}
+
+$('#btn-refresh-pos') && $('#btn-refresh-pos').addEventListener('click', loadPos);
 
 /* ───────────────────────────── 总览 ───────────────────────────── */
 

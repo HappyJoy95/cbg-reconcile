@@ -28,7 +28,12 @@ LOG_NAME = "run.log"          # 计划任务跑完留下的日志（out\ 下）
 #   所以门店电脑上很容易留着一个旧脚本（用户就踩到了：日志格式还是旧的，
 #   而且黑窗、退出码这些修好的东西一样没生效）。
 #   启动时比对这一行，不一致就重建。
-RUNNER_MARK = "rem cbg-runner v4"
+# ⚠ 每次**改了这个文件里生成的 bat 内容**就要 +1 —— 门店靠它判断
+#   "我这份 run.bat 是不是旧的"（`runner_outdated`），过时才重建。
+#   v5：日常流程从 `check` 换成 `daily`（先抓华为当月写进库，再做两个分析）。
+#   不 +1 的话，**已装门店的 run.bat 永远不会被重写** ——
+#   而 2.0.0 的 check 只从本地库读，没人抓数据 = 每天报「库不新鲜」。
+RUNNER_MARK = "rem cbg-runner v5"
 CRON_MARK = "# cbg-reconcile"          # crontab 里的归属标记，用于增删改
 DEFAULT_TIME = "21:00"        # 门店一般晚上关门前跑
 DEFAULT_DAYS_AGO = 1                   # 跑昨天（那天的销售早就结束，零遗漏）
@@ -85,7 +90,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     # ⚠ **不要在 bat 里写 `>> out\run.log`**：那样屏幕上什么都没有，
     #   双击的人看到的是黑窗口 + 一分多钟 + 自己关掉，完全判断不了跑没跑。
     #   日志交给 Python 分流（--log-file），屏幕和文件两边都有。
-    base = f'"{_pythonw()}" -m src.cli -c "{config}" check --days-ago {int(days_ago)}'
+    base = f'"{_pythonw()}" -m src.cli -c "{config}" daily --days-ago {int(days_ago)}'
     # ⚠ 路径要写全：只给 "run.log" 的话，工作目录是项目根 → 写到根目录去了，
     #   而下面 bat 追加退出码用的又是 out\run.log —— 两处对不上，排查时会被坑。
     log = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
@@ -107,7 +112,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
             f'echo [%DATE% %TIME%] run.bat launching>> "{logfile}"\r\n'
             "rem start = cmd exits at once, so this console closes in a blink instead of\r\n"
             "rem hanging around for the whole run. pythonw.exe has no console of its own.\r\n"
-            f'start "" "{pyw}" "run_check.py" -c "{config}" check --days-ago {int(days_ago)}\r\n'
+            f'start "" "{pyw}" "run_check.py" -c "{config}" daily --days-ago {int(days_ago)}\r\n'
             "if errorlevel 1 (\r\n"
             "  rem 'start' itself failed -- pythonw.exe missing or path wrong\r\n"
             f'  echo [%DATE% %TIME%] FAILED to start pythonw: "{pyw}">> "{logfile}"\r\n'
@@ -137,7 +142,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     #   手动跑就该**同步**跑：屏幕上能看到全过程，跑完停住看结果。
     try:
         mpath = manual_script_path(root)
-        mbase = f'"{_python()}" -m src.cli -c "{config}" check --days-ago {int(days_ago)}'
+        mbase = f'"{_python()}" -m src.cli -c "{config}" daily --days-ago {int(days_ago)}'
         mlog = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
             else ('--log-file "out/%s"' % LOG_NAME)
         if kind() == "windows":
@@ -149,7 +154,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
                 "rem Manual run: synchronous, so you can watch it and read the result.\r\n"
                 'cd /d "%~dp0"\r\n'
                 "if not exist out mkdir out\r\n"
-                f'"{_python()}" "run_check.py" -c "{config}" check --days-ago {int(days_ago)}\r\n'
+                f'"{_python()}" "run_check.py" -c "{config}" daily --days-ago {int(days_ago)}\r\n'
                 "echo.\r\n"
                 "echo   Press any key to close this window\r\n"
                 "pause >nul\r\n"

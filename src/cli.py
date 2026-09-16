@@ -24,11 +24,17 @@ from . import (autostart, browser, config_io, lockfile, mailer, runtime,
 from .cbg import CbgClient, CbgError
 from .erp import (ErpCaptchaRequired, ErpClient, ErpError, describe_credentials,
                   effective_env_file, load_credentials)
+import json
+import sqlite3
+
 from .reconcile import classify_sales, reconcile, sn_row_index
 from .report import summary_lines, write_report
 from .session import CbgAuthError, CbgSession
 
 ROOT = Path(__file__).resolve().parent.parent
+#: 门店配置的默认路径。⚠ **只此一处** —— `run_daily` 也用它，
+#: 两处各写一份的话，哪天改了默认值另一处会静默用旧的。
+DEFAULT_CONFIG = "config/store-SCN231409.yaml"
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
 EXIT_OK, EXIT_AUTH, EXIT_FETCH, EXIT_DIFF, EXIT_INTERNAL = 0, 1, 2, 3, 9
@@ -76,6 +82,82 @@ def session_path(cfg: dict) -> Path:
 def make_client(cfg: dict, verbose=False) -> CbgClient:
     sess = CbgSession.load(session_path(cfg))
     return CbgClient(sess, store_code=cfg.get("store_code") or None, verbose=verbose)
+
+
+def ensure_session(cfg: dict, *, verbose=False, allow_refresh=True):
+    """拿到一个**能用的**华为客户端；会话失效时先试静默续期。
+
+    返回 `(client, ok, why)`。`client` 在失败时可能是 `None`。
+
+    ⚠ **这段是从 `_run_check` 里原样搬出来的，不是重写的。**
+    第 4 步取数改造把华为那套整体挪去了第 1 步（`dump`），当时连着
+    "会话失效就静默续期"一起丢掉了 —— 结果就是会话一到期，整条日常流程
+    中止到有人手动 `auth --auto`。**报错是对的（用户定的），自愈丢了是另一件事。**
+    现在把它挂在第 1 步上，位置才是对的：**华为只在这一步被登录**。
+
+    ⚠ "静默"是真的静默（`headless=True`）：夜里那条定时任务在门店电脑上跑，
+    **不许弹浏览器窗口**。失败的会话**不会被覆盖**（`capture_session` 先
+    `verify` 再 `save`），所以续期失败不会把好的会话弄坏。
+    """
+    try:
+        client = make_client(cfg, verbose=verbose)
+    except CbgAuthError as e:
+        client = None
+        ok, msg = False, str(e)
+    else:
+        ok, msg = client.ping()
+
+    auto_refresh = (cfg.get("session") or {}).get("auto_refresh", True)
+    if ok or not (auto_refresh and allow_refresh):
+        return client, ok, msg
+
+    print(f"华为会话：❌ {msg}")
+    print("      会话失效 → 用浏览器 profile 静默续期（自检通过才会覆盖）…")
+    store = cfg.get("store_code") or None
+
+    def _verify(s):
+        """⚠ 返回 `(过没过, 为什么)`，**别只返回 bool**。
+
+        `ping()` 的第二个返回值里写着真正的病因
+        （"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"），
+        老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
+        实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
+        """
+        try:
+            ok2, why2 = CbgClient(s, store_code=store, timeout=25).ping()
+            return ok2, why2
+        except (CbgAuthError, CbgError) as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    try:
+        creds = browser.load_login_credentials(cfg, ROOT)
+        sess2 = browser.capture_session(browser_profile(cfg), headless=True, timeout=90,
+                                        on_step=lambda m: print("        " + m),
+                                        verify=_verify,
+                                        url=browser.login_url(cfg),
+                                        credentials=creds if all(creds) else None)
+        sess2.save(session_path(cfg))
+        client = CbgClient(sess2, store_code=store, verbose=verbose)
+        ok, msg = client.ping()
+    except (browser.BrowserError, CbgAuthError) as e:
+        print(f"      自动续期没成功：{e}")
+        print("      现有会话没有被覆盖。")
+    return client, ok, msg
+
+
+def require_session(cfg: dict, *, verbose=False, allow_refresh=True):
+    """`ensure_session` 的"失败就报错并给下一步"版本 —— 返回 `(client, 退出码)`。
+
+    退出码 `None` = 拿到了。收尾提示只此一处，免得每个调用方各写一遍、
+    然后各漏一句（老代码里那句"需要人工登录一次"就是这么散的）。
+    """
+    client, ok, msg = ensure_session(cfg, verbose=verbose, allow_refresh=allow_refresh)
+    print(f"华为会话：{'✅' if ok else '❌'} {msg}")
+    if ok:
+        return client, None
+    print("      需要人工登录一次（浏览器里登完会自动抓走，不用再复制 curl）：\n"
+          "        python -m src.cli auth --auto", file=sys.stderr)
+    return None, EXIT_AUTH
 
 
 def _day_bounds(day: datetime.date, tz=CST) -> tuple[int, int]:
@@ -288,71 +370,45 @@ def _run_check(args, cfg: dict) -> int:
 
     print(f"=== 对账 {own_store}（标识 {marker}）目标日 {target} ===")
 
-    # 1. 华为会话（失效时先尝试静默续期，别动不动就让人去抓包）
-    try:
-        client = make_client(cfg, verbose=args.verbose)
-    except CbgAuthError as e:
-        client = None
-        ok, msg = False, str(e)
-
-    if client is not None:
-        ok, msg = client.ping()
-
-    auto_refresh = (cfg.get("session") or {}).get("auto_refresh", True)
-    if not ok and auto_refresh and not args.no_refresh:
-        print(f"[1/6] 华为会话：❌ {msg}")
-        print("      会话失效 → 用浏览器 profile 静默续期（自检通过才会覆盖）…")
-        store = cfg.get("store_code") or None
-
-        def _verify(s):
-            """⚠ 返回 `(过没过, 为什么)`，**别只返回 bool**。
-
-            `ping()` 的第二个返回值里写着真正的病因
-            （"会话/权限问题：没有门店或数据范围 XXX 的权限"、"接口异常：…"），
-            老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
-            实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
-            """
-            try:
-                ok, why = CbgClient(s, store_code=store, timeout=25).ping()
-                return ok, why
-            except (CbgAuthError, CbgError) as e:
-                return False, f"{type(e).__name__}: {e}"
-
-        try:
-            creds = browser.load_login_credentials(cfg, ROOT)
-            sess2 = browser.capture_session(browser_profile(cfg), headless=True, timeout=90,
-                                            on_step=lambda m: print("        " + m),
-                                            verify=_verify,
-                                            url=browser.login_url(cfg),
-                                            credentials=creds if all(creds) else None)
-            sess2.save(session_path(cfg))
-            client = CbgClient(sess2, store_code=store, verbose=args.verbose)
-            ok, msg = client.ping()
-        except (browser.BrowserError, CbgAuthError) as e:
-            print(f"      自动续期没成功：{e}")
-            print("      现有会话没有被覆盖。")
-
-    print(f"[1/6] 华为会话：{'✅' if ok else '❌'} {msg}")
-    if not ok:
-        print("      需要人工登录一次（浏览器里登完会自动抓走，不用再复制 curl）：\n"
-              "        python -m src.cli auth --auto", file=sys.stderr)
-        return EXIT_AUTH
-
-    # 2. 华为侧：已报量 SN
-    try:
-        s_ts, _ = _day_bounds(cbg_start)
-        _, e_ts = _day_bounds(cbg_end)
-        reported = client.reported_sns(s_ts, e_ts,
-                                       pay_status=check.get("pay_status", 2),
-                                       return_status=check.get("return_status", 0),
-                                       page_size=int(check.get("page_size", 200)))
-    except CbgAuthError as e:
-        print(f"❌ 华为会话失效：{e}", file=sys.stderr)
-        return EXIT_AUTH
-    except CbgError as e:
-        print(f"❌ 华为取数失败：{e}", file=sys.stderr)
+    # 1. 本地订单库（**华为侧改从它读** —— 融合后 check 完全不碰华为）
+    #
+    # ⚠ 为什么必须在这一步卡死：库若覆盖不了窗口（今天还没抓），
+    #   差集会把当天**所有**销售都算成「未报量」—— 一份完全错误的清单，
+    #   而且**看着很合理**，门店会照着去补报一批假的。宁可不出，也不出错。
+    #
+    # 用户 2026-09-16 定的流程：拉完数据之后，2/3a/3b **都不需要登录华为**。
+    # 所以会话自检搬去了 dump（第 1 步），这里只认库。
+    from . import dump as dumpmod          # 延迟 import：dump 有 48KB，别拖慢每条命令
+    db_path = _find_pos_db()
+    if not db_path or not db_path.is_file():
+        print("❌ 还没有订单库（out/cbg-<年>.db）", file=sys.stderr)
+        print("   先抓一次：python -m src.cli dump --all", file=sys.stderr)
         return EXIT_FETCH
-    print(f"[2/6] 华为已报量：{len(reported)} 个 SN（{cbg_start} ~ {cbg_end}）")
+    # 窗口末尾若在未来（lookahead>0），只能要求"抓到此刻"
+    need_by = min(_day_bounds(cbg_end)[1], int(time.time()))
+    conn = dumpmod.open_db(db_path)
+    ok, msg = dumpmod.check_freshness(conn, need_by)
+    print(f"[1/6] 订单库：{'✅' if ok else '❌'} {msg}")
+    if not ok:
+        conn.close()
+        print(f"      库：{db_path}", file=sys.stderr)
+        print("      先抓一次再对账：python -m src.cli dump", file=sys.stderr)
+        return EXIT_FETCH
+
+    # 2. 华为侧：已报量 SN —— **从库里读**（华为只在第 1 步拉过一次，两个分析共用）
+    #
+    # ⚠ 和接口版**故意不同的两点**（都是改进，写进 `dump.reported_sns_from_db` 了）：
+    #   1. 不传 `returnStatus` ⇒ 已退货/已关闭的原单**也在里面**。
+    #      接口版传 `returnStatus=0` 会把它们整张滤掉，于是云商侧还在的销售
+    #      被误报成「未报量」。**这是个真误报，改从库读顺带修掉了。**
+    #   2. 一个 SN 挂多张单时取**最早那张**（接口版是"后写覆盖先写"，顺序不定）。
+    s_ts, _ = _day_bounds(cbg_start)
+    _, e_ts = _day_bounds(cbg_end)
+    try:
+        reported = dumpmod.reported_sns_from_db(conn, s_ts, e_ts)
+    finally:
+        conn.close()
+    print(f"[2/6] 华为已报量：{len(reported)} 个 SN（{cbg_start} ~ {cbg_end}，来自本地库）")
 
     # 3. 云商侧：销售明细
     try:
@@ -843,10 +899,162 @@ def _harden_stdout() -> None:
             pass          # 没有控制台时 stream 可能是 None / 不支持重配 —— 无所谓
 
 
-def main(argv=None) -> int:
-    _harden_stdout()
+# --------------------------------------------------------------- POS 合规
+def cmd_daily(args) -> int:
+    """日常流程 —— 一条定时任务跑完三步（编排在 `run_daily` 里）。
+
+    ⚠ 第 1 步失败会**跳过第 2、3 步**（理由写在 `run_daily` 的模块注释里）。
+
+    ⚠ 参数**逐个转发**，别写"够用就行"的子集：老门店的 `run.bat` 里是 `check`，
+    把它迁到 `daily` 时，`check` 认得的参数在这里必须都接得住
+    （子解析器是超集，见 `daily` 那段）。
+    """
+    from . import run_daily
+    argv = ["-c", args.config]
+    # argparse 默认值 vs "用户真给了" —— 空串/None 表示没给，别把默认值当成用户意图
+    # 硬塞过去（塞了会覆盖 `run_daily` 自己的默认，两处默认值迟早对不上）。
+    for flag, val in (("--date", args.date),
+                      ("--lookback", args.lookback),
+                      ("--lookahead", args.lookahead),
+                      ("--out-dir", args.out_dir),
+                      ("--log-file", args.log_file)):
+        if val not in ("", None):
+            argv += [flag, str(val)]
+    if args.days_ago is not None and not args.date:
+        # ⚠ 显式给了 --date 就别再给 --days-ago：两个都传的话谁赢不确定
+        argv += ["--days-ago", str(args.days_ago)]
+    for flag, on in (("--skip-dump", args.skip_dump),
+                     ("--skip-pos", args.skip_pos),
+                     ("--no-mail", args.no_mail),
+                     ("--no-push", args.no_push),
+                     ("--no-refresh", args.no_refresh)):
+        if on:
+            argv.append(flag)
+    if getattr(args, "verbose", False):
+        argv.append("-v")
+    return run_daily.main(argv)
+
+
+def cmd_dump(args) -> int:
+    """抓华为订单 → 补进 `out/cbg-<年>.db`（**取并集**，不删旧行）。
+
+    ⚠ 复用**主项目的会话和门店配置** —— 不再要 `--store-code`，
+    也不会出现"两个会话文件"（换店时另一个是旧的，这个坑很难查）。
+
+    ⚠ 会话失效时**先静默续期**再抓（见 `ensure_session`）。这一步是整条
+    日常流程里**唯一登录华为**的地方，所以续期挂在这儿，别处都不用管。
+    """
+    from . import dump as dumpmod
+    cfg = load_config(args.config)
+    sp = session_path(cfg)
+    if not sp.is_file():
+        # ⚠ 续期也得先有个会话文件当"基底"（要复用它的浏览器 profile 登录态）。
+        #   一张白纸的情况只能人工登录 —— 报错里直接给命令。
+        print(f"❌ 没有华为会话：{sp}\n   先跑一次：python -m src.cli -c {args.config} auth --auto",
+              file=sys.stderr)
+        return EXIT_AUTH
+    _, rc = require_session(cfg, verbose=getattr(args, "verbose", False),
+                            allow_refresh=not getattr(args, "no_refresh", False))
+    if rc is not None:
+        return rc
+    argv = ["--session", str(sp)]
+    code = (cfg.get("store_code") or "").strip()
+    if code:
+        argv += ["--store-code", code]
+    if args.all:
+        argv.append("--all")
+    else:
+        argv += ["--month", args.month or "current"]
+    return dumpmod.main(argv)
+
+
+def cmd_pos(args) -> int:
+    """算 POS 合规率 → 落 `out/pos-<年>.json`（**看板只读它，不现场算**）。"""
+    from . import pos_report
+    db = Path(args.db) if args.db else _find_pos_db()
+    if not db or not db.is_file():
+        print("❌ 没找到订单库（out/cbg-<年>.db）\n   先抓一次：python -m src.cli dump",
+              file=sys.stderr)
+        return EXIT_FETCH
+    from . import pos_metric as pm
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    orders, returns = pos_report.load(conn)
+    conn.close()
+
+    months = pm.months_of(orders, returns)
+    # ⚠ 「暂定」：口径是「退货在退货当月扣减」⇒ **前一个月的分数还会被这个月的退货改**。
+    #   所以最近两个月标暂定，免得两个月后有人拿旧报表对不上账。
+    def provisional(m):
+        return m >= months[-2] if len(months) >= 2 else True
+
+    rows = []
+    for m in months:
+        row = {"month": m, "provisional": provisional(m)}
+        for by in pm.BOTH:
+            cur = pm.score_month(orders, returns, m, by)
+            ap = pm.score_month(orders, returns, m, by, exclude_team=True)
+            row[by] = {"den": round(cur.den, 2), "num": round(cur.num, 2), "rate": cur.rate,
+                       "orders": cur.orders, "cut_den": round(cur.cut_den, 2),
+                       "ap_den": round(ap.den, 2), "ap_num": round(ap.num, 2), "ap_rate": ap.rate}
+        rows.append(row)
+
+    year = int(months[-1][:4]) if months else datetime.datetime.now(CST).year
+    out = ROOT / "out" / ("pos-%d.json" % year)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:                                    # 库路径写成相对 ROOT 的，别把开发机绝对路径带进落盘
+        db_rel = str(db.relative_to(ROOT))
+    except ValueError:
+        db_rel = str(db)
+    out.write_text(json.dumps({
+        "generated_at": datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+        "year": year, "db": db_rel, "orders": len(orders), "returns": len(returns),
+        "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"POS 合规 → {out}")
+    for row in rows:
+        la = row[pm.BY_LABEL]
+        f = lambda v: "  —  " if v is None else "%5.2f" % v     # 分母为 0 时分数是 None，不是 0
+        print("  %s%s  按标签 %s%%（申诉后 %s%%）  分母 %s"
+              % (row["month"], "（暂定）" if row["provisional"] else "        ",
+                 f(la["rate"]), f(la["ap_rate"]), format(la["den"], ",.2f")))
+    return EXIT_OK
+
+
+def cmd_pos_export(args) -> int:
+    """出 POS 明细 Excel。"""
+    from . import pos_export
+    db = Path(args.db) if args.db else _find_pos_db()
+    if not db or not db.is_file():
+        print("❌ 没找到订单库", file=sys.stderr)
+        return EXIT_FETCH
+    argv = ["--db", str(db), "--month", args.month]
+    if args.out:
+        argv += ["--out", args.out]
+    if args.by:
+        argv += ["--by", args.by]
+    return pos_export.main(argv)
+
+
+def _find_pos_db():
+    """找 `out/` 里最新的那个 `cbg-<年>.db`。一年一个库，取年份最大的。"""
+    d = ROOT / "out"
+    if not d.is_dir():
+        return None
+    cands = sorted(d.glob("cbg-[0-9][0-9][0-9][0-9].db"))
+    return cands[-1] if cands else None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """建命令行解析器。
+
+    ⚠ **单独一个函数**，不是为了好看：`daily` 必须是 `check` 的**参数超集**
+    （理由见 `daily` 那段注释 —— 老门店的 run.bat 里写的是 `check`，
+    迁移时要能原样喂给 `daily`）。这条约束得有测试盯着，
+    而测试**只能内省解析器**才能可靠地比对参数集合 ——
+    正则去猜源码是猜不准的（第一版就那么写的，写出一堆空转）。
+    """
     ap = argparse.ArgumentParser(prog="cbg-reconcile", description="云商 ↔ 华为报量对账")
-    ap.add_argument("-c", "--config", default="config/store-SCN231409.yaml", help="门店配置文件")
+    ap.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="门店配置文件")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -878,8 +1086,9 @@ def main(argv=None) -> int:
                         "免得依赖 Windows 的日期格式）")
     p.add_argument("--lookback", type=int, help="覆盖配置：销售窗口往前多看几天")
     p.add_argument("--lookahead", type=int, help="覆盖配置：华为窗口往后多看几天")
-    p.add_argument("--no-refresh", action="store_true",
-                   help="会话失效时不要自动开浏览器续期（计划任务里想跑快一点可以加）")
+    # ⚠ `--no-refresh` 从这里**搬走了** —— 它控的是"华为会话失效时要不要静默续期"，
+    #   而华为那套已经整体搬去第 1 步（`dump`）了。留在这儿的话它是个**死参数**：
+    #   `--help` 里写着一段已经不存在的行为了。
     p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
     p.add_argument("--no-push", action="store_true", help="本次不推企微")
     p.add_argument("--out-dir", help="输出目录，默认 ./out")
@@ -910,12 +1119,57 @@ def main(argv=None) -> int:
     p.add_argument("--off", action="store_true", help="取消开机自启")
     p.set_defaults(func=cmd_autostart)
 
-    p = sub.add_parser("serve", help="打开本地控制台（报告 / 运行 / 会话 / 设置）")
+    p = sub.add_parser("daily", help="日常流程：抓华为当月 → 报量对账 → 算 POS"
+                                     "（**定时任务跑这个**）")
+    # ⚠ 这里的参数是 `check` 的**超集**，不是"够用就行"。
+    #   理由：老门店电脑上的 run.bat 是**安装时生成的、不进版本库**，
+    #   自更新不会重写它 —— 它里面写的是 `check`。要把那种 bat 平滑迁到
+    #   `daily`，`daily` 就必须认得 `check` 认得的**每一个**参数，
+    #   否则迁移那天会以"unrecognized arguments"收场。
+    p.add_argument("--date", default="", help="对账目标日 YYYY-MM-DD")
+    p.add_argument("--days-ago", type=int, default=1, help="对账目标日 = 今天往前 N 天")
+    p.add_argument("--lookback", type=int, help="覆盖配置：销售窗口往前多看几天")
+    p.add_argument("--lookahead", type=int, help="覆盖配置：华为窗口往后多看几天")
+    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+    p.add_argument("--no-refresh", action="store_true",
+                   help="会话失效时别开浏览器静默续期（第 1 步就会直接失败）")
+    p.add_argument("--out-dir", default="", help="报告输出目录")
+    p.add_argument("--skip-dump", action="store_true", help="别抓华为（调试用）")
+    p.add_argument("--skip-pos", action="store_true", help="别算 POS（调试用）")
+    p.add_argument("--log-file", default="", help="把对账那段同时写一份到文件")
+    p.set_defaults(func=cmd_daily)
+
+    p = sub.add_parser("dump", help="抓华为订单 → out/cbg-<年>.db（取并集）")
+    p.add_argument("--month", default="", help="YYYY-MM；给 current 或不给 = 当月（日常用这个）")
+    p.add_argument("--all", action="store_true", help="抓全部历史（首次安装/补历史用，**不进日常流程**）")
+    p.add_argument("--no-refresh", action="store_true",
+                   help="会话失效时别开浏览器静默续期")
+    p.set_defaults(func=cmd_dump)
+
+    p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json")
+    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+    p.set_defaults(func=cmd_pos)
+
+    p = sub.add_parser("pos-export", help="出 POS 明细 Excel")
+    p.add_argument("--month", required=True, help="2026-08")
+    p.add_argument("--db", default="")
+    p.add_argument("--out", default="")
+    p.add_argument("--by", default="", choices=["", "label", "remark"])
+    p.set_defaults(func=cmd_pos_export)
+
+    p = sub.add_parser("serve", help="打开本地控制台（报告 / 运行 / 会话 / POS / 设置）")
     p.add_argument("--port", type=int, default=8787, help="端口，默认 8787；被占用时自动换")
     p.add_argument("--host", default="127.0.0.1", help="监听地址，默认只监听本机")
     p.add_argument("--no-open", action="store_true", help="别自动开浏览器")
     p.set_defaults(func=cmd_serve)
 
+    return ap
+
+
+def main(argv=None) -> int:
+    _harden_stdout()
+    ap = build_parser()
     args = ap.parse_args(argv)
     try:
         return args.func(args)

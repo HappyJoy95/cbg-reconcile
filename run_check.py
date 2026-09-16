@@ -99,6 +99,56 @@ def open_log():
         return None
 
 
+def rewrite_legacy_check(argv, ap):
+    """老 `run.bat` 里的 `check` → `daily`。返回 `(argv, 改没改)`。
+
+    ## 为什么需要这个垫片
+
+    `run.bat` / `run-now.bat` 是**安装时生成**的，而且**不进版本库**
+    （`.gitignore` 里有它们）—— 所以自更新**不会重写它们**，
+    门店电脑上那份会一直写着 `check --days-ago 1`。
+
+    而 2.0.0 的 `check` **只从本地库读**华为数据了：没人跑第 1 步（`dump`），
+    库就永远是旧的，`check` 每天都会以「库不新鲜」失败 ——
+    **每家已装门店升级后第 2 天起就没有对账报告了。**
+
+    这个文件（`run_check.py`）**在版本库里**，自更新会覆盖它 ——
+    所以它是唯一能在"不改门店那个 bat"的前提下把命令换掉的地方。
+
+    界面上重新注册一次定时任务、或者把 `refresh_runner_scripts()` 的自愈
+    接上之后，`run.bat` 会自己写成 `daily`，那时这个垫片就只是兜底了。
+
+    ## 为什么不硬编码"-c 吃一个值"
+
+    那些"吃一个值"的选项从**真解析器**里读。硬编码一份的话，
+    哪天全局选项变了（比如 `-c` 加了别名），扫描就会错位 ——
+    错位的表现是**把配置文件路径当成子命令**，然后什么都不改，
+    静默回到"每天失败"的老样子。
+    """
+    takes_value = set()
+    for a in ap._actions:
+        if a.option_strings and a.nargs != 0:
+            takes_value.update(a.option_strings)
+
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in takes_value:                       # `-c <值>`：跳过它的值
+            i += 2
+            continue
+        if any(tok.startswith(o + "=") for o in takes_value):   # `--config=<值>`
+            i += 1
+            continue
+        if tok.startswith("-"):                      # 别的开关
+            i += 1
+            continue
+        # 第一个非选项 token 就是子命令
+        if tok == "check":
+            return argv[:i] + ["daily"] + argv[i + 1:], True
+        return argv, False                           # 别的子命令，不碰
+    return argv, False
+
+
 def main() -> int:
     fp = open_log()
     real_out = sys.stdout if sys.stdout is not None else _Sink()
@@ -112,12 +162,31 @@ def main() -> int:
 
     rc = 9
     try:
-        from src.cli import main as cli_main     # ← 这一步最容易出问题，它在日志里了
-        rc = cli_main(sys.argv[1:])
+        from src.cli import build_parser, main as cli_main   # ← 这一步最容易出问题，它在日志里了
+        argv, legacy = rewrite_legacy_check(sys.argv[1:], build_parser())
+        if legacy:
+            # 写清楚"我替你改了"，不然日志里出现 daily 会让人以为 bat 已经更新了
+            print("[run_check] 这个启动脚本还是旧版（写的是 check）——"
+                  "按**日常流程**执行（daily：抓华为当月 → 对账 → 算 POS）。")
+            print("[run_check] 只想要对账、不抓数据的话，直接跑"
+                  " `python -m src.cli check`（绕开本启动器）。")
+        rc = cli_main(argv)
         if not isinstance(rc, int):
             rc = 0
     except SystemExit as e:
-        rc = e.code if isinstance(e.code, int) else 0
+        if isinstance(e.code, int):
+            rc = e.code
+        elif e.code is None:
+            rc = 0
+        else:
+            # ⚠ `raise SystemExit("消息")` / `sys.exit("消息")` 的 code 是**字符串**。
+            #   老写法 `e.code if isinstance(e.code, int) else 0` 把它变成 **0 = 成功**，
+            #   而且因为我们把异常**接住了**，Python 也不会替我们去印那条消息 ——
+            #   于是日志里只剩一句 `结束 exit=0`。
+            #   实测：配置路径写错时就是这样，"看着像跑成功了，其实什么都没干"。
+            #   这里恢复 Python 自己那套语义（消息进 stderr、退出码 1）。
+            print(e.code, file=sys.stderr)
+            rc = 1
     except BaseException:                        # noqa: BLE001
         # ⚠ 这里是关键：pythonw 没有 stderr，不这么写 traceback 就永远看不到
         traceback.print_exc()

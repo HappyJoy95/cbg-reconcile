@@ -35,7 +35,7 @@ class TestRunnerScript(unittest.TestCase):
             self.assertEqual(p.name, "run.sh")
             self.assertTrue(body.startswith("#!/bin/sh"))
             self.assertIn('cd "$(dirname "$0")"', body)
-            self.assertIn("check --days-ago 1", body)
+            self.assertIn("daily --days-ago 1", body)
             self.assertIn('--log-file "out/run.log"', body)
             self.assertTrue(p.stat().st_mode & 0o111, "run.sh 必须可执行")
 
@@ -53,7 +53,7 @@ class TestRunnerScript(unittest.TestCase):
             #   run_check.py —— 它先开日志再 import，启动阶段的失败才留得下 traceback
             #   （pythonw 连 stderr 都没有）。
             self.assertIn("run_check.py", body)
-            self.assertIn("check --days-ago 1", body, "参数还是要原样传过去")
+            self.assertIn("daily --days-ago 1", body, "参数还是要原样传过去")
             # 退出码**不由 bat 透出**：它用 start 起进程后立刻退出，拿不到。
             # 真实的退出码由启动器写进日志（"结束 exit=N"那行）。
             self.assertNotIn("%ERRORLEVEL%", body)
@@ -71,7 +71,7 @@ class TestRunnerScript(unittest.TestCase):
             with mock.patch.object(schedule, "kind", lambda: "windows"):
                 p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = p.read_bytes().decode("ascii")
-        check_lines = [ln for ln in body.splitlines() if "check --days-ago" in ln]
+        check_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
         self.assertTrue(check_lines, "没找到跑对账那一行")
         for ln in check_lines:
             self.assertNotIn(">>", ln, f"跑对账的输出被重定向走了：{ln.strip()}")
@@ -103,7 +103,7 @@ class TestRunnerScript(unittest.TestCase):
                 mock.patch.object(schedule, "_pythonw", lambda: r"C:\py\pythonw.exe"):
             p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = p.read_bytes().decode("ascii")
-        run_lines = [ln for ln in body.splitlines() if "check --days-ago" in ln]
+        run_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
         self.assertTrue(run_lines)
         self.assertTrue(run_lines[0].startswith("start "),
                         f"计划任务那行没用 start，黑窗会挂满整个过程：{run_lines[0]}")
@@ -120,7 +120,7 @@ class TestRunnerScript(unittest.TestCase):
                 mock.patch.object(schedule, "_python", lambda: r"C:\py\python.exe"):
             schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = schedule.manual_script_path(Path(d)).read_bytes().decode("ascii")
-        run_lines = [ln for ln in body.splitlines() if "check --days-ago" in ln]
+        run_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
         self.assertTrue(run_lines, "run-now.bat 里没有跑对账那行")
         self.assertFalse(run_lines[0].startswith("start "),
                          "手动跑不该用 start —— 那样跑完立刻 pause，看不到结果")
@@ -168,7 +168,7 @@ class TestRunnerScript(unittest.TestCase):
             m = schedule.manual_script_path(Path(d))
             self.assertTrue(m.exists(), "没生成 run-now")
             # 手动那个是**自己同步跑**，不是转调 run.sh（run.sh 不等进程）
-            self.assertIn("check --days-ago", m.read_text(encoding="utf-8"))
+            self.assertIn("daily --days-ago", m.read_text(encoding="utf-8"))
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"):
@@ -220,6 +220,55 @@ class TestRunnerScriptSelfHeals(unittest.TestCase):
             schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml")
             body = p.read_text(encoding="utf-8")
         self.assertIn("--days-ago 0", body, "用户的「今天」被改掉了")
+
+    # --------------------------------------------------- v5：check → daily
+    def test_重建会把老脚本里的_check_换成_daily(self):
+        """⚠ **发版阻断的解法**（方案 B 那一半）。
+
+        老门店的 `run.bat` 里是 `check`（安装时生成的，不进版本库，
+        自更新不重写它）。而 2.0.0 的 `check` **只从本地库读**华为数据 ——
+        没人跑第 1 步（`dump`）库就永远是旧的，**每天以「库不新鲜」失败**。
+
+        `RUNNER_MARK` 提到 v5 之后，这条重建就会把命令换成 `daily`
+        （先抓华为当月写进库，再做两个分析）。
+        没这条测试的话，哪天有人"顺手"把 MARK 改回去，谁也不会发现。
+        """
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            p = Path(d) / "run.bat"
+            with open(p, "w", encoding="utf-8", newline="") as f:
+                # 老门店那份的真实样子：v4 标记 + check
+                f.write("@echo off\r\nrem cbg-runner v4\r\n"
+                        '"py" -m src.cli -c "config/store-X.yaml" check --days-ago 1\r\n')
+            self.assertTrue(schedule.runner_outdated(Path(d)),
+                            "v4 的脚本必须被判为过时，否则永远不会重建")
+            self.assertTrue(schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml"))
+            body = p.read_text(encoding="utf-8")
+        self.assertIn("daily --days-ago 1", body, "命令没换成 daily")
+        self.assertNotIn("check --days-ago", body, "老的 check 命令还在")
+        self.assertIn(schedule.RUNNER_MARK, body, "没写上当前标记，下次还会重建")
+
+    def test_当前标记的脚本不会被反复重建(self):
+        """重建要**幂等** —— 否则每次开界面都写一遍 bat（正跑着任务时还去覆盖它）。"""
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            schedule.write_runner_script(Path(d), "config/store-X.yaml", 1)
+            self.assertFalse(schedule.runner_outdated(Path(d)))
+            self.assertFalse(schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml"))
+
+    def test_v5_生成的脚本里没有残留的_check(self):
+        """整份脚本里都不该再有裸的 `check` 子命令 —— 漏一处就等于没改。"""
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            schedule.write_runner_script(Path(d), "config/store-X.yaml", 1)
+            run = schedule.script_path(Path(d)).read_text(encoding="utf-8")
+            now = schedule.manual_script_path(Path(d)).read_text(encoding="utf-8")
+        for name, body in (("run.bat", run), ("run-now.bat", now)):
+            with self.subTest(f=name):
+                # `run_check.py`（启动器名）里含 "check"，所以按子命令的写法找
+                self.assertNotIn(" check --days-ago", body,
+                                 "还有一行在跑老的 check 子命令")
+                self.assertIn(" daily --days-ago", body)
 
     def test_missing_script_uses_the_default(self):
         with tempfile.TemporaryDirectory() as d, \
