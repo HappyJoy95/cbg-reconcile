@@ -49,7 +49,8 @@ class CaptureJob:
     def reset(self):
         with self._lock:
             self.running = False
-            self.state = "idle"        # idle | running | ok | saved | error
+            self.state = "idle"        # idle|running|ok|saved|error|need_captcha
+            self.need = ""             # 运行中"还差人做一件事"，目前只有 "captcha"
             self.steps: list[str] = []
             self.message = ""
             self.headless = True
@@ -63,7 +64,7 @@ class CaptureJob:
         with self._lock:
             return {"running": self.running, "state": self.state,
                     "steps": list(self.steps), "message": self.message,
-                    "headless": self.headless}
+                    "need": self.need, "headless": self.headless}
 
 
 class PendingLogin:
@@ -132,21 +133,39 @@ def _capture_worker(app: "App", headless: bool):
         job.say("无头静默续期…" if headless else "已打开浏览器窗口，请在里面登录华为账号…")
         # 无头不需要等人，等太久没意义；有窗口的登录流程才给足时间
         creds = browser.load_login_credentials(cfg, app.root)
+        if browser.captcha_marked(app.root):
+            # ⚠ 上次撞了验证码。再自动填只会把**同一个**验证码撞出来、
+            #   然后又被中止 —— 死循环，"请手动登录"那句提示永远执行不了。
+            job.say("上次抓取撞上了图形验证码 —— 这次**不自动填账号密码**，"
+                    "请在窗口里手动登录并输入验证码")
+            creds = ("", "")
         if all(creds):
             job.say(f"用已保存的华为账号自动登录：{creds[0]}")
         else:
-            job.say("没配华为账号密码 —— 会等你手动登录")
+            job.say("没配华为账号密码（或上次撞了验证码）—— 会等你手动登录")
         sess = browser.capture_session(profile, headless=headless,
                                        timeout=90 if headless else 300,
                                        on_step=job.say, verify=verify,
                                        url=browser.login_url(cfg),
-                                       credentials=creds if all(creds) else None)
+                                       credentials=creds if all(creds) else None,
+                                       state_root=app.root,
+                                       on_need=lambda what: setattr(job, "need", what))
         p = sess.save(app.session_path(cfg))              # 只有自检过了才走到这里
         ok, msg = CbgClient(sess, store_code=store).ping()
         app.record_check(sess, ok, msg)                   # 记下这次自检，界面要显示时间
         job.say(f"已保存 → {p.name}")
         job.state = "ok" if ok else "saved"
         job.message = msg
+    except browser.CbgCaptchaRequired as e:
+        # ⚠ 走到这儿浏览器**已经关了**（`capture_session` 的 finally）——
+        #   现在才能删 profile：Windows 上还有句柄就删不掉。
+        #   而且只有这里知道 `app.root`，所以删除放在这一层。
+        job.state = "need_captcha"
+        deleted, dmsg = browser.delete_profile(profile)
+        job.message = f"{e}\n{dmsg}"
+        job.say(("✅ " if deleted else "⚠️ ") + dmsg)
+        job.say("下一步：重新点「打开浏览器抓取」，在窗口里**手动登录并输入验证码**"
+                "（这次不会再自动填账号密码了）。")
     except Exception as e:                                # noqa: BLE001
         job.state = "error"
         job.message = str(e)

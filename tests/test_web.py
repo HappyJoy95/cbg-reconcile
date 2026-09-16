@@ -1107,3 +1107,98 @@ class TestScheduleApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCaptchaInCaptureWorker(unittest.TestCase):
+    """⚠ 删 profile 的**唯一**地方在这里 —— 只有它知道 `app.root`。
+
+    而且必须在这儿删而不是 `browser.py`：`capture_session` 的 `finally`
+    已经把浏览器关了，此时删才删得掉（Windows 有句柄就删不掉）。
+    """
+
+    def setUp(self):
+        # ⚠ `capture_job` 是**模块级单例** —— 跑完必须复位，
+        #   否则 `need_captcha` / `need` 会粘给后面的测试（这种"单跑绿、全量红"
+        #   最难查，本项目踩过）。
+        self.addCleanup(web.capture_job.reset)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "config").mkdir()
+        self.profile = self.root / ".secrets" / "browser-profile"
+        (self.profile / "Default").mkdir(parents=True)
+        (self.profile / "Local State").write_text("{}", encoding="utf-8")
+
+    def _patches(self, capture):
+        app = mock.Mock()
+        app.root = self.root
+        app.config_path = self.root / "config" / "store-x.yaml"
+        app.session_path = lambda cfg: self.root / "sess.json"
+        app.record_check = lambda *a, **k: None
+        return app, [
+            mock.patch.object(web.config_io, "load_raw", lambda p: {}),
+            mock.patch.object(web.browser, "find_browser", lambda cfg: ("edge", "/x")),
+            mock.patch.object(web.browser, "profile_path", lambda cfg, r: self.profile),
+            mock.patch.object(web.browser, "login_url", lambda cfg: "http://x"),
+            mock.patch.object(web.browser, "load_login_credentials",
+                              lambda c, r: ("u", "p")),
+            mock.patch.object(web.browser, "capture_session", capture),
+        ]
+
+    def _run(self, capture):
+        app, patches = self._patches(capture)
+        for q in patches:
+            q.start()
+            self.addCleanup(q.stop)
+        web.capture_job.reset()
+        web.capture_job.running = True
+        web._capture_worker(app, headless=False)
+        return dict(web.capture_job.snapshot())
+
+    def test_captcha_abort_deletes_the_profile_and_sets_the_state(self):
+        def boom(profile, **kw):
+            raise web.browser.CbgCaptchaRequired(profile)
+
+        snap = self._run(boom)
+        self.assertEqual(snap["state"], "need_captcha")
+        self.assertFalse(self.profile.exists(), "半成品 profile 要删掉")
+        self.assertIn("验证码", snap["message"])
+
+    def test_it_says_so_when_the_profile_survives(self):
+        """删不掉要**写进消息**，不能假装删干净了。"""
+        def boom(profile, **kw):
+            raise web.browser.CbgCaptchaRequired(profile)
+
+        with mock.patch.object(web.browser, "delete_profile",
+                               lambda d: (False, "删不掉 profile：being used")):
+            snap = self._run(boom)
+        self.assertEqual(snap["state"], "need_captcha")
+        self.assertIn("删不掉", snap["message"])
+
+    def test_marked_state_means_no_credentials_are_passed(self):
+        """⚠ 死循环的另一半：标记还在时，**不许**把凭据递给 capture_session。
+
+        （`capture_session` 自己也会看 `state_root` 再挡一道，但那是双保险；
+        这里钉的是 worker 这一层也要挡。）
+        """
+        web.browser.mark_captcha(self.root)
+        seen = {}
+
+        def fake_capture(profile, **kw):
+            seen.update(kw)
+            raise web.browser.CbgCaptchaRequired(profile)
+
+        self._run(fake_capture)
+        self.assertIsNone(seen.get("credentials"),
+                          "上次撞了验证码，这次不许再自动填账号密码")
+        self.assertEqual(seen.get("state_root"), self.root,
+                         "state_root 没传下去的话，标记永远清不掉")
+
+    def test_a_normal_failure_is_still_a_plain_error(self):
+        """别的失败**不许**被当成验证码 —— 状态和文案都不一样。"""
+        def other(profile, **kw):
+            raise web.browser.CbgAuthError("超时了")
+
+        snap = self._run(other)
+        self.assertEqual(snap["state"], "error")
+        self.assertTrue(self.profile.exists(), "不是验证码就别删 profile")
