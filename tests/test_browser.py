@@ -1241,3 +1241,51 @@ class TestCaptchaMemory(unittest.TestCase):
                                     verify=lambda s: True, state_root=self.root)
         self.assertFalse(browser.captcha_marked(self.root),
                          "抓到一次就该把标记清掉，否则以后永远不自动填了")
+
+
+class TestCaptchaDuringManualLogin(unittest.TestCase):
+    """⚠ 口径和自动登录那条**故意不一样**。
+
+    自动登录撞的 → 中止（是我们自己试出来的，收尾要干净）。
+    用户手动登录时页面出现验证码 → **别动它** —— 那一瞬他正在输，
+    关窗 + 删 profile 等于把他手里的东西抢走，还得从头再来一轮。
+    """
+
+    def _run(self, headless, js_value):
+        need = []
+        # ⚠ `Cdp.__init__` 是**急切连接**（里面就 `WebSocket(url)`）——
+        #   不换掉它，测试会真的去连 `ws://`。`_page_ws` 同理，
+        #   它底下 `http_json` 会去连 12345 端口然后抛 CdpError。
+        #
+        # ⚠ `CAPTCHA_GRACE` 也**必须调小**：命中验证码会把 deadline 往后延那么多秒
+        #   （真实值 120），不换掉的话这条测试要真跑两分钟 —— 第一次就是这么挂住的。
+        # ⚠ 这行注释只能写在 `with` **外面**：夹在 `\` 续行中间是语法错（踩过）。
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser", return_value=("", {})), \
+                mock.patch.object(browser, "_page_ws", lambda port, *h: "ws://stub"), \
+                mock.patch.object(browser, "Cdp",
+                                  lambda ws, timeout=20: mock.Mock(close=lambda: None)), \
+                mock.patch.object(browser, "_eval", lambda *a, **k: js_value), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser, "CAPTCHA_GRACE", 0.05), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            with self.assertRaises(CbgAuthError) as ctx:
+                browser.capture_session(Path("/x"), headless=headless, timeout=0.6,
+                                        verify=lambda s: True,
+                                        on_need=need.append)
+        return need, ctx.exception
+
+    def test_manual_login_reports_but_does_not_abort(self):
+        need, exc = self._run(False, json.dumps({"captcha": True}))
+        self.assertEqual(need, ["captcha"], "要回调出去让界面提示")
+        self.assertNotIsInstance(exc, browser.CbgCaptchaRequired,
+                                 "手动登录撞验证码**不许**中止")
+
+    def test_headless_has_nobody_to_type_it(self):
+        """无头模式没有人能输验证码 —— 所以一律走中止那条。"""
+        need, exc = self._run(True, json.dumps({"captcha": True}))
+        self.assertIsInstance(exc, browser.CbgCaptchaRequired)
+
+    def test_no_captcha_means_no_callback(self):
+        need, _ = self._run(False, json.dumps({"captcha": False}))
+        self.assertEqual(need, [])

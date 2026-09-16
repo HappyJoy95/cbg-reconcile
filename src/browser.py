@@ -50,6 +50,10 @@ MAX_LOGIN_TRIES = 3
 # 不跟包走、也不该被自更新冲掉（selfupdate 的 NEVER_TOUCH）。
 CAPTURE_STATE = ".secrets/capture-state.json"
 
+# 检测到"要验证码"之后额外给的输入时间。**只给一次** ——
+# 验证码一直挂在屏幕上就永远不结束的话，比超时更糟。
+CAPTCHA_GRACE = 120
+
 # 登录态相关的 cookie 所在的域
 _COOKIE_DOMAINS = ("cbg.huawei.com", ".huawei.com", "login.huawei.com", ".huawei.cn")
 
@@ -230,6 +234,21 @@ _DETECT_JS = r"""
     captcha: !!document.querySelector('#captcha img, [class*="verify-code"] img, [class*="captcha"] img'),
     error: errText
   });
+})()
+"""
+
+# 只查验证码。给**不自动登录**的那条路用（没配账号 / 自动登录已放弃）。
+#
+# ⚠ 用 `getBoundingClientRect()` 判可见，**不用 `offsetParent`** ——
+#   `offsetParent` 对 `position: fixed` 的元素是 null，会漏判。
+#   这里宁可判得严一点：命中就会去提示用户，误报要付出"白让人输一次"的代价。
+_CAPTCHA_ONLY_JS = r"""
+(() => {
+  const el = document.querySelector(
+    '#captcha img, [class*="verify-code"] img, [class*="captcha"] img');
+  if (!el) return JSON.stringify({captcha: false});
+  const b = el.getBoundingClientRect();
+  return JSON.stringify({captcha: b.width > 0 && b.height > 0});
 })()
 """
 
@@ -1008,6 +1027,8 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
     tries = 0
     nav_at = time.time()
     nav_done = False
+    need_said = False           # "要验证码"只提示一次，别每轮刷屏
+    deadline_extended = False   # deadline **只延一次**（见下面手动那条路）
     try:
         while time.time() < deadline:
             if proc.poll() is not None:
@@ -1086,6 +1107,43 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                 say("⚠️ 自动登录试了几次都没成 —— 请在窗口里手动登录一次")
                 user = pwd = ""
                 nav_done = True
+
+            # ---- 手动登录时撞上验证码：只提示，不动窗口 ----
+            # ⚠ 只在"我们没在自动登录"时才查：自动那条路由 `try_auto_login`
+            #   自己报 captcha（而且那条是中止）。
+            # ⚠ 无头模式没有人能输验证码 —— 那种情况按中止处理更老实。
+            if not (user and pwd and tries < MAX_LOGIN_TRIES):
+                cap = False
+                # ⚠ `_page_ws` 必须**包在 try 里**：它底下是 `http_json`，
+                #   端口中途没了会抛 `CdpError`。写在外面的话，这个异常会从
+                #   循环里直接捅出去 —— 而我们本来是要说「浏览器关掉了」的
+                #   （见上面 `proc.poll()` 那段）。别把诊断弄丢。
+                try:
+                    ws = _page_ws(port)
+                    if ws:
+                        cdp = Cdp(ws, timeout=20)
+                        try:
+                            cap = bool(json.loads(_eval(cdp, _CAPTCHA_ONLY_JS)
+                                                  or "{}").get("captcha"))
+                        finally:
+                            cdp.close()      # ⚠ 别忘了关，跟 try_auto_login 一样
+                except (CdpError, ValueError, AttributeError):
+                    cap = False
+                if cap:
+                    if headless:
+                        raise CbgCaptchaRequired(profile_dir)
+                    if not need_said:
+                        need_said = True
+                        say("⚠️ 页面要图形验证码 —— 请在浏览器窗口里输一下，"
+                            "输完程序会自己继续")
+                        if on_need:
+                            on_need("captcha")
+                        # 用户正在操作，**再给一段**（只延一次：验证码一直挂在
+                        # 屏幕上就永远不结束，那比超时更糟）
+                        if not deadline_extended:
+                            deadline_extended = True
+                            deadline += CAPTCHA_GRACE
+                            say(f"等你输入，最多再等 {int(CAPTCHA_GRACE)} 秒")
 
             # ---- 兜底：一直没跳到登录页就自己导航过去 ----
             # ⚠ **无头模式下绝对不要做这件事**：没有人能看到那个窗口，
