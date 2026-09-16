@@ -60,6 +60,51 @@ def load(conn):
     return orders, returns
 
 
+# ------------------------------------------------------------------ 推送用
+#: 推送里最多列几个月。POS 是**月度**指标，全列会很长 ——
+#: 而企微 markdown 有 4096 **字节**上限（中文一个字 3 字节）。
+NOTIFY_MONTHS = 6
+
+
+def _pct(v):
+    """分母为 0 时分数是 `None`，显示 `—` —— **不是 0%**（建店当月就是这种）。
+
+    ⚠ 推送正文里**不要**给 `—` 补空格对齐：那是给人扫一眼的东西，
+    补了反而像排版坏了。
+    """
+    return "—" if v is None else "%.2f%%" % v
+
+
+def headline(rows) -> str:
+    """一句话结论：最新那个月。邮件主题和企微首行都用它。"""
+    if not rows:
+        return "没有可算的月份"
+    r = rows[-1]
+    return "%s POS 使用率 %s%s" % (r["month"], _pct(r[pm.BY_LABEL]["rate"]),
+                                   "（暂定）" if r["provisional"] else "")
+
+
+def notify_lines(rows, limit: int = NOTIFY_MONTHS) -> list:
+    """POS 分数的**人话版** —— 邮件正文和企微正文**共用这一份**。
+
+    ⚠ 两边各写一遍的话必然有一天对不上（这个项目已经在"同一件事两个实现"
+    上栽过三次：`is_noncash` 藏在 IO 层、`pos_export` 重算退货、workspace
+    留了两份测试）。所以：**格式只在这里定义一次**。
+    """
+    out = []
+    tail = rows[-limit:] if limit else rows
+    if len(rows) > len(tail):
+        out.append("（只列最近 %d 个月，共 %d 个月）" % (len(tail), len(rows)))
+    for r in tail:
+        la, rk = r[pm.BY_LABEL], r[pm.BY_REMARK]
+        out.append("%s%s：按标签 %s · 按备注 %s · 申诉后 %s"
+                   % (r["month"], "（暂定）" if r["provisional"] else "",
+                      _pct(la["rate"]), _pct(rk["rate"]), _pct(la["ap_rate"])))
+        out.append("分母 %s（其中扣掉退货 %s）"
+                   % (format(la["den"], ",.2f"), format(la["cut_den"], ",.2f")))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="POS 合规率（两个口径 × 按月）")
     ap.add_argument("--db", default="out/cbg.db")

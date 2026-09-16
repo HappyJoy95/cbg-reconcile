@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-from src import schedule, service, web
+from src import run_daily, runner, schedule, service, web
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -790,14 +790,14 @@ class TestScheduleApiRegistersMultipleTasks(unittest.TestCase):
         self.srv.request("POST", "/api/schedule", {"time": "12:00", "days_ago": 0})
         self.srv.request("POST", "/api/schedule", {"time": "21:00", "days_ago": 1})
         self.assertEqual(self._created(),
-                         ["CBG报量对账-12点00", "CBG报量对账-21点00"],
+                         ["门店数据拉取与计算-12点00", "门店数据拉取与计算-21点00"],
                          "两次注册必须落到两个不同的任务名，否则就是互相覆盖")
 
     def test_same_time_twice_is_an_intentional_overwrite(self):
         for _ in range(2):
             self.srv.request("POST", "/api/schedule", {"time": "21:00"})
         self.assertEqual(self._created(),
-                         ["CBG报量对账-21点00", "CBG报量对账-21点00"])
+                         ["门店数据拉取与计算-21点00", "门店数据拉取与计算-21点00"])
 
     def test_explicit_name_wins_over_the_time_default(self):
         self.srv.request("POST", "/api/schedule", {"time": "21:00", "name": "打烊那次"})
@@ -1317,3 +1317,274 @@ class TestRunnerScriptSelfHeal(unittest.TestCase):
             self.app.overview()
             self.app.overview()
         self.assertEqual(m.call_count, 1)
+
+
+class TestRunWhatApi(unittest.TestCase):
+    """`/api/run` 的 `what` —— 界面四个按钮靠它。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_乱传_what_返回_400_而不是起个半死进程(self):
+        code, body = self.srv.request("POST", "/api/run", {"what": "bogus"})
+        self.assertEqual(code, 400)
+        self.assertIn("不认识的 what", body["error"])
+
+    def test_不给_what_就是整个项目(self):
+        """老前端/老脚本不带这个字段时，行为不能变。"""
+        with mock.patch.object(runner.RunManager, "start") as m:
+            m.return_value = mock.Mock(snapshot=lambda n: {})
+            self.srv.request("POST", "/api/run", {})
+        self.assertEqual(m.call_args.kwargs.get("what"), "all")
+
+    def test_what_透传到_runner(self):
+        with mock.patch.object(runner.RunManager, "start") as m:
+            m.return_value = mock.Mock(snapshot=lambda n: {})
+            self.srv.request("POST", "/api/run", {"what": "pos"})
+        self.assertEqual(m.call_args.kwargs.get("what"), "pos")
+
+    def test_四个_what_后端都认(self):
+        for what in run_daily.BUTTON_STEPS:
+            with self.subTest(what=what):
+                with mock.patch.object(runner.RunManager, "start") as m:
+                    m.return_value = mock.Mock(snapshot=lambda n: {})
+                    code, _ = self.srv.request("POST", "/api/run", {"what": what})
+                self.assertEqual(code, 200)
+
+
+class TestAutomationApi(unittest.TestCase):
+    """`/api/schedule/automation` —— 设置里「自动化跑什么」。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        p = mock.patch.object(schedule, "kind", lambda: "windows")
+        p.start()
+        self.addCleanup(p.stop)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_一个都不勾返回_400(self):
+        code, body = self.srv.request("POST", "/api/schedule/automation", {"steps": []})
+        self.assertEqual(code, 400)
+        self.assertIn("至少勾", body["error"])
+
+    def test_勾了会重写_run_bat(self):
+        code, body = self.srv.request("POST", "/api/schedule/automation",
+                                      {"steps": ["dump", "pos"]})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        run = schedule.script_path(self.root).read_text(encoding="utf-8")
+        # ⚠ 勾「只 POS」生成的是 `--skip-check`（**不**带 `--skip-dump`）：
+        #   定时任务没人盯着，抓数据是必做的前置，不是选项。
+        self.assertIn("--skip-check", run)
+        self.assertNotIn("--skip-dump", run)
+
+    def test_概览里能读到当前的勾选和可选项(self):
+        self.srv.request("POST", "/api/schedule/automation",
+                         {"steps": ["dump", "reconcile"]})
+        _, ov = self.srv.request("GET", "/api/overview")
+        auto = ov["automation"]
+        self.assertEqual(auto["steps"], ["dump", "reconcile"])
+        # 三项都给，`dump` 也在（默认勾上，用户定的）
+        self.assertEqual([c["value"] for c in auto["choices"]],
+                         ["dump", "reconcile", "pos"])
+
+    def test_可选项由后端给_前端不自己维护一份(self):
+        _, ov = self.srv.request("GET", "/api/overview")
+        for c in ov["automation"]["choices"]:
+            self.assertEqual(c["label"], run_daily.STEP_LABELS[c["value"]])
+
+
+class TestRunPageWiring(unittest.TestCase):
+    """前端接线 —— 「运行」页四个按钮 + 自动化勾选。
+
+    ⚠ 前端**没有构建步骤、没有 lint**，引用了一个不存在的 id 只会在浏览器
+    控制台里报一行，跑测试和跑服务都看不见。所以这里按源码钉。
+    """
+
+    def test_四个按钮都在_带对的_data_what(self):
+        for what in run_daily.BUTTON_STEPS:
+            with self.subTest(what=what):
+                self.assertIn('data-what="%s"' % what, INDEX_HTML)
+
+    def test_老的单按钮已经彻底拿掉(self):
+        """⚠ 拆成四个之后 `#btn-run` 就不存在了 —— app.js 里那句
+        `$('#btn-run').addEventListener` 会在**加载时**抛 TypeError，
+        后面的绑定全部不执行（整个界面变哑巴）。"""
+        self.assertNotIn('id="btn-run"', INDEX_HTML)
+        self.assertNotIn("$('#btn-run')", APP_JS)
+
+    def test_按_what_解释退出码(self):
+        """⚠ 只有报量排查才有"有差异"(3) 这一说；POS 的 2 是"没找到订单库"。
+        混着说会让人以为 POS 也"有差异"。"""
+        self.assertIn("EXIT_LABELS", APP_JS)
+        for what in run_daily.BUTTON_STEPS:
+            with self.subTest(what=what):
+                self.assertIn("%s: {" % what, APP_JS)
+
+    def test_自动化勾选的三个_id_都在(self):
+        for i in ("automation-box", "btn-automation-save", "automation-msg"):
+            with self.subTest(id=i):
+                self.assertIn('id="%s"' % i, INDEX_HTML)
+
+    def test_自动化勾选会渲染(self):
+        self.assertIn("renderAutomation", APP_JS)
+        self.assertIn("state.overview.automation", APP_JS)
+
+    def test_一个都不勾前端先拦一道(self):
+        self.assertIn("至少勾一项", APP_JS)
+
+    def test_报量排查_tab_改好名了(self):
+        self.assertIn(">报量排查<", INDEX_HTML)
+        self.assertNotIn(">报告<", INDEX_HTML)
+
+
+class TestAutomationHasThreeChoices(unittest.TestCase):
+    """用户 2026-09-16：「定时任务自动化跑什么默认执行抓数据」。
+
+    ⚠ 之前复选框只有两项（报量排查 / POS 合规），而旁边那列「跑什么」写的却是
+    「抓华为数据 + 报量排查 + POS 合规」—— **两处对不上**，
+    用户看到"只勾了两项、却跑了三件"，会以为程序乱来。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        p = mock.patch.object(schedule, "kind", lambda: "windows")
+        p.start()
+        self.addCleanup(p.stop)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_三项可选_抓数据排第一(self):
+        _, ov = self.srv.request("GET", "/api/overview")
+        self.assertEqual([c["value"] for c in ov["automation"]["choices"]],
+                         ["dump", "reconcile", "pos"])
+
+    def test_默认三项都勾(self):
+        _, ov = self.srv.request("GET", "/api/overview")
+        self.assertEqual(ov["automation"]["steps"], ["dump", "reconcile", "pos"])
+
+    def test_勾选和那列跑什么对得上(self):
+        """⚠ 这条是**这次改动的全部意义**：复选框列表必须和「跑什么」一致。"""
+        _, ov = self.srv.request("GET", "/api/overview")
+        labels = [c["label"] for c in ov["automation"]["choices"]]
+        self.assertEqual(ov["automation"]["label"], " + ".join(labels))
+
+    def test_能取消抓数据(self):
+        """用户说"默认执行抓数据" —— 默认在，但**能取消**（他的选择）。
+        取消之后库不更新，报量排查会**明确失败**，不会静默算错。"""
+        code, body = self.srv.request("POST", "/api/schedule/automation",
+                                      {"steps": ["reconcile", "pos"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["steps"], ["reconcile", "pos"])
+        run = schedule.script_path(self.root).read_text(encoding="utf-8")
+        self.assertIn("--skip-dump", run)
+
+    def test_只勾抓数据也行(self):
+        code, body = self.srv.request("POST", "/api/schedule/automation",
+                                      {"steps": ["dump"]})
+        self.assertEqual(code, 200)
+        self.assertIn("抓华为数据", body["label"])
+
+    def test_前端不自己写死选项表(self):
+        self.assertIn("a.choices", APP_JS)
+        self.assertNotIn("['reconcile', 'pos']", APP_JS)
+        self.assertNotIn('["reconcile", "pos"]', APP_JS)
+
+    def test_界面提醒了取消抓数据的后果(self):
+        self.assertIn("建议一直勾着", INDEX_HTML)
+
+
+class TestReportBugApi(unittest.TestCase):
+    """`/api/report-bug` —— 「定时执行」下面那个「上报 bug」按钮。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        (self.root / ".secrets").mkdir(parents=True, exist_ok=True)
+        (self.root / ".secrets" / "erp.env").write_text(
+            "ERP_PASSWORD=hunter2\n", encoding="utf-8")
+        (self.root / "config").mkdir(parents=True, exist_ok=True)
+        (self.root / "config" / "store-X.yaml").write_text(
+            "store_code: SCN1\n", encoding="utf-8")
+        # ⚠ `load_config` 会读 config/stores.yaml（随包发的门店映射表）——
+        #   夹具里不建的话，真实路径上会 FileNotFoundError
+        (self.root / "config" / "stores.yaml").write_text(
+            "stores: []\ndoc_types: {}\n", encoding="utf-8")
+        (self.root / "out" / "run.log").write_text("=== 跑了一次 ===\n", encoding="utf-8")
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_点了就打包并返回路径(self):
+        code, body = self.srv.request("POST", "/api/report-bug", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertTrue(Path(body["path"]).is_file())
+        self.assertIn("执行日志.txt", body["entries"])
+
+    def test_返回里带邮件和企业微信各自的结果(self):
+        """⚠ 两条**各自独立** —— 一条挂了另一条照发，界面要能分开显示。"""
+        _, body = self.srv.request("POST", "/api/report-bug", {})
+        self.assertIn("mail", body)
+        self.assertIn("wecom", body)
+
+    def test_推送失败时_ok_仍然是真的并且给得出路径(self):
+        """⚠ 用户自己问的"日志会不会推不出去" —— **会**，而且那正是最常见的 bug。
+        推送失败不该把上报判成失败，包必须留着、路径必须说出来。"""
+        with mock.patch("src.cli.report_bug") as m:
+            m.return_value = {"ok": True, "path": "/tmp/x.zip", "size_kb": 1.0,
+                              "entries": [], "mail": "❌ 挂了", "wecom": "❌ 挂了",
+                              "sent": [], "message": "包在这：/tmp/x.zip"}
+            _, body = self.srv.request("POST", "/api/report-bug", {})
+        self.assertTrue(body["ok"])
+        self.assertIn("/tmp/x.zip", body["message"])
+
+    def test_包里没有凭据(self):
+        """⚠ 端到端也验一遍 —— 光单测不够，这里走的是真路由。"""
+        import zipfile
+        _, body = self.srv.request("POST", "/api/report-bug", {})
+        with zipfile.ZipFile(body["path"]) as z:
+            names = z.namelist()
+            text = "\n".join(z.read(n).decode("utf-8", "replace") for n in names)
+        self.assertFalse([n for n in names if ".env" in n])
+        self.assertNotIn("hunter2", text)
+
+
+class TestReportBugButtonWiring(unittest.TestCase):
+    def test_按钮在定时执行那张卡片里(self):
+        # ⚠ 锚 `<h2>定时执行</h2>` —— 光找"定时执行"会匹到顶部那个小药丸的
+        #   title（第一版就是这么错的，取到的区间是空的）。
+        #   尾巴用「设置那张面板的 </section>」—— 定时执行是设置里最后一张卡片。
+        i = INDEX_HTML.index("<h2>定时执行</h2>")
+        j = INDEX_HTML.index("</section>", i)
+        self.assertIn("btn-report-bug", INDEX_HTML[i:j],
+                      "「上报 bug」按钮该放在「定时执行」下面")
+
+    def test_结果区几个_id_都在(self):
+        for i in ("btn-report-bug", "report-bug-msg", "report-bug-result"):
+            with self.subTest(id=i):
+                self.assertIn('id="%s"' % i, INDEX_HTML)
+
+    def test_前端会渲染出包的路径(self):
+        """⚠ 界面**必须**把路径显示出来 —— 自动发送失败是常态，
+        那时候用户得能自己把文件发出去。"""
+        self.assertIn("r.path", APP_JS)
+        self.assertIn("$('#report-bug-result')", APP_JS)
+
+    def test_界面写明了包里没有凭据但有业务数据(self):
+        seg = INDEX_HTML[INDEX_HTML.index("btn-report-bug"):]
+        self.assertIn("凭据", seg[:2500])
+        self.assertIn("业务数据", seg[:2500])

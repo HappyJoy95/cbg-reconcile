@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
-from src import autostart
+from src import autostart, version
 
 NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
 
@@ -442,8 +442,16 @@ class TestTaskNameIsDistinct(unittest.TestCase):
         """
         from src import schedule
         self.assertNotEqual(autostart.AUTOSTART_TASK, schedule.TASK_NAME)
-        self.assertTrue(autostart.AUTOSTART_TASK.startswith(schedule.TASK_NAME),
-                        "前缀留着，用户在任务列表里能看出是同一套东西")
+        # ⚠ 以前这里还断言"开机自启的任务名以定时任务名开头"（看得出是同一套东西）。
+        #   2026-09-16 定时任务改名叫「门店数据拉取与计算」之后**这条不再成立**：
+        #   开机自启的名字是从**产品名**（`version.APP_NAME` = CBG报量对账）来的，
+        #   而定时任务名是描述**它每天干什么**的。两者本来就不是一回事。
+        #
+        #   **故意不跟着改**：改名 = Windows 那边**并存而不是覆盖**，
+        #   于是开机时会**被拉起两次**（老任务一次、新任务一次）。
+        #   为了"名字看着像一套"付这个代价不值。
+        self.assertTrue(autostart.AUTOSTART_TASK.startswith(version.APP_NAME),
+                        "开机自启跟着**产品名**走（和定时任务名是两回事）")
 
 
 if __name__ == "__main__":

@@ -129,14 +129,14 @@ class TestMarkdown(unittest.TestCase):
         md = wecom.build_markdown(self._ctx(), [_Ctx("SN001"), _Ctx("SN002")], [],
                                   matched=4, total=6)
         self.assertIn("青岛新业广场店", md)
-        self.assertIn("未报", md)
+        self.assertIn("玲珑无但云商有", md)
         self.assertIn("SN001", md)
         self.assertIn("SN002", md)
 
     def test_clean_day(self):
         md = wecom.build_markdown(self._ctx(), [], [], matched=6, total=6)
         self.assertIn("全部已报量", md)
-        self.assertNotIn("未报量（", md)
+        self.assertNotIn("玲珑无但云商有（", md)
 
     def test_caps_long_list(self):
         many = [_Ctx(f"SN{i:04d}") for i in range(50)]
@@ -177,8 +177,8 @@ class TestMarkdown(unittest.TestCase):
 
     def test_mention_text_only_when_needed(self):
         self.assertEqual(wecom.build_mention_text(self._ctx(), 0, 0), "")
-        self.assertIn("未报量", wecom.build_mention_text(self._ctx(), 3))
-        self.assertIn("调拨货", wecom.build_mention_text(self._ctx(), 0, 2))
+        self.assertIn("玲珑无但云商有", wecom.build_mention_text(self._ctx(), 3))
+        self.assertIn("玲珑有但云商无", wecom.build_mention_text(self._ctx(), 0, 2))
 
 
 class TestPush(unittest.TestCase):
@@ -193,7 +193,7 @@ class TestPush(unittest.TestCase):
         self.assertEqual(fake.sent_types(), ["text", "markdown"])
         text = fake.calls[0]["json"]["text"]
         self.assertEqual(text["mentioned_list"], ["@all"])
-        self.assertIn("未报量", text["content"])
+        self.assertIn("玲珑无但云商有", text["content"])
         self.assertIn("@所有人", out)
 
     def test_no_mention_when_no_diff(self):

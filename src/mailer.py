@@ -17,6 +17,7 @@ import smtplib
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Optional
 
 from . import envfile
 
@@ -229,9 +230,11 @@ def should_send(mc: MailConfig, has_diff: bool) -> tuple[bool, str]:
 
 
 def build_message(mc: MailConfig, subject: str, body: str,
-                  attachments=()) -> EmailMessage:
+                  attachments=(), prefix: Optional[str] = None) -> EmailMessage:
     msg = EmailMessage()
-    msg["Subject"] = f"{mc.subject_prefix} {subject}".strip()
+    # ⚠ `prefix` 给"第二条推送"用：POS 合规跟报量排查是**两条独立的消息**，
+    #   都顶着 `[报量对账]` 会让人以为发重了。默认不动（还是配置里那个）。
+    msg["Subject"] = f"{mc.subject_prefix if prefix is None else prefix} {subject}".strip()
     msg["From"] = mc.from_addr
     msg["To"] = ", ".join(mc.recipients)
     msg.set_content(body, charset="utf-8")
@@ -244,9 +247,10 @@ def build_message(mc: MailConfig, subject: str, body: str,
     return msg
 
 
-def send(mc: MailConfig, subject: str, body: str, attachments=()) -> None:
+def send(mc: MailConfig, subject: str, body: str, attachments=(),
+         prefix: Optional[str] = None) -> None:
     """同步发送。失败抛 MailError（调用方决定要不要因此失败整个流程）。"""
-    msg = build_message(mc, subject, body, attachments)
+    msg = build_message(mc, subject, body, attachments, prefix=prefix)
     try:
         if mc.security == "ssl":
             server = _SMTP4SSL(mc.host, mc.port, timeout=30)
@@ -268,15 +272,39 @@ def send(mc: MailConfig, subject: str, body: str, attachments=()) -> None:
         raise MailError(f"连不上 {mc.host}:{mc.port} —— {e}") from e
 
 
+#: 第二条推送（POS 合规）自己的主题前缀 —— 见 `build_message` 的 prefix 说明
+POS_SUBJECT_PREFIX = "[POS 合规]"
+
+
+def build_pos_mail(ctx: dict, lines, headline: str) -> tuple:
+    """POS 合规那封邮件。**和报量排查分开两封**（用户 2026-09-16 定的）。
+
+    正文用 `pos_report.notify_lines` 的输出 —— 和企微**共用同一份格式化**，
+    不在这里另排一遍。
+    """
+    store = ctx.get("门店", "?")
+    subject = f"{store} · {headline}"
+    body = "\n".join([f"门店 {store}", headline, ""] + list(lines) + [
+        "",
+        "——",
+        "口径：分母 = 非国补、非即时零售、非 Care+ 的订单金额；分子 = 其中的非现金支付。",
+        "退货在**退货发生当月**扣减原单的金额与非现金部分。",
+        "⚠「暂定」= 最近两个月：上个月的分数还会被这个月的退货改。",
+        "本邮件由 cbg-reconcile 自动发送。",
+        f"配置 {ctx.get('配置文件', '')}",
+    ])
+    return subject, body
+
+
 def build_report_mail(ctx: dict, summary: list[str], missing: int,
                       unshipped: int = 0) -> tuple[str, str]:
     """拼主题和正文。主题要让人不看正文就知道结果。"""
     store = ctx.get("门店", "?")
     day = ctx.get("目标日", "?")
     if missing:
-        head = f"❌ 未报量 {missing} 台"
+        head = f"❌ 玲珑无但云商有 {missing} 台"
     elif unshipped:
-        head = f"⚠️ 调拨货 {unshipped} 台查无出库"
+        head = f"⚠️ 玲珑有但云商无 {unshipped} 台"
     else:
         head = "✅ 无差异"
     subject = f"{store} {day} · {head}"

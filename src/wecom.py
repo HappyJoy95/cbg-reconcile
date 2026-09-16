@@ -136,15 +136,40 @@ def describe_wecom(wc: WecomConfig) -> dict:
     }
 
 
-def should_send(wc: WecomConfig, has_diff: bool) -> tuple[bool, str]:
+def should_send(wc: WecomConfig, has_diff: bool,
+                ignore_when: bool = False) -> tuple[bool, str]:
+    """要不要发。
+
+    `ignore_when=True` 给 POS 那条用 —— POS **没有"差异"这个概念**，
+    「只有差异才发」那个开关是给报量排查的（用户 2026-09-16 定的：
+    POS 每次跑完都推当月分数）。
+    """
     if not wc.enabled:
         return False, "企微推送没开"
-    if wc.when == "only_diff" and not has_diff:
+    if wc.when == "only_diff" and not has_diff and not ignore_when:
         return False, "配置的是「仅有差异时发」，本次无差异"
     bad = wc.problems()
     if bad:
         return False, "配置不全：" + "、".join(bad)
     return True, ""
+
+
+# ----------------------------------------------------------------- POS 推送
+def build_pos_markdown(ctx: dict, lines, headline: str) -> str:
+    """POS 合规的推送正文 —— 和报量排查**分开两条**（用户 2026-09-16 定的）。
+
+    企微 markdown **不支持表格**（只支持很有限的那几个标记），所以用
+    `> 引用行` 排版，月份当小标题。
+    """
+    store = ctx.get("门店", "?")
+    out = [f"## POS 合规 · {store}", f"**{headline}**", ""]
+    for ln in lines:
+        # 以月份开头的是"标题行"，其余是它的明细 —— 明细缩进成引用块
+        out.append(f"> **{ln.strip()}**" if ln[:4].isdigit() else f"> {ln.strip()}")
+    out.append(f"\n<font color=\"comment\">分母 = 非国补、非即时零售、非 Care+ 的订单金额；"
+               f"分子 = 其中的非现金支付。退货在退货当月扣减。\n"
+               f"cbg-reconcile 自动发送 · {ctx.get('生成时间', '')}</font>")
+    return _fit("\n".join(out))
 
 
 # --------------------------------------------------------------------- 组装
@@ -155,17 +180,17 @@ def build_markdown(ctx: dict, missing: list, unshipped: list,
     day = ctx.get("目标日", "?")
     n_missing = len(missing)
 
-    lines = [f"## 报量对账 · {store}", f"**{day}**"]
+    lines = [f"## 报量排查 · {store}", f"**{day}**"]
     if n_missing:
         lines.append(f"云商卖 <font color=\"info\">{total}</font> 台 → "
                      f"已报 <font color=\"info\">{matched}</font>，"
-                     f"**未报 <font color=\"warning\">{n_missing}</font>**")
+                     f"**玲珑无但云商有 <font color=\"warning\">{n_missing}</font>**")
     else:
         lines.append(f"云商卖 <font color=\"info\">{total}</font> 台，"
                      f"**<font color=\"info\">全部已报量 ✅</font>**")
 
     if missing:
-        lines.append(f"\n**❌ 未报量（{n_missing}）**")
+        lines.append(f"\n**❌ 玲珑无但云商有（{n_missing}）**")
         for s in missing[:MAX_LIST]:
             lines.append(f"> `{s.sn}` {s.item[:24]}")
             lines.append(f"> {s.seller} · {s.pay_time} · ¥{s.amount}")
@@ -173,7 +198,7 @@ def build_markdown(ctx: dict, missing: list, unshipped: list,
             lines.append(f"> …还有 **{n_missing - MAX_LIST}** 台，见报告附件")
 
     if unshipped:
-        lines.append(f"\n**⚠️ 调拨货查无出库（{len(unshipped)}）**")
+        lines.append(f"\n**⚠️ 玲珑有但云商无（{len(unshipped)}）**")
         for it in unshipped[:MAX_LIST]:
             lines.append(f"> `{it.sn}` {str(it.info.get('item', ''))[:24]}")
         if len(unshipped) > MAX_LIST:
@@ -205,9 +230,9 @@ def build_mention_text(ctx: dict, missing: int, unshipped: int = 0) -> str:
     store = ctx.get("门店", "?")
     day = ctx.get("目标日", "?")
     if missing:
-        return f"【报量对账】{store} {day}：有 {missing} 台已卖未报量，请尽快上报"
+        return f"【报量排查】{store} {day}：有 {missing} 台玲珑无但云商有，请尽快上报"
     if unshipped:
-        return f"【报量对账】{store} {day}：有 {unshipped} 台调拨货查无出库，请核对"
+        return f"【报量排查】{store} {day}：有 {unshipped} 台玲珑有但云商无，请核对"
     return ""
 
 
@@ -296,6 +321,22 @@ def push(wc: WecomConfig, ctx: dict, missing: list, unshipped: list,
         sent.append("已发报告附件")
 
     return "、".join(sent)
+
+
+def push_pos(wc: WecomConfig, ctx: dict, lines, headline: str) -> str:
+    """推 POS 合规这一条。**和报量排查完全分开**（用户 2026-09-16 定的）。
+
+    ⚠ 三条和报量排查**故意不同**，别顺手统一：
+
+    1. **不 @人**。POS 是月度指标，不是"今天有活要干" ——
+       每天 @所有人 会被门店屏蔽掉，连带把真正要紧的报量排查也一起屏蔽。
+    2. **不受「只有差异才推」约束**。POS 没有"差异"这个概念，
+       那个开关是给报量排查的（见 `should_send` 的 `ignore_when`）。
+    3. **不传附件**。POS 的明细在控制台的「POS 合规」页上看，
+       发一份 xlsx 到群里没人会打开。
+    """
+    send_markdown(wc, build_pos_markdown(ctx, lines, headline))
+    return "已发 POS 合规摘要"
 
 
 def test_push(wc: WecomConfig) -> str:

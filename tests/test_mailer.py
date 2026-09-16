@@ -242,11 +242,12 @@ class TestSubjectLine(unittest.TestCase):
 
     def test_subject_says_the_result_without_opening(self):
         s, _ = mailer.build_report_mail(self._ctx(), ["line"], missing=2)
-        self.assertIn("未报量 2 台", s)
+        # ⚠ 口径名 2026-09-16 由门店定名：「玲珑」= 华为那个销售系统的代号
+        self.assertIn("玲珑无但云商有 2 台", s)
         s, _ = mailer.build_report_mail(self._ctx(), ["line"], missing=0)
         self.assertIn("无差异", s)
         s, _ = mailer.build_report_mail(self._ctx(), ["line"], missing=0, unshipped=1)
-        self.assertIn("调拨货", s)
+        self.assertIn("玲珑有但云商无", s)
 
     def test_body_contains_summary_and_footer(self):
         _, b = mailer.build_report_mail(self._ctx(), ["第一行", "第二行"], missing=1)

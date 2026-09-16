@@ -657,7 +657,7 @@ class TestWindows(unittest.TestCase):
             schedule.install(Path(d), "12:00", days_ago=0)     # 中午那次，名字留空
             schedule.install(Path(d), "21:00", days_ago=1)     # 打烊那次，名字留空
 
-        self.assertEqual(seen, ["CBG报量对账-12点00", "CBG报量对账-21点00"],
+        self.assertEqual(seen, ["门店数据拉取与计算-12点00", "门店数据拉取与计算-21点00"],
                          "两次留空注册必须是两个不同的任务名")
 
     def test_default_task_name_has_no_illegal_chars(self):
@@ -685,7 +685,7 @@ class TestWindows(unittest.TestCase):
                 mock.patch.object(winutil.subprocess, "run", fake_run):
             schedule.install(Path(d), "21:00")
             schedule.install(Path(d), "21:00")
-        self.assertEqual(seen, ["CBG报量对账-21点00"] * 2)
+        self.assertEqual(seen, ["门店数据拉取与计算-21点00"] * 2)
 
     def test_legacy_bare_name_is_kept_not_silently_deleted(self):
         """升级期：老的 `CBG报量对账`（没有时间后缀）会和新任务**并存**。

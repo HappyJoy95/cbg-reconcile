@@ -27,7 +27,7 @@
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="reports">报告</button>
+  <button class="tab active" data-tab="reports">报量排查</button>
   <button class="tab" data-tab="pos">POS 合规</button>
   <button class="tab" data-tab="run">运行</button>
   <button class="tab" data-tab="session">会话</button>
@@ -36,7 +36,7 @@
 
 <main>
 
-<!-- ───────────────────────────── 报告 ───────────────────────────── -->
+<!-- ─────────────────────────── 报量排查 ─────────────────────────── -->
 <section class="panel active" id="panel-reports">
   <div class="cards" id="report-cards"></div>
 
@@ -87,7 +87,8 @@
 <!-- ───────────────────────────── 运行 ───────────────────────────── -->
 <section class="panel" id="panel-run">
   <div class="card">
-    <div class="card-head"><h2>跑一次对账</h2></div>
+    <div class="card-head"><h2>跑一次</h2>
+      <span class="hint">跑哪几件事由按钮决定</span></div>
     <div class="form-row">
       <label>目标日</label>
       <select id="run-mode">
@@ -97,6 +98,14 @@
       </select>
       <input type="date" id="run-date" hidden>
     </div>
+    <!-- ⚠ 这句放在**「目标日」正下方**，不是塞在卡片标题里 ——
+         用户盯着这个下拉框的时候，视线不会跑到标题上去。
+         下面的「高级（时间窗容差）」同理，也只有报量排查吃。 -->
+    <p class="hint" style="margin:-4px 0 10px 0">
+      ⚠ <b>这个「目标日」只影响「报量排查」</b>：
+      <b>抓华为数据</b>固定抓<b>当月</b>（没有本地库时补全部历史），
+      <b>POS 合规</b>按<b>整月</b>算 —— 都不看这个日期。
+    </p>
     <details class="adv">
       <summary>高级（时间窗容差）</summary>
       <div class="form-row">
@@ -104,13 +113,27 @@
         <label>华为窗口往后看</label><input type="number" id="run-lookahead" min="0" max="7" placeholder="用配置">
       </div>
       <p class="hint">「华为窗口往后看」大于 0 时，会把目标日之后补报的也算进来
-        （容忍 23:50 卖的货次日才报量）。默认 0，只看当天。</p>
+        （容忍 23:50 卖的货次日才报量）。默认 0，只看当天。<br>
+        ⚠ 这两项<b>同样只影响「报量排查」</b>。</p>
     </details>
     <div class="form-row">
-      <button class="btn primary" id="btn-run">开始运行</button>
+      <!-- ⚠ 四个按钮都走 `daily` 这一个入口，只是加不同的跳过开关 ——
+           见 src/run_daily.py 的 WHAT_FLAGS。各走各的命令的话，
+           「第 1 步失败就不发报告」「库里没有就抓全量」「会话失效先静默续期」
+           这些行为在界面上就全都享受不到了，而且界面跑的跟定时任务跑的迟早分叉。 -->
+      <button class="btn primary" data-what="all">整个项目</button>
+      <button class="btn" data-what="dump">抓华为数据</button>
+      <button class="btn" data-what="reconcile">报量排查</button>
+      <button class="btn" data-what="pos">POS 合规</button>
       <button class="btn ghost" id="btn-stop" disabled>停止</button>
       <span class="hint" id="run-status"></span>
     </div>
+    <p class="hint" style="margin:8px 0 0 0">
+      <b>整个项目</b> = 抓华为数据 → 报量排查 → POS 合规。<br>
+      单独执行的按钮<b>不会顺手抓数据</b> —— 抓数据要一两分钟起（首次补历史更久），
+      想快就分开点。<b>抓华为数据</b>没有本地库时会自动补全部历史。<br>
+      <b>只有「报量排查」（和「整个项目」里的那一步）吃上面的「目标日」</b>。
+    </p>
   </div>
 
   <div class="card">
@@ -414,6 +437,39 @@
   <div class="card">
     <div class="card-head"><h2>定时执行</h2></div>
     <div id="schedule-box"></div>
+
+    <div class="form-row" style="margin-top:12px">
+      <label style="min-width:auto"><b>自动化跑什么</b></label>
+      <span id="automation-box"></span>
+      <button class="btn small primary" id="btn-automation-save">保存</button>
+      <span class="hint" id="automation-msg"></span>
+    </div>
+    <p class="hint" style="margin:6px 0 0 0">
+      <b>默认三件都勾</b>。⚠ 一件都不勾是<b>不允许</b>的（会当场报错）——
+      静默当成"都跑"的话，你取消了勾选、结果每天照样推送，日志里还一个字都不说。<br>
+      ⚠ <b>「抓华为数据」建议一直勾着</b>：不勾的话本地数据不会更新，
+      报量排查会以「库不新鲜」失败，POS 也只是拿旧数据在算。<br>
+      改这里<b>不用重新注册任务</b>，也不用弹 UAC：计划任务跑的是 <code>run.bat</code>，
+      改的是它的内容，任务本身没变。
+    </p>
+
+    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0 12px 0">
+
+    <div class="form-row">
+      <label style="min-width:auto"><b>出问题了？</b></label>
+      <button class="btn" id="btn-report-bug">上报 bug</button>
+      <span class="hint" id="report-bug-msg"></span>
+    </div>
+    <div id="report-bug-result"></div>
+    <p class="hint" style="margin:6px 0 0 0">
+      点一下会把<b>现场日志</b>打包（执行日志 / 定时任务 / 配置 / 环境），
+      然后<b>试着</b>发到邮箱和企业微信。<br>
+      ⚠ <b>包里没有任何能拿去登录的凭据</b>（<code>.secrets\</code> 整个不进包），
+      但有业务数据（门店名 / 串号 / 金额），发之前确认收件人是自己人。<br>
+      ⚠ 发不出去也<b>不影响</b> —— 包会留在 <code>out\report-bug-时间.zip</code>，
+      界面上会把路径写出来，直接把这个文件发出去就行。
+      <b>「推送失败」本身就是最常见的 bug，用它来上报它自己当然也不行。</b>
+    </p>
     <div class="form-row">
       <label>每天</label><input type="time" id="sched-time" value="21:00">
       <label>跑</label>

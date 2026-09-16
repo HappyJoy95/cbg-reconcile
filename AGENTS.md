@@ -14,10 +14,15 @@
 `bootstrap.py autostart --elevated`，而那条路会让抓会话失败，见坑 7）。
 
 ```bash
-python -m pytest tests/ -q          # 728 条，约 28 秒。改完必须全绿
+python -m pytest tests/ -q          # 1006 条，约 38 秒。改完必须全绿
 python bootstrap.py selftest        # 逐项自检（版本 / 门店 / 依赖 / 会话 / 服务）
 python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
+python -m src.cli daily             # 日常流程：抓华为数据 → 报量排查 → POS 合规
 ```
+
+> **`daily` 是定时任务跑的那条命令**，三个步骤由 `--skip-dump/--skip-check/--skip-pos`
+> 组合出来。步骤定义只有一份（`run_daily.STEPS`），控制台那四个按钮和「自动化跑什么」
+> 都从它派生 —— 各写一份的话，迟早有一处静默跑错东西。
 
 依赖：`requests` / `pyyaml` / `openpyxl`（见 `requirements.txt`）。
 代码要求 **Python 3.8+**（三头都要能跑 —— 门店 Win7 老机器只能 3.8.10、
@@ -34,7 +39,13 @@ python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
 ## 目录
 
 ```
-src/cli.py         命令行入口 + 所有 cmd_* 子命令（auth/ping/check/serve/selftest…）
+src/cli.py         命令行入口 + 所有 cmd_* 子命令（auth/ping/check/daily/pos/serve…）
+src/run_daily.py   日常流程编排：抓华为数据 → 报量排查 → POS 合规（**步骤定义唯一来源**）
+src/dump.py        华为订单 → SQLite（out/cbg-<年>.db，一年一个库）
+src/pos_metric.py  POS 使用率口径（**纯函数、无 IO**，业务规则只在这）
+src/pos_report.py  POS 的口径 IO 层（读库）+ 推送文案
+src/pos_export.py  POS 明细 Excel
+src/bugreport.py   「上报 bug」：收集现场 → 打包 → 推送（**先落盘再发**）
 src/web.py         控制台后端（HTTP + JSON API，无框架）与 App/Handler
 web/app.js         控制台前端（原生 JS，**无构建步骤**，改完刷新即可）
 web/index.html     页面骨架（id 要和 app.js 里 $('#xxx') 对得上）
@@ -44,6 +55,7 @@ src/erp.py         云商 ERP 客户端（销售明细、登录换 token、验�
 src/reconcile.py   对账核心：两边串号做差集
 src/report.py      差异清单落盘（xlsx + json）
 src/selfupdate.py  自更新 / 历史版本回退 / 版本检查
+src/runner.py      控制台「运行」页：起子进程 + 日志缓冲
 src/schedule.py    计划任务（schtasks / crontab）+ 自己记的注册参数
                    （`.secrets/schedule.json`，见坑 7 第 3 条）
 src/autostart.py   开机自启（**默认注册表 Run·普通权限**；计划任务那条要显式开）
@@ -51,7 +63,7 @@ src/winutil.py     schtasks 的两个坑（输出编码、字段本地化）集�
 src/runtime.py     记住"安装时用的是哪个 Python"（多 Python 机器不装错）
 src/elevate.py     按需提权：只把"删旧任务/建定时任务"那一步弹一次 UAC
 bootstrap.py       所有 .bat 的统一入口（**纯标准库**，装依赖前就能跑）
-tests/             728 条单元测试（pytest）
+tests/             1006 条单元测试（pytest）
 tools/build_package.sh  打发布包（见下）
 运维手册.md         完整手册（部署/维护用，**不发门店**）
 门店操作手册.md     发门店的精简版（五六步，打包时进包的是这份）
@@ -141,7 +153,7 @@ update-debug.py    更新失败时的现场诊断脚本
 * 提交信息写清**为什么**（这个项目的注释和提交信息都是"记录踩过的坑"风格，
   请保持）。中文。
 
-## 九个踩过的坑（都真踩过，别再踩）
+## 十二个踩过的坑（都真踩过，别再踩）
 
 **1. 路径比较别用 `str(Path)` —— Windows 上是反斜杠**
 
@@ -287,6 +299,64 @@ Python 按 locale 编码写输出（中文 Windows 是 GBK）。这时打印 `�
 真相是**登录流程还没走完**：cookie 拿到了但尚未生效，自检（打的正是华为接口）
 于是 403；**登录一完成，同一次抓取就成功了**。
 → 报 403 先确认窗口**真的进到门户首页**了，再重抓一次。
+
+**10. `sqlite3.Row` 和 `%` 格式化**天生不搭 —— 而它会造出最坏的一种失败**
+
+⚠ **门店实测炸过**（2026-09-16，2.0.0 的 beta）。
+
+Python 的 `%` **只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组时正常，
+换成 `sqlite3.Row` 之后**只允许一个占位符**，多一个就
+`TypeError: not enough arguments for format string`。
+
+踩的形状：`dump.main` 的汇总打印全是 `% row` 那种按位置展开的写法，
+而我为了 `reported_sns_from_db` 能 `r["sn"]`，给 `connect()` **顺手设了
+`row_factory`** —— 主连接从元组变成了 Row。
+
+**最坏的地方**：数据其实**已经写进库了**，崩的只是最后的打印。退出码 9 ⇒
+`run_daily` 判定第 1 步失败 ⇒ **报量排查和 POS 一个都没跑**。
+**活儿干完了，工具却说自己失败了。**
+
+→ 现在的规矩：
+* `connect()` **默认给元组**（`dump.main` 那条），`open_db()` 才是命名行（读的人那条）——
+  差别摆在两个**函数名**上，不靠"记得传参数"；
+* 打印一律写 `tuple(row)`，**不依赖连接的行类型**；
+* 那段汇总抽成了 `print_summary()` —— 它以前从来没被测过
+  （只有真去华为抓一次才会跑到），所以坏了也没人知道。
+
+**教训**：改一个**共享底层函数的默认行为**时，要把它的**所有调用点**过一遍，
+而不是只想自己那个用例。（我当时还写了"实测复现过"—— 那个复现只覆盖了列缓存，
+**没有覆盖 row_factory 把主连接的打印搞坏**。）
+
+**11. `SystemExit` 是 `BaseException`，会穿过 `except Exception`**
+
+两处都真踩过：
+
+* `run_check.py` 里 `rc = e.code if isinstance(e.code, int) else 0` ——
+  `raise SystemExit("消息")` 的 `code` 是**字符串** ⇒ 变成 **0 = 成功**；
+  而且因为异常被**接住**了，Python 也不会替我们去印那条消息。
+  实测（配置路径写错）：日志全文只有「开始」和「结束 exit=0」——
+  **看着像跑成功了，其实什么都没干**。
+* `web.py` 的 `_dispatch` 只接 `Exception` ⇒ `SystemExit` 穿过它，
+  连接被**直接掐断**，界面只看到"失败"两个字、连错误信息都没有。
+  （`load_config` 找不到配置文件、argparse 都会抛它。）
+
+→ 该接的地方显式接 `SystemExit`；`run_check.py` 里恢复 Python 自己的语义
+（消息进 stderr、退出码 1）。**`dump.main` 那种会被进程内调用的函数，
+别用 `SystemExit` 报错** —— 用返回码。
+
+**12. `str.replace()` 没加 `assert` 就是**静默 no-op**
+
+改代码时用 `s.replace(旧, 新)` 打补丁，**旧串写错一个字，它什么都不做、也不报错**。
+这个坑在 2.0.0 这一轮踩了**三次**：
+
+* `wecom.should_send` 的签名（`-> tuple:` 那半截没对上）→
+  函数体改了、签名没改，运行期才 `unexpected keyword argument`；
+* `web.py` 的自动化接口（原文是"至少勾**一个**"，我搜的是"至少勾**一项**"）→
+  改的是空气，测试报 400 查了半天；
+* 测试里锚 `table([...])` 用 `re.search` 匹到了**别的表**（app.js 里有好几处）。
+
+→ **一律配 `assert 旧串 in s`**。批量改源码时再加一条：**改完立刻 `py_compile`**，
+并按行号锚定（"往第 N 行插一段"比"按内容替换"稳）。
 
 ## 数据与凭据（别提交）
 

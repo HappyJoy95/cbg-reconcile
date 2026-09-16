@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (autostart, browser, config_io, elevate, mailer, schedule,
+from . import (autostart, browser, config_io, elevate, mailer, run_daily, schedule,
                selfupdate, service, version, wecom)
 from .cbg import CbgClient, CbgError
 from .erp import (DEFAULT_ENV_FILE, ErpCaptchaRequired, ErpClient, ErpError,
@@ -429,6 +429,18 @@ class App:
             "config": {"path": self.config, "values": config_io.pick(cfg)},
             "session": self.session_info(),
             "schedule": schedule.status(self.root),
+            # 「自动化跑什么」——界面渲染复选框要用，所以连**可选值**一起给，
+            # 免得前端自己写一份标签表（那就是"两处各写一遍"的开始）。
+            "automation": {
+                "steps": list(schedule.automation_steps(self.root)),
+                # ⚠ 三项都给，`dump` 也在里面（默认勾上）—— 用户 2026-09-16 定的。
+                #   复选框列表和旁边那列「跑什么」必须对得上，
+                #   否则用户看到"只勾了两项"、而实际跑了三件，会以为程序乱来。
+                "choices": [{"value": k, "label": run_daily.STEP_LABELS[k]}
+                            for k in run_daily.AUTOMATION_DEFAULT_STEPS],
+                "label": run_daily.steps_label(schedule.automation_steps(self.root)),
+                "always_on": [],          # 预留：将来若有"不许取消"的项
+            },
             # "启动脚本这次被重建过" —— 界面可以据此提一句，
             # 免得门店发现定时任务的命令悄悄变了会懵
             "runner_rebuilt": self._runner_rebuilt,
@@ -511,6 +523,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"参数不对：{e}"}, 400)
         except (CbgAuthError, CbgError, RuntimeError) as e:
             return self._json({"error": str(e)}, 409)
+        except SystemExit as e:
+            # ⚠ `SystemExit` 是 **BaseException**，不接的话它会**穿过**下面那层
+            #   `except Exception`，把连接直接掐断 —— 界面只看到"失败"两个字，
+            #   连错误信息都没有（实测踩到：`load_config` 找不到配置文件时）。
+            #   `load_config` / argparse 这些地方都会抛它。
+            return self._json({"error": str(e) or "启动参数不对"}, 500)
         except Exception as e:                       # noqa: BLE001
             return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
@@ -968,6 +986,45 @@ class Handler(BaseHTTPRequestHandler):
                 st["script_rebuilt"] = True
             return self._json(st)
 
+        if path == "/api/report-bug" and method == "POST":
+            # ⚠ 同步跑（跟 `/api/mail/test`、`/api/wecom/test` 一个路子）——
+            #   这是一次性点击，用户就在旁边等着看结果。
+            #   **打包那一步不碰网络**，所以最坏情况也就是等两个超时。
+            body = self._read_json()
+            from . import cli               # 延迟 import：cli 顶层会碰一堆东西，
+                                            # 在这儿再导免得和 web 绕圈
+            try:
+                res = cli.report_bug(app.root, app.config,
+                                     no_mail=bool(body.get("no_mail")),
+                                     no_push=bool(body.get("no_push")))
+            except Exception as e:                    # noqa: BLE001
+                return self._json({"ok": False, "message": f"上报失败：{e}"})
+            return self._json(res)
+
+        if path == "/api/schedule/automation" and method in ("PUT", "POST"):
+            # ⚠ 只改**跑什么**，不动时间/目标日 —— 所以**不用重新注册 Windows 任务**，
+            #   只重写 run.bat 就行。那任务是跑 run.bat 的，内容变了它自然跟着变，
+            #   一次 UAC 都不用弹（重新注册可能弹）。
+            body = self._read_json()
+            # 认 `steps`；也认老的 `what`（那时它也是一串步骤名，用法一样）
+            picked = body.get("steps")
+            if picked is None:
+                picked = body.get("what")
+            if not isinstance(picked, list) or not picked:
+                return self._json(
+                    {"error": "至少勾一项（%s）"
+                              % " / ".join(run_daily.STEP_LABELS[k]
+                                           for k in run_daily.AUTOMATION_DEFAULT_STEPS)}, 400)
+            try:
+                res = schedule.set_automation_steps(app.root, app.config, picked)
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            except OSError as e:
+                return self._json({"ok": False, "message": f"写 run.bat 失败：{e}"})
+            res["status"] = schedule.status(app.root)
+            res["automation"] = {"steps": list(schedule.automation_steps(app.root))}
+            return self._json(res)
+
         if path == "/api/schedule" and method == "POST":
             body = self._read_json()
             res = schedule.install(app.root, body.get("time") or schedule.DEFAULT_TIME,
@@ -1058,7 +1115,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/run" and method == "POST":
             body = self._read_json()
             mode = body.get("mode") or "days_ago"
-            kw = {"lookback": body.get("lookback"), "lookahead": body.get("lookahead")}
+            # ⚠ `what` 认不出来要**在起进程之前**返回 400（`runner.start` 会抛 ValueError）。
+            #   不拦的话界面上会留一个半死的 job，一直显示"在跑"。
+            what = body.get("what") or run_daily.DEFAULT_WHAT
+            if what not in run_daily.BUTTON_STEPS:
+                return self._json(
+                    {"error": "不认识的 what：%s（认得的是 %s）"
+                              % (what, "、".join(sorted(run_daily.BUTTON_STEPS)))}, 400)
+            kw = {"what": what,
+                  "lookback": body.get("lookback"), "lookahead": body.get("lookahead")}
             if mode == "date":
                 kw.update(date=body.get("date"), days_ago=None)
             elif mode == "today":

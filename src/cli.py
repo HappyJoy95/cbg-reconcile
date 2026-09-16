@@ -46,17 +46,24 @@ def browser_profile(cfg: dict) -> Path:
 
 
 # --------------------------------------------------------------------- 配置
-def load_config(path: str | Path) -> dict:
+def load_config(path: str | Path, root=None) -> dict:
+    """读门店配置。
+
+    ⚠ `root` 给 Web 那边用：它手上是**安装目录**（`app.root`），
+    不一定等于 `cli.ROOT`（测试里就是临时目录）。
+    不传的话按 `ROOT` 解析 —— 跟以前一样。
+    """
+    base = ROOT if root is None else Path(root)
     p = Path(path)
     if not p.is_absolute():
-        p = ROOT / p
+        p = base / p
     if not p.exists():
         raise SystemExit(f"找不到配置文件 {p}\n"
                          f"（部署到门店电脑时，请改 config/store-*.yaml 里的三行再运行）")
     cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     cfg["_path"] = str(p)
 
-    stores_doc = yaml.safe_load((ROOT / "config" / "stores.yaml").read_text(encoding="utf-8"))
+    stores_doc = yaml.safe_load((base / "config" / "stores.yaml").read_text(encoding="utf-8"))
     stores = stores_doc.get("stores") or []
     cfg["_experience"] = {s["erp_name"] for s in stores if s.get("erp_name")}
     cfg["_experience_markers"] = {s["marker"] for s in stores if s.get("marker")}
@@ -900,6 +907,136 @@ def _harden_stdout() -> None:
 
 
 # --------------------------------------------------------------- POS 合规
+def report_bug(root, config_path, *, no_mail=False, no_push=False,
+               out_dir=None) -> dict:
+    r"""**一键上报 bug**：收集现场 → 打包 → 试着推出去。返回**结构化结果**。
+
+    ⚠ **顺序是死的：先落盘，再谈推送。**
+
+    上报通道不能只依赖出问题的那条通道 —— 最常见的 bug 恰恰是"推送失败"
+    （webhook key 过期、群机器人被删、SMTP 认证失败、门店网络不通）。
+    这时候用推送去上报推送的故障，**必然也失败**。
+    所以①打包落盘这一步**不碰网络**，一定能成；②③只是"顺手试着发"，
+    发不出去就把包的路径摆出来，让人工有退路。
+
+    ⚠ 包里**没有任何能拿去登录的凭据**（`.secrets` 整个不进包），
+    但有业务数据（门店名 / 串号 / 金额）—— 详见 `bugreport` 模块。
+
+    打印交给调用方：CLI 打给人看，Web 拿去渲染成 JSON。
+    """
+    from . import bugreport
+    root = Path(root)
+    cfg = load_config(config_path, root=root)
+    out = {"ok": True, "path": "", "size_kb": 0.0, "entries": [],
+           "mail": "", "wecom": "", "sent": [], "message": ""}
+
+    try:
+        path = bugreport.build_zip(root, config_path, out_dir=out_dir)
+    except ValueError as e:
+        # 反查拦下的 —— 这是**好事**，说明防线起作用了
+        return {"ok": False, "path": "", "size_kb": 0.0, "entries": [],
+                "mail": "", "wecom": "", "sent": [],
+                "message": "⛔ %s（什么都没发出去，请把这条报给开发者）" % e}
+    except OSError as e:
+        return {"ok": False, "path": "", "size_kb": 0.0, "entries": [],
+                "mail": "", "wecom": "", "sent": [],
+                "message": "打包失败：%s" % e}
+
+    out["path"] = str(path)
+    out["size_kb"] = round(path.stat().st_size / 1024.0, 1)
+    try:
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            out["entries"] = list(z.namelist())
+    except Exception:                                          # noqa: BLE001
+        pass
+
+    if no_push and no_mail:
+        out["mail"] = out["wecom"] = "已跳过"
+        out["message"] = "已打包（没开推送）：%s" % path
+        return out
+
+    # ② 邮件（附件）—— 和 ③ 各自独立，哪条通了算哪条
+    if no_mail:
+        out["mail"] = "已跳过"
+    else:
+        try:
+            mc = mailer.load_mail_config(cfg, root)
+            # ⚠ `has_diff=True` 是为了**绕过**「只有差异才发」——
+            #   上报 bug 跟有没有差异没关系
+            ok, why = mailer.should_send(mc, has_diff=True)
+            if not ok:
+                out["mail"] = "跳过（%s）" % why
+            else:
+                when = bugreport._now().strftime("%m-%d %H:%M")
+                subject = "[bug 上报] %s %s" % (cfg.get("erp_store_name") or "门店", when)
+                body = ("门店点了「上报 bug」，现场在附件里。\n\n"
+                        "包里没有凭据（.secrets 整个没进包），"
+                        "但有业务数据（串号 / 金额）。\n"
+                        "先看附件里的「执行日志.txt」。\n\n"
+                        "—— 由 cbg-reconcile 自动发送，%s\n"
+                        % bugreport._now().strftime("%Y-%m-%d %H:%M:%S"))
+                # ⚠ prefix="" ：主题自己带了 `[bug 上报]`，
+                #   再套一层 `[报量对账]` 会读成"对账邮件"
+                mailer.send(mc, subject, body, [path], prefix="")
+                out["mail"] = "✅ 已发到 %s" % "、".join(mc.recipients)
+                out["sent"].append("邮件")
+        except Exception as e:                                 # noqa: BLE001
+            out["mail"] = "❌ %s" % e
+
+    # ③ 企微（文件）
+    if no_push:
+        out["wecom"] = "已跳过"
+    else:
+        try:
+            wc = wecom.load_wecom_config(cfg, root)
+            ok, why = wecom.should_send(wc, has_diff=True, ignore_when=True)
+            if not ok:
+                out["wecom"] = "跳过（%s）" % why
+            else:
+                # 先发一条 text 说明这是什么 —— 群里突然冒出一个 zip 没人敢点
+                wecom.send_text(wc, "【bug 上报】%s：现场日志见下一条文件"
+                                    % (cfg.get("erp_store_name") or "门店"))
+                wecom.send_file(wc, path)
+                out["wecom"] = "✅ 已发出"
+                out["sent"].append("企微")
+        except Exception as e:                                 # noqa: BLE001
+            out["wecom"] = "❌ %s" % e
+
+    if out["sent"]:
+        out["message"] = "已通过 %s 发出；包也留在 %s" % ("、".join(out["sent"]), path)
+    else:
+        # ⚠ 推送全失败**不算失败** —— 包在本地，人工能发。
+        #   这里若判成失败，用户会以为"上报没成"，然后就不管了。
+        out["message"] = ("自动发送没成功（**这也可能正是你要报的那个 bug**）。"
+                          "包已经打好了，直接把这个文件发给开发者就行：%s" % path)
+    return out
+
+
+def cmd_report_bug(args) -> int:
+    """`report-bug` 子命令 —— 把 `report_bug()` 的结果打给人看。"""
+    print("=" * 64)
+    print("上报 bug：收集现场 → 打包 → 推送")
+    print("=" * 64)
+    res = report_bug(ROOT, args.config, no_mail=args.no_mail,
+                     no_push=args.no_push, out_dir=args.out_dir or None)
+    if not res["ok"]:
+        print("❌ %s" % res["message"], file=sys.stderr)
+        return EXIT_INTERNAL
+
+    print("\n① 现场已打包：%s（%.1f KB）" % (res["path"], res["size_kb"]))
+    print("   包里**没有**能拿去登录的凭据（.secrets 整个没进包），可以放心发。")
+    print("   ⚠ 但有业务数据（门店名 / 串号 / 金额）—— 发之前确认收件人是自己人。")
+    for n in res["entries"]:
+        print("     · %s" % n)
+    print("\n② 邮件：%s" % res["mail"])
+    print("③ 企微：%s" % res["wecom"])
+    print("\n" + "=" * 64)
+    print(res["message"])
+    print("=" * 64)
+    return EXIT_OK
+
+
 def cmd_daily(args) -> int:
     """日常流程 —— 一条定时任务跑完三步（编排在 `run_daily` 里）。
 
@@ -924,6 +1061,7 @@ def cmd_daily(args) -> int:
         # ⚠ 显式给了 --date 就别再给 --days-ago：两个都传的话谁赢不确定
         argv += ["--days-ago", str(args.days_ago)]
     for flag, on in (("--skip-dump", args.skip_dump),
+                     ("--skip-check", args.skip_check),
                      ("--skip-pos", args.skip_pos),
                      ("--no-mail", args.no_mail),
                      ("--no-push", args.no_push),
@@ -969,7 +1107,11 @@ def cmd_dump(args) -> int:
 
 
 def cmd_pos(args) -> int:
-    """算 POS 合规率 → 落 `out/pos-<年>.json`（**看板只读它，不现场算**）。"""
+    """算 POS 合规率 → 落 `out/pos-<年>.json`（**看板只读它，不现场算**）。
+
+    算完**单独推一条** POS 合规（和报量排查分开两条）——
+    见 `_maybe_pos_push`。用 `--no-push --no-mail` 可以只算不发。
+    """
     from . import pos_report
     db = Path(args.db) if args.db else _find_pos_db()
     if not db or not db.is_file():
@@ -1017,7 +1159,76 @@ def cmd_pos(args) -> int:
         print("  %s%s  按标签 %s%%（申诉后 %s%%）  分母 %s"
               % (row["month"], "（暂定）" if row["provisional"] else "        ",
                  f(la["rate"]), f(la["ap_rate"]), format(la["den"], ",.2f")))
+    _maybe_pos_push(getattr(args, "config", None), args, rows)
     return EXIT_OK
+
+
+def _pos_ctx(cfg: dict) -> dict:
+    """POS 推送的上下文 —— 字段名跟报量排查那边一致（`门店`/`生成时间`…），
+    这样 `wecom`/`mailer` 两套组装不用为"POS 版"再分一次支。
+    """
+    return {
+        "门店": cfg.get("erp_store_name") or cfg.get("store_code") or "?",
+        "华为门店编码": cfg.get("store_code") or "",
+        "串号标识": cfg.get("marker") or "",
+        "生成时间": datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+        "配置文件": cfg.get("_path") or "",
+    }
+
+
+def _maybe_pos_push(config_path, args, rows) -> None:
+    """POS 合规的**第二条推送** —— 和报量排查分开发（用户 2026-09-16 定的）。
+
+    ⚠ 这里**刻意不复用** `_maybe_mail` / `_maybe_wecom`：
+    那两条是围着 `ReconcileResult` 长的（missing / unshipped / xlsx 附件），
+    硬塞进 POS 只会长出一堆 `if`。共用的是**格式化**（`pos_report.notify_lines`）
+    和**发送**（`wecom.push_pos` / `mailer.build_pos_mail`）。
+
+    ⚠ 推送失败**不影响退出码** —— 分数是主产物，推送只是投递方式。
+    这条跟报量排查那边一个道理（那边也是这么写的）。
+    """
+    if not config_path:
+        return
+    from . import pos_report          # 延迟 import：跟 `cmd_pos` 保持一致
+    if getattr(args, "no_push", False) and getattr(args, "no_mail", False):
+        print("\n[推送] POS：已用 --no-push --no-mail 跳过")
+        return
+    try:
+        cfg = load_config(config_path)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"\n[推送] POS：⚠️ 配置读不出来（{e}），跳过")
+        return
+    ctx = _pos_ctx(cfg)
+    lines = pos_report.notify_lines(rows)
+    head = pos_report.headline(rows)
+
+    if not getattr(args, "no_push", False):
+        try:
+            wc = wecom.load_wecom_config(cfg, ROOT)
+            # ⚠ `ignore_when=True`：POS 没有"差异"概念，
+            #   「只有差异才推」那个开关是给报量排查的
+            ok, why = wecom.should_send(wc, has_diff=False, ignore_when=True)
+            if not ok:
+                print(f"\n[推送] POS 企微：跳过（{why}）")
+            else:
+                print(f"\n[推送] POS 企微：✅ {wecom.push_pos(wc, ctx, lines, head)}")
+        except Exception as e:                                # noqa: BLE001
+            print(f"\n[推送] POS 企微：❌ {e}", file=sys.stderr)
+            print("      （分数已经算好了，退出码不受影响）", file=sys.stderr)
+
+    if not getattr(args, "no_mail", False):
+        try:
+            mc = mailer.load_mail_config(cfg, ROOT)
+            ok, why = mailer.should_send(mc, has_diff=False)
+            if not ok:
+                print(f"[推送] POS 邮件：跳过（{why}）")
+            else:
+                subject, body = mailer.build_pos_mail(ctx, lines, head)
+                mailer.send(mc, subject, body, prefix=mailer.POS_SUBJECT_PREFIX)
+                print(f"[推送] POS 邮件：✅ 已发送到 {'、'.join(mc.recipients)}")
+        except Exception as e:                                # noqa: BLE001
+            print(f"[推送] POS 邮件：❌ {e}", file=sys.stderr)
+            print("      （分数已经算好了，退出码不受影响）", file=sys.stderr)
 
 
 def cmd_pos_export(args) -> int:
@@ -1119,6 +1330,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--off", action="store_true", help="取消开机自启")
     p.set_defaults(func=cmd_autostart)
 
+    p = sub.add_parser("report-bug",
+                       help="一键上报 bug：打包现场日志 → 邮件 / 企微推送")
+    p.add_argument("--no-mail", action="store_true", help="别发邮件")
+    p.add_argument("--no-push", action="store_true", help="别推企业微信")
+    p.add_argument("--out-dir", default="", help="包放哪（默认 out/）")
+    p.set_defaults(func=cmd_report_bug)
+
     p = sub.add_parser("daily", help="日常流程：抓华为当月 → 报量对账 → 算 POS"
                                      "（**定时任务跑这个**）")
     # ⚠ 这里的参数是 `check` 的**超集**，不是"够用就行"。
@@ -1135,8 +1353,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-refresh", action="store_true",
                    help="会话失效时别开浏览器静默续期（第 1 步就会直接失败）")
     p.add_argument("--out-dir", default="", help="报告输出目录")
-    p.add_argument("--skip-dump", action="store_true", help="别抓华为（调试用）")
-    p.add_argument("--skip-pos", action="store_true", help="别算 POS（调试用）")
+    p.add_argument("--skip-dump", action="store_true", help="跳过第 1 步：不抓华为数据")
+    p.add_argument("--skip-check", action="store_true", help="跳过第 2 步：不做报量排查")
+    p.add_argument("--skip-pos", action="store_true", help="跳过第 3 步：不算 POS 合规")
     p.add_argument("--log-file", default="", help="把对账那段同时写一份到文件")
     p.set_defaults(func=cmd_daily)
 
@@ -1147,8 +1366,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="会话失效时别开浏览器静默续期")
     p.set_defaults(func=cmd_dump)
 
-    p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json")
+    p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json（并单独推一条）")
     p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
     p.set_defaults(func=cmd_pos)
 
     p = sub.add_parser("pos-export", help="出 POS 明细 Excel")

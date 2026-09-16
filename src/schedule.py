@@ -21,7 +21,20 @@ from .autostart import AUTOSTART_TASK
 from . import runtime
 from .winutil import decode as _decode, parse_xml, schtasks as _schtasks, xml_text
 
-TASK_NAME = "CBG报量对账"
+#: 定时任务的默认名字。带执行时间后缀，比如 `门店数据拉取与计算-21点00`。
+#:
+#: ⚠ **改过名**（2026-09-16）：以前叫 `CBG报量对账`。那时候它确实只做对账，
+#: 现在它每天干三件事（抓数据 → 报量排查 → POS 合规），
+#: 名字还叫"报量对账"就名不副实了 —— 门店在 Windows 任务计划程序里看到
+#: 一个叫"报量对账"的任务，不会想到它还管 POS。
+#:
+#: ⚠ 改名意味着**老门店那条任务还在**（同名才是覆盖，不同名就并存）——
+#: 于是会一天跑两遍。`LEGACY_TASK_NAMES` 就是用来认出它们、在界面上提醒删掉的。
+TASK_NAME = "门店数据拉取与计算"
+
+#: 历史上用过的名字。**只增不减** —— 认不出来就等于"这不是我们建的任务"，
+#: 界面上既不会提示、也删不掉（`_is_ours` 拿它做判断）。
+LEGACY_TASK_NAMES = ("CBG报量对账",)
 LOG_NAME = "run.log"          # 计划任务跑完留下的日志（out\ 下）
 # ⚠ 生成的脚本要能被**认出来是哪一版**。
 #   run.bat 是**注册任务时**生成的，升级代码**不会**动它 ——
@@ -81,7 +94,109 @@ def _pythonw() -> str:
     return _python()
 
 
-def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AGO) -> Path:
+#: 自动化勾选 → 步骤。**和界面上的复选框一一对应**（界面给三项，`dump` 默认勾上）。
+#: ⚠ 真值在 `run_daily` —— 这里只是给不 import run_daily 的调用方一个方便入口，
+#: 有测试盯着两边一致。
+AUTOMATION_CHOICES = ("dump", "reconcile", "pos")
+
+
+def steps_from_choices(picked):
+    """勾了哪几项 → 步骤元组。校验交给 `run_daily._check_steps`，只此一处。
+
+    ⚠ **一件都没勾是错的**，抛 `ValueError`。静默当成"都跑"的话，
+    用户在界面上取消勾选、结果每天照样推送，而日志里一个字都不会说。
+    """
+    from . import run_daily
+    return run_daily._check_steps(picked)
+
+
+def choices_from_steps(steps) -> list:
+    """步骤 → 勾选框该点亮哪几个。"""
+    from . import run_daily
+    try:
+        return list(run_daily._check_steps(steps))
+    except ValueError:
+        return list(AUTOMATION_CHOICES)
+
+
+def existing_steps(root) -> tuple:
+    """从现有的 run 脚本里**反推**它跑哪几件事。
+
+    重建时保住用户的勾选，跟 `existing_days_ago` 一个道理。
+    读不出来就当默认（三件都做）—— 老脚本没有跳过开关，确实是这样。
+    """
+    from . import run_daily
+    for p in (script_path(root), manual_script_path(root)):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if " daily" not in text:
+            continue
+        skipped = {s for s, flag in run_daily.STEP_FLAGS.items() if flag in text}
+        kept = tuple(s for s in run_daily.STEPS if s not in skipped)
+        if kept:
+            return kept
+    return tuple(run_daily.AUTOMATION_DEFAULT_STEPS)
+
+
+def automation_steps(root) -> tuple:
+    """定时任务当前跑哪几件事。**注册记录优先**，没有就从脚本反推。
+
+    记录优先的原因和任务详情一样：提权注册的任务普通权限读不到，
+    但我们自己记了一份（`.secrets/schedule.json`）。
+    """
+    from . import run_daily
+    for rec in (_recall(root) or {}).values():
+        if not isinstance(rec, dict):
+            continue
+        steps = rec.get("steps")
+        if steps:
+            try:
+                return run_daily._check_steps(steps)
+            except ValueError:
+                pass
+        what = rec.get("what")            # 老格式：单个字符串
+        if what:
+            try:
+                return tuple(run_daily.BUTTON_STEPS[what])
+            except KeyError:
+                pass
+    return existing_steps(root)
+
+
+def set_automation_steps(root, config: str, picked, run_daily_fn=None) -> dict:
+    """改「自动化跑什么」：写记录 + 重写 run 脚本。**不碰 Windows 任务。**
+
+    ⚠ 为什么不用重新注册任务：计划任务跑的是 `run.bat`，改的是 run.bat 的
+    内容 —— 任务本身一个字都没变。重新注册有可能弹 UAC（旧任务覆盖不了 /
+    账户被 UAC 过滤），为了改个勾选弹框不值得，而且弹了还未必成。
+    """
+    from . import run_daily                        # 延迟 import：避免和 cli 绕圈
+    steps = run_daily._check_steps(picked)
+    root = Path(root)
+    days = existing_days_ago(root)
+    if days is None:
+        days = DEFAULT_DAYS_AGO
+    write_runner_script(root, config, days, steps=steps)
+    # 记录：把每个已注册任务都更新一遍（任务名是按时间起的，可能不止一个）
+    rec = _recall(root)
+    if rec:
+        for task in list(rec):
+            if isinstance(rec.get(task), dict):
+                _remember(root, task, time_str=rec[task].get("time", ""),
+                          days_ago=rec[task].get("days_ago"), config=config,
+                          steps=steps)
+    else:
+        # 还没注册过任务（或者记录丢了）：也记一条，界面至少能显示勾选
+        _remember(root, TASK_NAME, config=config, steps=steps)
+    label = run_daily.steps_label(steps)
+    return {"ok": True, "steps": list(steps), "label": label,
+            "message": "已改成「%s」，下次定时执行生效（不用重新注册任务）" % label}
+
+
+def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AGO,
+                        steps=None) -> Path:
     root = Path(root)
     path = script_path(root)
     # ⚠ 解释器和脚本路径**都要加引号** —— Windows 上 Python 常装在
@@ -90,7 +205,19 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     # ⚠ **不要在 bat 里写 `>> out\run.log`**：那样屏幕上什么都没有，
     #   双击的人看到的是黑窗口 + 一分多钟 + 自己关掉，完全判断不了跑没跑。
     #   日志交给 Python 分流（--log-file），屏幕和文件两边都有。
-    base = f'"{_pythonw()}" -m src.cli -c "{config}" daily --days-ago {int(days_ago)}'
+    # 勾了「只报量排查 / 只算 POS」就带上对应的跳过开关 —— 映射表在 run_daily，
+    # **这里不另写一份**（各写一份必然有一天对不上）。
+    #
+    # ⚠ 用的是 `automation_flags_for`，**不是界面按钮那张 `flags_for`**：
+    #   定时任务没人盯着，抓数据必须留着 —— 用按钮那张的话，
+    #   勾"只报量排查"会生成 `--skip-dump`，库再也不更新，
+    #   然后报量排查每天以「库不新鲜」失败，而日志只会说失败。
+    from . import run_daily
+    if steps is None:
+        steps = run_daily.AUTOMATION_DEFAULT_STEPS
+    extra = "".join(" " + f for f in run_daily.flags_for_steps(steps))
+    base = (f'"{_pythonw()}" -m src.cli -c "{config}" daily{extra}'
+            f' --days-ago {int(days_ago)}')
     # ⚠ 路径要写全：只给 "run.log" 的话，工作目录是项目根 → 写到根目录去了，
     #   而下面 bat 追加退出码用的又是 out\run.log —— 两处对不上，排查时会被坑。
     log = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
@@ -112,7 +239,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
             f'echo [%DATE% %TIME%] run.bat launching>> "{logfile}"\r\n'
             "rem start = cmd exits at once, so this console closes in a blink instead of\r\n"
             "rem hanging around for the whole run. pythonw.exe has no console of its own.\r\n"
-            f'start "" "{pyw}" "run_check.py" -c "{config}" daily --days-ago {int(days_ago)}\r\n'
+            f'start "" "{pyw}" "run_check.py" -c "{config}" daily{extra} --days-ago {int(days_ago)}\r\n'
             "if errorlevel 1 (\r\n"
             "  rem 'start' itself failed -- pythonw.exe missing or path wrong\r\n"
             f'  echo [%DATE% %TIME%] FAILED to start pythonw: "{pyw}">> "{logfile}"\r\n'
@@ -142,7 +269,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     #   手动跑就该**同步**跑：屏幕上能看到全过程，跑完停住看结果。
     try:
         mpath = manual_script_path(root)
-        mbase = f'"{_python()}" -m src.cli -c "{config}" daily --days-ago {int(days_ago)}'
+        mbase = f'"{_python()}" -m src.cli -c "{config}" daily{extra} --days-ago {int(days_ago)}'
         mlog = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
             else ('--log-file "out/%s"' % LOG_NAME)
         if kind() == "windows":
@@ -154,7 +281,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
                 "rem Manual run: synchronous, so you can watch it and read the result.\r\n"
                 'cd /d "%~dp0"\r\n'
                 "if not exist out mkdir out\r\n"
-                f'"{_python()}" "run_check.py" -c "{config}" daily --days-ago {int(days_ago)}\r\n'
+                f'"{_python()}" "run_check.py" -c "{config}" daily{extra} --days-ago {int(days_ago)}\r\n'
                 "echo.\r\n"
                 "echo   Press any key to close this window\r\n"
                 "pause >nul\r\n"
@@ -221,14 +348,33 @@ def refresh_runner_scripts(root, config: str) -> bool:
     if days is None:
         days = DEFAULT_DAYS_AGO
     try:
-        write_runner_script(root, config, days)
+        # ⚠ 勾选也要保住 —— 否则一次界面自愈就把"只算 POS"悄悄改回"整个项目"
+        write_runner_script(root, config, days, steps=existing_steps(root))
     except OSError:
         return False
     return True
 
 
+def _same_task(recorded: str, task: str) -> bool:
+    """cron 行里记的任务名，跟这次要装的是不是**同一条**。
+
+    ⚠ 不能直接比字符串 —— 任务名 2026-09-16 从 `CBG报量对账` 改成了
+    `门店数据拉取与计算`。老名字的 cron 行比不相等 ⇒ **不会被替换、也不会被删**，
+    结果是同一件事在 crontab 里躺两份（跟 Windows 那边"不同名就并存"一个道理）。
+
+    判据：把老前缀换成新前缀之后相等就算同一条。
+    """
+    if recorded == task:
+        return True
+    for legacy in LEGACY_TASK_NAMES:
+        if recorded.startswith(legacy):
+            if recorded.replace(legacy, TASK_NAME, 1) == task:
+                return True
+    return False
+
+
 def default_task_name(time_str: str) -> str:
-    r"""默认任务名**带上执行时间**，比如 21:00 → `CBG报量对账-21点00`。
+    r"""默认任务名**带上执行时间**，比如 21:00 → `门店数据拉取与计算-21点00`。
 
     ⚠ 为什么必须带时间：用户想一天跑两次（中午一次、打烊一次），如果两次都留空名字，
     名字就是同一个，第二次的 `/f` 会把第一次**直接覆盖掉** ——
@@ -260,7 +406,9 @@ def _is_ours(name: str) -> bool:
     leaf = _leaf(name)
     if leaf == AUTOSTART_TASK:
         return False
-    return TASK_NAME in leaf
+    # ⚠ 老名字也要认 —— 不认的话那条旧任务在界面上是个"外人"：
+    #   删不掉、也拿不到"你还有一条旧任务在跑"的提醒，于是一天跑两遍。
+    return any(n in leaf for n in (TASK_NAME,) + LEGACY_TASK_NAMES)
 
 
 def _win_list_names() -> list[str]:
@@ -380,12 +528,23 @@ def _recall(root) -> dict:
 
 
 def _remember(root, task: str, *, time_str: str = "", days_ago=None,
-              config: str = "") -> None:
+              config: str = "", steps=None, what: str = "") -> None:
     """记下"这个任务是我们用这些参数注册的"。**写不成不影响注册本身。**"""
     try:
         d = _recall(root)
-        d[task] = {"time": time_str, "days_ago": days_ago, "config": config,
-                   "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        old = d.get(task) if isinstance(d.get(task), dict) else {}
+        entry = {"time": time_str, "days_ago": days_ago, "config": config,
+                 "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        # ⚠ steps 没给就**保留上一次的** —— 改时间/目标日时别把勾选弄丢。
+        #   （老记录里可能是 `what: "all"` 这种单值格式，原样留着，
+        #    读的时候 `automation_steps` 会换算。）
+        if steps:
+            entry["steps"] = list(steps)
+        elif old.get("steps"):
+            entry["steps"] = list(old["steps"])
+        elif old.get("what"):
+            entry["what"] = old["what"]
+        d[task] = entry
         p = record_path(root)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -560,7 +719,9 @@ def _unix_install(root: Path, time_str: str, days_ago: int, config: str,
     line = f'{int(mm)} {int(hh)} * * * "{sh}" {CRON_MARK} {task}'
     # 只替换同名的那条，别的任务留着
     kept = [x for x in _cron_lines()
-            if x.strip() and not (CRON_MARK in x and (x.partition(CRON_MARK)[2].strip() or TASK_NAME) == task)]
+            if x.strip() and not (CRON_MARK in x
+                                   and _same_task(x.partition(CRON_MARK)[2].strip()
+                                                  or TASK_NAME, task))]
     ok, msg = _cron_write(kept + [line])
     return {
         "ok": ok, "task": task, "message": msg, "script": str(sh),
@@ -571,7 +732,8 @@ def _unix_install(root: Path, time_str: str, days_ago: int, config: str,
 def _unix_remove(name: str | None = None) -> dict:
     task = name or TASK_NAME
     kept = [x for x in _cron_lines()
-            if not (CRON_MARK in x and (x.partition(CRON_MARK)[2].strip() or TASK_NAME) == task)]
+            if not (CRON_MARK in x
+                    and _same_task(x.partition(CRON_MARK)[2].strip() or TASK_NAME, task))]
     ok, msg = _cron_write(kept)
     return {"ok": ok, "task": task, "message": msg}
 
@@ -587,12 +749,31 @@ def status(root: Path) -> dict:
         "platform": platform.system(),
         "kind": kind(),
         "task_name": TASK_NAME,
+        # 老名字清单 —— 界面靠它认出"改名之前注册的那条任务"。
+        # ⚠ 不同名就是**并存**，不是覆盖：老门店升级后会**一天跑两遍**
+        #   （两条任务各自到点跑一次 run.bat）。必须提示，不能装作没看见。
+        "legacy_names": list(LEGACY_TASK_NAMES),
         "script": str(script_path(Path(root))),
         "script_exists": script_path(Path(root)).exists(),
         "default_time": DEFAULT_TIME,
     })
     if tasks and not info.get("time"):
         info["time"] = tasks[0].get("time", "")
+    # 每条任务「跑什么」—— 界面上单独一列。
+    #
+    # ⚠ 所有任务共用同一个 `run.bat`，所以它们的"跑什么"是**同一个值**
+    #   （`.secrets/schedule.json` 里那份记录，或从脚本反推）。
+    #   一天跑两次、一次只排查一次只 POS 是**做不到**的 —— 那不是这里漏了，
+    #   是设计如此：任务只是"到点执行 run.bat"，跑什么由脚本决定。
+    #   想要不同时间跑不同东西，得改 run.bat，现在没这个入口。
+    #   （先如实写出来，别让界面显得它能做到。）
+    from . import run_daily                     # 延迟 import：避免和 cli 绕圈
+    auto = automation_steps(root)
+    label = run_daily.steps_label(auto)
+    for t in tasks:
+        t.setdefault("steps", list(auto))
+        t.setdefault("what_label", label)
+    info["automation_steps"] = list(auto)
     return info
 
 

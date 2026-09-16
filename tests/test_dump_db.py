@@ -13,6 +13,7 @@
 """
 
 import datetime
+import sqlite3
 import unittest
 
 from src import dump
@@ -34,7 +35,10 @@ def mkdb(service_goods=True):
     不能手写 `ALTER TABLE`（手写的话测的就不是线上那条路了）。
     `service_goods=False` = 门店那份 2026-09-16 之前 dump 出来的老库。
     """
-    conn = dump.connect(":memory:")
+    # ⚠ 走 `open_db()`（命名行）而不是 `connect()`（元组）—— 这组测试测的是
+    #   "读"那条路（`r["sn"]`）。`connect()` 的默认值是给 `dump.main` 的
+    #   汇总打印用的，两种用法故意分开，见 `dump.connect` 的说明。
+    conn = dump.open_db(":memory:")
     conn.executescript(dump.SCHEMA)
     if service_goods:
         dump.ensure_columns(conn, "order_lines", {"service_goods": 0})
@@ -388,3 +392,99 @@ class TestMainReturnsCodeNotSystemExit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRowFactoryTrap(unittest.TestCase):
+    """⚠⚠ **门店实测炸过一次**，这组测试就是那次事故的回归测试。
+
+    `dump.main` 末尾那段汇总打印（按 POS/设备、按支付方式…）写的是
+    `"%-9s %4d" % row` 这种按位置展开的写法。而 Python 的 `%`
+    **只对元组展开** —— 换成 `sqlite3.Row` 之后只允许**一个**占位符，
+    多一个就 `TypeError: not enough arguments for format string`。
+
+    最坏的地方在于**数据其实已经写进库了**，崩的只是最后的打印：
+    退出码 9 ⇒ 整条日常流程中止 ⇒ 报量排查和 POS 一个都没跑。
+    **活儿干完了，工具却说自己失败了。**
+
+    根因是给主连接顺手设了 `row_factory`（那是给"读"的人用的）。
+    所以现在两条路分开：`connect()` 默认元组、`open_db()` 才是命名行。
+    """
+
+    def _db(self):
+        """一个五脏俱全的小库 —— 汇总那段要查 4 个视图，缺一个就白测。"""
+        conn = dump.connect(":memory:")
+        conn.executescript(dump.SCHEMA)
+        add_order(conn, "D1", "O1", "2026-09-16 10:00:00", 6999.0, "李四")
+        add_line(conn, "D1", 1, "SN1", "HUAWEI Mate 80")
+        conn.execute("INSERT INTO payments (document_no, payment_no, media_name,"
+                     " media_no, media_member_no, payment_amount)"
+                     " VALUES ('D1','P1','现金',1,'',6999.0)")
+        conn.execute("INSERT INTO order_labels (document_no, source, label)"
+                     " VALUES ('D1','remark','国补')")
+        conn.commit()
+        return conn
+
+    def test_connect_默认给元组(self):
+        """⚠ 默认值**必须**是元组 —— 上面那段事故就是它被改成 Row 引起的。"""
+        conn = dump.connect(":memory:")
+        self.assertIs(type(conn.execute("SELECT 1").fetchone()), tuple)
+
+    def test_open_db_给命名行(self):
+        """读的人要 `r["sn"]`，所以这条路必须是 Row。"""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.db"
+            c = dump.connect(p)
+            c.executescript(dump.SCHEMA)
+            c.commit()
+            c.close()
+            conn = dump.open_db(p)
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"], 0)
+            finally:
+                conn.close()
+
+    def test_汇总打印在元组连接上跑得通(self):
+        """`dump.main` 走的就是这条（`connect()` 默认）。"""
+        import contextlib
+        import io
+        conn = self._db()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dump.print_summary(conn)          # ← 修好之前这里必炸
+        out = buf.getvalue()
+        self.assertIn("按 POS/设备", out)
+        self.assertIn("按支付方式", out)
+        self.assertIn("退货单 + 退的 SN", out)
+        self.assertIn("src=", out)          # 那行真的打印出来了
+        self.assertIn("现金", out)          # 支付方式那张也有
+
+    def test_汇总打印在命名行连接上也跑得通(self):
+        """⚠ 反过来也要钉住 —— 万一哪天有人给主连接换了 `row_factory`。
+
+        每处都写了 `tuple(row)`，所以**行类型不该影响它**。
+        """
+        import contextlib
+        import io
+        conn = self._db()
+        conn.row_factory = sqlite3.Row          # 故意换成 Row
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dump.print_summary(conn)          # 不许炸
+        self.assertIn("按 POS/设备", buf.getvalue())
+
+    def test_非元组不能直接百分号展开(self):
+        """把这条**语言规则**本身钉下来，免得以后有人又踩。
+
+        （不是说它"不该这样"，是记一笔：`%` 和 `Row` 天生不搭。）
+        """
+        conn = self._db()
+        conn.row_factory = sqlite3.Row
+        conn.execute("UPDATE orders SET pos_id='web-pos', device_no='PC-POS'")
+        row = conn.execute("SELECT pos_id, device_no, orders FROM v_pos_usage").fetchone()
+        self.assertEqual(len(row), 3)                 # 列数是够的
+        with self.assertRaises(TypeError):
+            "%-9s %-9s %4d" % row                     # 但非元组只允许一个占位符
+        self.assertIn("web-pos", "%-9s %-9s %4d" % tuple(row))   # tuple() 就好了

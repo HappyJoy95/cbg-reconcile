@@ -47,7 +47,10 @@ def build_sheets(res: ReconcileResult, ctx: dict) -> dict:
     info_rows = [[k, v] for k, v in ctx.items()]
 
     return {
-        "未报量": (MISSING_HEADER, missing_rows),
+        # ⚠ 口径名用门店自己的话：「玲珑」= 华为那个销售系统的代号。
+        #   改名前叫「未报量」，但那个词容易被读成"该报没报"（带责备意味），
+        #   而实际含义只是"两边记录对不上" —— 所以两个方向改成对称的说法。
+        "玲珑无但云商有": (MISSING_HEADER, missing_rows),
         "反向差异": (REVERSE_HEADER, reverse_rows),
         "已报量": (MATCHED_HEADER, matched_rows),
         "过滤统计": (["跳过原因", "条数"], skipped_rows),
@@ -177,7 +180,7 @@ def load_report(path) -> dict:
         summary = json.loads(side.read_text(encoding="utf-8"))
     else:
         summary = {"store": "", "date": "", "generated_at": "",
-                   "missing": max(len(sheets.get("未报量", [])) - 1, 0),
+                   "missing": max(len(sheets.get("玲珑无但云商有", [])) - 1, 0),
                    "matched": max(len(sheets.get("已报量", [])) - 1, 0),
                    "reverse": max(len(sheets.get("反向差异", [])) - 1, 0),
                    "reverse_transfer": None, "reverse_unknown": None,
@@ -192,7 +195,7 @@ def summary_lines(res: ReconcileResult, ctx: dict) -> list[str]:
         f"核对区间 {ctx.get('销售区间', '?')}   华为区间 {ctx.get('华为区间', '?')}",
         f"云商原始 {res.total_rows} 行 → 该本店报量 {len(res.matched) + len(res.missing)} 台",
         f"  ✅ 已报量 {len(res.matched)} 台",
-        f"  ❌ 未报量 {len(res.missing)} 台",
+        f"  ❌ 玲珑无但云商有 {len(res.missing)} 台",
         f"  🔁 反向差异 {len(res.reverse)} 台（华为已报量、但不是本店标识的货）",
     ]
     if res.reverse:
@@ -200,7 +203,7 @@ def summary_lines(res: ReconcileResult, ctx: dict) -> list[str]:
                      f" · 其中 {len(res.reverse_unshipped)} 台云商查不到出库")
     if res.missing:
         lines.append("")
-        lines.append("未报量清单：")
+        lines.append("玲珑无但云商有清单：")
         for s in res.missing:
             lines.append(f"  {s.sn:<18} {s.item[:30]:<32} {s.seller} {s.pay_time} ¥{s.amount} ({s.doc_no})")
     else:
@@ -208,7 +211,7 @@ def summary_lines(res: ReconcileResult, ctx: dict) -> list[str]:
         lines.append("✅ 全部已报量，没有差异。")
     if res.reverse_unshipped:
         lines.append("")
-        lines.append("⚠️ 调拨货里云商查不到出库的（要问一句：货呢？）：")
+        lines.append("⚠️ 玲珑有但云商无（云商查不到出库，要问一句：货呢？）：")
         for it in res.reverse_unshipped:
             lines.append(f"  {it.sn:<18} {str(it.info.get('item', ''))[:30]:<32} "
                          f"华为单 {it.info.get('documentNo', '')}")

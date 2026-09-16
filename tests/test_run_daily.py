@@ -120,7 +120,7 @@ class TestStep1FailureAbortsEverything(unittest.TestCase):
             run(dump_rc=1)
         msg = err.getvalue()
         self.assertIn("跳过第 2、3 步", msg)
-        self.assertIn("未报量", msg)          # 说清**为什么**不能接着跑
+        self.assertIn("玲珑无但云商有", msg)   # 说清**为什么**不能接着跑（口径名同报表）
         self.assertIn("先解决第 1 步", msg)    # 以及下一步怎么办
 
     def test_失败时不发邮件不发推送(self):
@@ -157,7 +157,7 @@ class TestStep2FailureStillRunsPos(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             run(check_rc=cli.EXIT_FETCH)
         msg = err.getvalue()
-        self.assertIn("第 2 步（报量对账）没跑通", msg)
+        self.assertIn("第 2 步（报量排查）没跑通", msg)
         self.assertIn("但第 3 步照跑", msg)
 
 

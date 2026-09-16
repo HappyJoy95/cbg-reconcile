@@ -179,17 +179,17 @@ async function loadOverview() {
 function renderReports(list) {
   const latest = list[0];
   $('#report-cards').innerHTML = latest ? `
-    <div class="kpi bad"><div class="k">最新报告 · 未报量</div><div class="v">${latest.missing ?? '—'}</div></div>
+    <div class="kpi bad"><div class="k">最新报量排查 · 玲珑无但云商有</div><div class="v">${latest.missing ?? '—'}</div></div>
     <div class="kpi ok"><div class="k">已报量</div><div class="v">${latest.matched ?? '—'}</div></div>
     <div class="kpi ${latest.reverse ? 'warn' : ''}"><div class="k">反向差异</div><div class="v">${latest.reverse ?? '—'}</div></div>
     <div class="kpi ${latest.reverse_unshipped ? 'bad' : ''}">
-      <div class="k">调拨货查无出库</div><div class="v">${latest.reverse_unshipped ?? '—'}</div></div>
+      <div class="k">玲珑有但云商无</div><div class="v">${latest.reverse_unshipped ?? '—'}</div></div>
     <div class="kpi"><div class="k">报告日期</div><div class="v" style="font-size:17px">${esc(latest.date || latest.name.replace(/\D+/g, '').slice(0, 8) || '—')}</div></div>
-  ` : '<div class="kpi"><div class="k">还没有报告</div><div class="v" style="font-size:15px">去「运行」页跑一次</div></div>';
+  ` : '<div class="kpi"><div class="k">还没有排查报告</div><div class="v" style="font-size:15px">去「运行」页跑一次</div></div>';
 
   $('#report-count').textContent = list.length ? `共 ${list.length} 份（每次跑都存一份，不覆盖）` : '';
   if (!list.length) {
-    $('#report-list').innerHTML = '<div class="empty">out/ 目录下还没有差异报告</div>';
+    $('#report-list').innerHTML = '<div class="empty">out/ 目录下还没有排查报告</div>';
     return;
   }
   const rows = list.map((r) => [
@@ -200,7 +200,7 @@ function renderReports(list) {
              <button class="btn small ghost" data-del="${esc(r.name)}">删除</button>` },
   ]);
   $('#report-list').innerHTML = table(
-    ['目标日', '未报量', '已报量', '反向差异', '↳调拨货', '↳查无出库', '生成时间', ''],
+    ['目标日', '玲珑无但云商有', '已报量', '反向差异', '↳调拨进来', '↳玲珑有但云商无', '生成时间', ''],
     rows, ['mono', 'num', 'num', 'num', 'num', 'num', 'mono', '']);
   $$('#report-list [data-open]').forEach((b) =>
     b.addEventListener('click', () => openReport(b.dataset.open)));
@@ -257,18 +257,39 @@ $('#btn-refresh-reports').addEventListener('click', loadOverview);
 
 /* ───────────────────────────── 运行 ───────────────────────────── */
 
+function setRunButtons(running) {
+  $$('#panel-run [data-what]').forEach((b) => { b.disabled = running; });
+}
+
 $('#run-mode').addEventListener('change', (e) => {
   $('#run-date').hidden = e.target.value !== 'date';
 });
 $('#btn-quick-run').addEventListener('click', () => {
   $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === 'run'));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-run'));
-  startRun();
+  startRun('all');
 });
 
-async function startRun() {
+// 「运行」页四个按钮 —— 跑哪几件事由 data-what 决定，映射表在后端
+// （src/run_daily.py 的 WHAT_FLAGS），前端**不重复一份**。
+$$('#panel-run [data-what]').forEach((b) =>
+  b.addEventListener('click', () => startRun(b.dataset.what)));
+
+// 退出码的含义**按跑的东西不同**：只有报量排查才有"有差异"(3) 这一说，
+// POS 那边 2 是"没找到订单库"。混着说会让人以为 POS 也"有差异"。
+const EXIT_LABELS = {
+  all: { 0: '完成 ✅', 1: '华为会话已过期 ❌', 2: '取数失败 ❌',
+         3: '完成，报量有差异 ⚠️', 9: '程序出错（不是会话问题）❌' },
+  dump: { 0: '抓完了 ✅', 1: '华为会话已过期 ❌', 2: '取数失败 ❌',
+          9: '程序出错 ❌' },
+  reconcile: { 0: '完成，无差异 ✅', 1: '会话已过期 ❌', 2: '取数失败/库不新鲜 ❌',
+               3: '完成，有差异 ⚠️', 9: '程序出错 ❌' },
+  pos: { 0: '算完了 ✅', 2: '没找到订单库（先抓数据）❌', 9: '程序出错 ❌' },
+};
+
+async function startRun(what = 'all') {
   const mode = $('#run-mode').value;
-  const body = { mode };
+  const body = { mode, what };
   if (mode === 'date') {
     if (!$('#run-date').value) return toast('先选个日期', 'bad');
     body.date = $('#run-date').value;
@@ -282,9 +303,11 @@ async function startRun() {
   try {
     const job = await api('/api/run', { method: 'POST', body });
     state.jobId = job.id;
+    state.runWhat = what;
     appendLog(job);
-    $('#btn-run').disabled = true; $('#btn-stop').disabled = false;
-    $('#run-status').textContent = '运行中…';
+    setRunButtons(true);
+    $('#btn-stop').disabled = false;
+    $('#run-status').textContent = `运行中…（${job.what_label || what}）`;
     pollRun();
   } catch (e) {
     toast('启动失败：' + e.message, 'bad');
@@ -310,17 +333,20 @@ function pollRun() {
     appendLog(job);
     if (job.running) return pollRun();
 
-    $('#btn-run').disabled = false; $('#btn-stop').disabled = true;
+    setRunButtons(false);
+    $('#btn-stop').disabled = true;
     const code = job.exit_code;
-    const label = { 0: '完成，无差异 ✅', 1: '会话已过期 ❌', 2: '取数失败 ❌',
-                    3: '完成，有差异 ⚠️', 9: '程序出错（不是会话问题）❌' }[code] || `退出码 ${code}`;
+    const what = job.what || state.runWhat || 'all';
+    const label = (EXIT_LABELS[what] || EXIT_LABELS.all)[code] || `退出码 ${code}`;
     $('#run-status').textContent = `${label}（${job.elapsed}s）`;
-    toast('对账结束：' + label, code === 0 ? 'ok' : (code === 3 ? '' : 'bad'));
+    toast('跑完了：' + label, code === 0 ? 'ok' : (code === 3 ? '' : 'bad'));
     loadOverview();
   }, 900);
 }
 
-$('#btn-run').addEventListener('click', startRun);
+// ⚠ 已经**没有** `#btn-run` 了（一个按钮拆成四个 data-what）——
+//   留着这行会在加载时抛 TypeError，整个 app.js 后面的绑定全部不执行。
+//   前端没有构建步骤，也没有 lint，这种错只会在浏览器控制台里露出来。
 $('#btn-stop').addEventListener('click', async () => {
   await api('/api/run/stop', { method: 'POST' });
   toast('已请求停止');
@@ -1111,6 +1137,7 @@ async function loadConfig() {
     if (el) el.value = v[key] == null ? '' : v[key];
   });
   if (state.overview) renderSchedule(state.overview.schedule || {});
+  if (state.overview) renderAutomation(state.overview.automation);
   loadErp();
   loadMail();
   loadWecom();
@@ -1173,6 +1200,96 @@ function schedRowButtons(t) {
     + ` <button class="btn ghost small nowrap" data-sched-del="${full}" data-sched-label="${label}">删除</button>` };
 }
 
+/* 「自动化跑什么」—— 三项复选框（抓华为数据 / 报量排查 / POS 合规）。
+   ⚠ 选项表和当前勾选**都由后端给**（overview.automation），前端不自己维护一份。
+   `dump` 在里面而且**默认勾上**（用户 2026-09-16 定的）——
+   复选框列表必须和旁边那列「跑什么」对得上，否则用户看到"只勾了两项"、
+   实际跑了三件，会以为程序乱来。 */
+function renderAutomation(a) {
+  const box = $('#automation-box');
+  if (!box || !a) return;
+  const on = new Set(a.steps || []);
+  box.innerHTML = (a.choices || []).map((c) => `
+    <label style="min-width:0;margin-right:14px">
+      <input type="checkbox" data-auto="${esc(c.value)}"${on.has(c.value) ? ' checked' : ''}>
+      ${esc(c.label)}</label>`).join('');
+}
+
+function pickedAutomation() {
+  return $$('#automation-box [data-auto]')
+    .filter((x) => x.checked).map((x) => x.dataset.auto);
+}
+
+$('#btn-automation-save')?.addEventListener('click', async () => {
+  const what = pickedAutomation();
+  const msg = $('#automation-msg');
+  if (!what.length) {
+    // 后端也会拒（400），这里先说一声 —— 少一次来回
+    msg.textContent = '至少勾一项';
+    return toast('至少要勾一项：抓华为数据 / 报量排查 / POS 合规', 'bad');
+  }
+  try {
+    const r = await api('/api/schedule/automation', { method: 'POST', body: { steps: what } });
+    if (!r.ok) {
+      msg.textContent = r.message || '没改成';
+      return toast(r.message || '没改成', 'bad');
+    }
+    msg.textContent = r.message || '已保存';
+    toast(r.message || '已保存', 'ok');
+    loadOverview();
+  } catch (e) {
+    msg.textContent = '保存失败：' + e.message;
+    toast('保存失败：' + e.message, 'bad');
+  }
+});
+
+/* 「上报 bug」—— 把现场日志打包发出去。
+   ⚠ 界面上必须把**包的路径**显示出来：自动发送失败是常态
+   （要报的 bug 很可能就是"推送坏了"），那时候用户得能自己把文件发出去。 */
+$('#btn-report-bug')?.addEventListener('click', async () => {
+  const btn = $('#btn-report-bug');
+  const msg = $('#report-bug-msg');
+  const box = $('#report-bug-result');
+  btn.disabled = true;
+  msg.textContent = '正在收集并发送（最多约半分钟）…';
+  box.innerHTML = '';
+  try {
+    const r = await api('/api/report-bug', { method: 'POST', body: {} });
+    if (!r.ok) {
+      msg.textContent = '';
+      box.innerHTML = `<div class="banner bad">❌ ${esc(r.message || '上报失败')}</div>`;
+      return;
+    }
+    msg.textContent = '';
+    const line = (k, v) => `<div class="form-row" style="margin:4px 0">
+      <span class="hint" style="min-width:64px">${k}</span>
+      <span>${esc(v || '—')}</span></div>`;
+    box.innerHTML = `<div class="banner ${r.sent && r.sent.length ? 'ok' : 'warn'}">
+        ${r.sent && r.sent.length
+          ? `✅ 已通过 <b>${esc(r.sent.join('、'))}</b> 发出`
+          : '⚠️ 自动发送没成功 —— <b>这也可能正是你要报的那个 bug</b>'}
+      </div>`
+      + line('邮件', r.mail) + line('企微', r.wecom)
+      + `<div class="form-row" style="margin:8px 0 0 0">
+           <span class="hint" style="min-width:64px">包</span>
+           <span class="mono" style="word-break:break-all">${esc(r.path)}</span>
+         </div>
+         <p class="hint" style="margin:6px 0 0 0">
+           大小 ${r.size_kb} KB，含 ${(r.entries || []).length} 个文件：
+           ${esc((r.entries || []).join('、'))}<br>
+           ⚠ 包里<b>没有凭据</b>（<code>.secrets\</code> 整个没进包），
+           但有业务数据（门店名 / 串号 / 金额）。<br>
+           ${r.sent && r.sent.length ? '' :
+             '<b>把上面那个文件直接发给开发者就行。</b>'}
+         </p>`;
+  } catch (e) {
+    msg.textContent = '';
+    box.innerHTML = `<div class="banner bad">❌ 上报失败：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 function renderSchedule(sch) {
   const box = $('#schedule-box');
   if (!box) return;
@@ -1195,12 +1312,26 @@ function renderSchedule(sch) {
     //   "没有管理员权限就看不到定时任务的设置"。这里把原因和修法一起给出来。
     t.time ? `每天 ${t.time}` : { html: t.unreadable ? '<span class="hint" style="color:var(--warn)">读不到（权限不够）</span>' : '<span class="hint">时间没读出来</span>' },
     t.enabled === false ? { html: '<span class="bad-text">已停用</span>' } : '已启用',
+    // ⚠ 这一列原来叫「跑什么」，但放的是**命令全文**（里面有 run.bat 的路径）——
+    //   名不副实。用户点出来了：那条命令是**路径**，不是"跑什么"。
+    //   所以：这列改名「路径」，另起一列「跑什么」写**执行项目**。
     { html: `<span class="hint mono">${esc((t.command || '').slice(-70))}</span>` },
+    // 「跑什么」—— 把每天实际干的几件事**列出来**，不是给一句概括。
+    // 写「整个项目」门店看不懂那指什么；写「抓华为数据 + 报量排查 + POS 合规」
+    // 一眼就知道。文案在后端（`run_daily.automation_label`），前端不另写一份。
+    { html: `<span class="nowrap">${esc(t.what_label || '—')}</span>` },
     schedRowButtons(t),
   ]);
-  // 老版本留空注册叫「CBG报量对账」（没有时间后缀）。它和新的带时间任务会**并存**，
-  // 两条都会每天跑一遍 —— 所以必须提示，不能装作没看见。
-  const legacy = tasks.filter((t) => t.name === sch.task_name);
+  // ⚠ **改名留下的老任务**。
+  //
+  // 任务名 2026-09-16 从 `CBG报量对账` 改成了 `门店数据拉取与计算`（名字要跟
+  // "它现在每天干三件事"对上）。但 Windows 那边**不同名就是并存，不是覆盖** ——
+  // 老门店升级后表里会有两条：`CBG报量对账-21点00` 和 `门店数据拉取与计算-21点00`，
+  // **两条都会每天跑一遍**。所以必须提示，不能装作没看见。
+  //
+  // 按**前缀**认（不是 `===`）：老名字可能带时间后缀、也可能不带（更早的版本留空注册）。
+  const legacyNames = sch.legacy_names || [];
+  const legacy = tasks.filter((t) => legacyNames.some((n) => t.name.startsWith(n)));
   box.innerHTML = `<div class="banner ok">
       ✅ 已注册 <b>${tasks.length}</b> 个定时任务 · 平台 ${esc(sch.platform)}
       ${tasks.length > 1 ? '<br><span class="hint">删除只删你点的那一行，别的任务不动。</span>' : ''}
@@ -1225,11 +1356,16 @@ function renderSchedule(sch) {
         <span class="hint" id="btn-sched-fix-msg"></span>
       </div>` : '')
     + (legacy.length ? `<div class="banner warn">
-        ⚠️ 表里有一条<b>旧任务「${esc(sch.task_name)}」</b>（名字里没有执行时间）——
-        它也会每天跑一次，等于<b>一天对账两遍</b>。
-        不需要的话点这一行的「删除」。
+        ⚠️ 表里有 <b>${legacy.length}</b> 条<b>老名字的任务</b>：
+        ${legacy.map((t) => `<code>${esc(t.name)}</code>`).join('、')}
+        <br><span class="hint">任务名改过了（原来叫 <code>${esc(legacyNames[0] || '')}</code>，
+        现在叫 <code>${esc(sch.task_name)}</code>）—— 而 Windows 那边<b>不同名就是并存，
+        不是覆盖</b>，所以这两条都会每天跑一次，等于<b>一天跑两遍</b>。</span>
+        <br><span class="hint">留哪条都行，<b>留一条就够</b>。建议把老的那条点「删除」
+        （新名字跟"它现在每天干三件事"对得上，看名字就知道是干什么的）。</span>
       </div>` : '')
-    + table(['任务名', '执行时间', '状态', '跑什么', ''], rows, ['', '', '', '', 'right']);
+    + table(['任务名', '执行时间', '状态', '路径', '跑什么', ''],
+            rows, ['', '', '', '', '', 'right']);
   if (tasks[0] && tasks[0].time) {
     $('#sched-time').value = tasks[0].time;
     syncSchedPlaceholder();      // ⚠ 程序赋值不会触发 input 事件，得手动同步一次

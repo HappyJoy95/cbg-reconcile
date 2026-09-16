@@ -469,10 +469,27 @@ class DbStale(RuntimeError):
     """
 
 
-def connect(path) -> sqlite3.Connection:
+def connect(path, *, named: bool = False) -> sqlite3.Connection:
     """**唯一**建连接的地方 —— 顺手把列缓存清掉。
 
-    ⚠ 为什么非得集中到一处：`_COLS_CACHE` 只能按 `id(conn)` 做键
+    ⚠ **`named` 默认是 `False`（行是元组），这个默认值很要紧。**
+
+    Python 的 `%` 格式化**只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组时
+    正常，是别的东西时只允许**一个**占位符，多一个就
+    `TypeError: not enough arguments for format string`。
+    而 `dump.main` 末尾那段汇总打印（按 POS/设备、按支付方式…）全是这种写法。
+
+    实测踩过：给主连接设了 `Row` 之后，门店跑「整个项目」时
+    **数据其实已经写进库了**，却崩在最后的汇总打印上，退出码 9 →
+    整条日常流程中止 → 报量排查和 POS 都没跑。**最坏的一种失败：
+    活儿干完了，但工具说自己失败了。**
+
+    `named=True` 给**读**的人用（`check_freshness` / `reported_sns_from_db`
+    要 `r["sn"]` 这种按列名取）。
+
+    ## 为什么非得集中到一处
+
+    `_COLS_CACHE` 只能按 `id(conn)` 做键
     （`sqlite3.Connection` **既不支持弱引用、也不能挂属性**，实测过），
     而 `id()` 在连接释放后会被复用 —— 于是"缓存里说这张表有这个列，
     新库其实没有" → `ALTER` 被跳过 → 写入直接
@@ -481,18 +498,22 @@ def connect(path) -> sqlite3.Connection:
     实测复现过（同一个进程开两个内存库，第二个必炸）。这不是理论问题：
     Web 是长驻进程，跨年那天它要建 `cbg-2027.db`，而缓存里还留着
     2026 那个库的列 —— 一年只错一次，最难查的那种。
-
-    （同时 `row_factory = sqlite3.Row`：不设的话 sqlite3 返回**元组**，
-    `r["sn"]` 直接 TypeError。这个坑也真踩过。）
     """
     _COLS_CACHE.clear()
     conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
+    if named:
+        conn.row_factory = sqlite3.Row
     return conn
 
 
 def open_db(path) -> sqlite3.Connection:
-    return connect(path)
+    """给**读**的人用：行按列名取（`r["sn"]`）。
+
+    ⚠ 和 `connect()` 的默认值**故意不同**：这里的调用方全是按列名取的，
+    而 `dump.main` 那边是按位置 `%` 展开的。一个开关两种用法，
+    所以把这个差别摆在函数名上，别让它靠"记得传参数"。
+    """
+    return connect(path, named=True)
 
 
 def check_freshness(conn, need_by_ts: int) -> tuple:
@@ -1025,40 +1046,58 @@ def main(argv=None) -> int:
         print("  " + ("✅ 通过" if chk["ok"] else "❌ 没过 —— 这份库不完整，别拿它算合规"),
               flush=True)
 
-        print("\n库：%s（%.1f KB）" % (db, db.stat().st_size / 1024.0), flush=True)
-        for label, sql in (
-            ("订单数 / 金额（订单级，不会重复）",
-             "SELECT COUNT(*), ROUND(SUM(included_tax_amount),2) FROM orders"),
-            ("明细行 / 有 SN 的行", "SELECT COUNT(*), SUM(sn <> '') FROM order_lines"),
-            ("唯一 SN 数", "SELECT COUNT(DISTINCT sn) FROM order_lines WHERE sn <> ''"),
-            ("支付笔数 / 金额", "SELECT COUNT(*), ROUND(SUM(payment_amount),2) FROM payments"),
-            ("业务标记数", "SELECT COUNT(*) FROM order_labels"),
-            ("退货单 / 退款", "SELECT (SELECT COUNT(*) FROM returns),"
-                          " (SELECT COUNT(*) FROM return_refunds)"),
-            ("退货明细行 / 有 SN", "SELECT COUNT(*), SUM(sn <> '') FROM return_lines"),
-            ("收款方式", "SELECT COUNT(*) FROM payment_medias"),
-        ):
-            print("  %-34s %s" % (label, conn.execute(sql).fetchone()), flush=True)
-
-        print("\n按 POS/设备（v_pos_usage）：", flush=True)
-        for row in conn.execute("SELECT pos_id, device_no, document_source, orders, ROUND(amount,2)"
-                                " FROM v_pos_usage"):
-            print("   %-9s %-9s src=%-3s %4d 单  %12.2f" % row, flush=True)
-        print("\n按支付方式（v_payment_summary）：", flush=True)
-        for row in conn.execute("SELECT media_name, media_no, media_member_no, payments,"
-                                " ROUND(amount,2) FROM v_payment_summary LIMIT 10"):
-            print("   %-14s %-3s/%-3s %4d 笔  %12.2f" % row, flush=True)
-        print("\n业务标记（v_label_summary）：", flush=True)
-        for row in conn.execute("SELECT source, label, orders FROM v_label_summary LIMIT 12"):
-            print("   %-16s %-22s %d 单" % row, flush=True)
-        print("\n退货单 + 退的 SN / 原单（v_return_with_sn）：", flush=True)
-        for row in conn.execute(
-                "SELECT document_no, ROUND(amount,2), sn, related_doc_no, device_no"
-                " FROM v_return_with_sn ORDER BY doc_create_time"):
-            print("   %s  %9.2f  SN=%-18s 原单=%s  %s" % row, flush=True)
+        print_summary(conn, db)
     finally:
         conn.close()
     return 0 if chk["ok"] else 2
+
+
+def print_summary(conn, db=None) -> None:
+    """抓完把库里有什么**摊开给人看**。
+
+    ⚠ 单独一个函数是为了**能测**。以前这段是 `main` 里一长串 `print`，
+    只有真去华为抓一次才会跑到 —— 于是它坏了也没人知道。
+    **门店那次就是这么炸的**：给主连接设了 `sqlite3.Row` 之后，
+    `"%-9s %4d" % row` 当场 `TypeError`（Python 的 `%` 只对**元组**展开，
+    非元组只允许一个占位符）—— 而数据其实**已经写进库了**，
+    崩的只是最后的打印。退出码 9 ⇒ 整条日常流程中止 ⇒ 报量排查和 POS 全没跑。
+    **最坏的一种失败：活儿干完了，工具说自己失败了。**
+
+    所以这里两件事一起做：① 抽出来让它可以被测；② 每处都写 `tuple(row)`，
+    **不依赖连接的行类型**（谁哪天换了 `row_factory` 都不会再炸）。
+    """
+    if db is not None:
+        print("\n库：%s（%.1f KB）" % (db, db.stat().st_size / 1024.0), flush=True)
+    for label, sql in (
+        ("订单数 / 金额（订单级，不会重复）",
+         "SELECT COUNT(*), ROUND(SUM(included_tax_amount),2) FROM orders"),
+        ("明细行 / 有 SN 的行", "SELECT COUNT(*), SUM(sn <> '') FROM order_lines"),
+        ("唯一 SN 数", "SELECT COUNT(DISTINCT sn) FROM order_lines WHERE sn <> ''"),
+        ("支付笔数 / 金额", "SELECT COUNT(*), ROUND(SUM(payment_amount),2) FROM payments"),
+        ("业务标记数", "SELECT COUNT(*) FROM order_labels"),
+        ("退货单 / 退款", "SELECT (SELECT COUNT(*) FROM returns),"
+                      " (SELECT COUNT(*) FROM return_refunds)"),
+        ("退货明细行 / 有 SN", "SELECT COUNT(*), SUM(sn <> '') FROM return_lines"),
+        ("收款方式", "SELECT COUNT(*) FROM payment_medias"),
+    ):
+        print("  %-34s %s" % (label, tuple(conn.execute(sql).fetchone())), flush=True)
+
+    print("\n按 POS/设备（v_pos_usage）：", flush=True)
+    for row in conn.execute("SELECT pos_id, device_no, document_source, orders, ROUND(amount,2)"
+                            " FROM v_pos_usage"):
+        print("   %-9s %-9s src=%-3s %4d 单  %12.2f" % tuple(row), flush=True)
+    print("\n按支付方式（v_payment_summary）：", flush=True)
+    for row in conn.execute("SELECT media_name, media_no, media_member_no, payments,"
+                            " ROUND(amount,2) FROM v_payment_summary LIMIT 10"):
+        print("   %-14s %-3s/%-3s %4d 笔  %12.2f" % tuple(row), flush=True)
+    print("\n业务标记（v_label_summary）：", flush=True)
+    for row in conn.execute("SELECT source, label, orders FROM v_label_summary LIMIT 12"):
+        print("   %-16s %-22s %d 单" % tuple(row), flush=True)
+    print("\n退货单 + 退的 SN / 原单（v_return_with_sn）：", flush=True)
+    for row in conn.execute(
+            "SELECT document_no, ROUND(amount,2), sn, related_doc_no, device_no"
+            " FROM v_return_with_sn ORDER BY doc_create_time"):
+        print("   %s  %9.2f  SN=%-18s 原单=%s  %s" % tuple(row), flush=True)
 
 
 if __name__ == "__main__":
