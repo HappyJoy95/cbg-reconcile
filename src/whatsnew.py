@@ -1,0 +1,227 @@
+"""每个版本的「改了什么 + **门店要做什么**」—— 更新后第一次打开控制台弹一次。
+
+## ⚠ 为什么放在代码里，而不是读 `发布说明.md`
+
+`发布说明.md` 是**打包时生成的，它不在 git 里** —— 所以走**自更新**升级的门店，
+那个文件**一直是当初拷包那一版**（AGENTS.md 里"仓库 ≠ 包内容"那节写着）。
+拿它当弹窗内容，门店会看到**上一版的更新日志** —— 比没有更糟（"你说明明没改"）。
+
+放 `src/` 里就跟着代码走，自更新一定拿得到。
+
+## ⚠ 升 VERSION 就必须在这里补一条
+
+有测试盯着（`test_每个版本都有更新日志`）。忘了补的话弹窗是空的 ——
+而"更新了却什么都没说"正是这个弹窗要消灭的东西。
+
+## 「门店要做什么」比「改了什么」重要
+
+用户 2026-09-16 提这个功能时的原话是"**给门店强调一下要做啥**"。
+所以每条 `todo` 都写得能照着做，并且带 `go` —— 界面上会出现一个
+「去处理」按钮，直接跳到该去的那个标签页。**光说"请注意"等于没说。**
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+#: 标签页的 id（要跟 `web/index.html` 里的 `data-tab` 对得上，
+#: 有测试盯着）—— `go` 只能取这几个值之一。
+TABS = ("reports", "pos", "run", "session", "settings")
+TAB_LABELS = {
+    "reports": "报量排查",
+    "pos": "POS 合规",
+    "run": "运行",
+    "session": "会话",
+    "settings": "设置",
+}
+
+#: 版本 → 更新日志。**新的写在最前面**（按版本号倒序看着方便）。
+NOTES = {
+    "2.0.1": {
+        "title": "更新提醒：以后不会再漏掉「要做什么」",
+        "highlights": [
+            "**每次更新后第一次打开控制台**，会弹一个窗：这一版改了什么、"
+            "**你需要做什么**。以前只有一本发布说明，没人会去翻。",
+            "检测到**大版本升级**（1.x → 2.x）时，会把这份提醒"
+            "**推到邮箱和企业微信** —— 不用打开控制台也看得到。",
+            "「设置 → 检查更新」下面多了一行**升级记录**："
+            "什么时候从哪一版升上来的。",
+            "⚠ 如果你装过 **beta 测试包**：beta 的版本号跟正式版同号，"
+            "程序自己认不出来 —— **这次更新会把它换成正式版**。",
+        ],
+        # ⚠ 这一版本身没有"必须做的事"。
+        #   2.0.0 那三条（删旧定时任务等）会由 `versions_after` **自动带上来** ——
+        #   还没做过的门店照样看得到，做过的不用再看第二遍。
+        "todo": [],
+    },
+    "2.0.0": {
+        "title": "POS 使用率合规 + 本地订单库",
+        "highlights": [
+            "新增「**POS 合规**」页：每个月的 POS 使用率"
+            "（卖出去的钱里有多少走非现金）。",
+            "第一个标签页「报告」改名「**报量排查**」；两个说法也换了 ——"
+            "「玲珑无但云商有」= 云商卖了、玲珑里没有（要补报）；"
+            "「玲珑有但云商无」= 玲珑报了量、云商查不到出库（要核对）。"
+            "（**玲珑** = 华为那个销售系统）",
+            "「运行」页改成**四个按钮**：整个项目 / 抓华为数据 / 报量排查 / POS 合规 ——"
+            "单独点一个就只做那一件，快。",
+            "程序开始在本地存一份订单数据（`out\\cbg-2026.db`）——"
+            "⚠ **`out\\` 目录别删别挪**，里面有你的历史报告和这份数据。",
+            "推送**分成两条**：报量排查一条、POS 一条，各看各的。",
+            "「设置 → 定时执行」下面多了「**自动化跑什么**」和「**上报 bug**」按钮。",
+        ],
+        "todo": [
+            {
+                "text": "**删掉旧的定时任务。** 任务改名叫「门店数据拉取与计算-…」了，"
+                        "而 Windows 那边**不同名就是并存、不是覆盖** —— "
+                        "升级后你会有**两条**任务，**两条都每天跑一遍**。"
+                        "到「设置 → 定时执行」，看红色提示那几行，"
+                        "点老名字（`CBG报量对账-…`）那一行的「删除」。**留一条就够。**",
+                "go": "settings",
+            },
+            {
+                "text": "**第一次跑会补全部历史**（几分钟到十几分钟，看单量），"
+                        "等它跑完就行 —— POS 页要有前面几个月的数据才看得出趋势。"
+                        "以后每天只抓当月增量，很快。",
+                "go": "run",
+            },
+            {
+                "text": "如果某天**没收到报告**、或者报「库不新鲜」：多半是华为会话过期了，"
+                        "到「会话」页点「打开浏览器抓取」重新登一次。"
+                        "（数据没拉全的时候程序**故意什么都不发** ——"
+                        "宁可没有报告，也不发一份错的。）",
+                "go": "session",
+            },
+        ],
+    },
+}
+
+#: 「已看过」记在哪。⚠ 放 `.secrets/` —— 那是 `selfupdate.NEVER_TOUCH` 里的，
+#: 升级不会碰它，所以"看过就不再弹"能跨版本生效。
+STATE_REL = ".secrets/whatsnew.json"
+
+
+def _state_path(root) -> Path:
+    return Path(root) / STATE_REL
+
+
+def seen_version(root) -> str:
+    """这台电脑**已经看过**哪一版的更新日志。读不到就当没看过。"""
+    try:
+        d = json.loads(_state_path(root).read_text(encoding="utf-8"))
+        return str(d.get("seen") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def mark_seen(root, version: str) -> bool:
+    """记下"这一版的更新日志看过了"。**写不成返回 False，但不抛。**
+
+    ⚠ 写不成也不该拦着用户 —— 大不了下次再弹一次。
+    为了"记状态"把整个更新流程卡住是不划算的。
+    """
+    p = _state_path(root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"seen": str(version),
+                                 "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                ensure_ascii=False, indent=1),
+                     encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def notes_for(version: str):
+    """取某一版的更新日志。没有就返回 `None`（不是空壳）。"""
+    return NOTES.get(str(version))
+
+
+def _vkey(v):
+    """版本号 → 可比较的元组。`"2.0.1"` → `(2, 0, 1)`。
+
+    ⚠ 非数字段（`"2.0.0-beta"`）当 0 —— 它不该出现在 `NOTES` 的键里
+    （那是 VERSION，正式版号），但也不能因此崩。
+    """
+    out = []
+    for part in str(v or "").split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out or [0])
+
+
+def versions_after(seen: str, current: str):
+    """`NOTES` 里**比 seen 新、且不比 current 新**的那些版本（升序）。
+
+    ## ⚠ 为什么不是"只看当前版本"
+
+    门店会**跳版本升级**：一台还在 1.6.1 的电脑，某天直接更新到 2.0.1 ——
+    如果只看当前版本的日志，它就**看不到 2.0.0 里那几条"必须做的事"**
+    （删掉改名前的旧定时任务、第一次跑会补历史……），
+    而那几条恰恰是最要紧的。
+
+    所以按**区间**取：上次看过的版本之后、一直到当前版本，全都算上。
+    一台全新装的机器（没记录）会看到全部历史版本 —— 那也没问题，
+    它确实什么都没做过。
+    """
+    lo = _vkey(seen) if seen else (0,)
+    hi = _vkey(current)
+    return [v for v in NOTES if lo < _vkey(v) <= hi]
+
+
+def digest(root, version: str, since=None):
+    """这一版的完整内容（含"从 `since` 之后"各版本留下的待办）。
+
+    `since` 决定待办的**起点**，两种调用方要的不一样：
+
+    * **控制台弹窗**（`pending`）：`since=None` → 用"上次看过的版本"。
+      用户关心的就是"我上次看过之后又多了什么"。
+    * **升级推送**（`upgrade`）：`since=升级前的版本`。
+      ⚠ **不能用"看过没"** —— 门店可能已经点过控制台的「知道了」，
+      但**看过 ≠ 做完了**，推送该带还得带。
+      （真踩过：`seen == 2.0.0` 时推送里的「需要你做的事」整个是空的，
+      而那条推送的全部意义就是那一段。）
+    """
+    got = notes_for(version)
+    if not got or not version:
+        return None
+    seen = seen_version(root) if since is None else str(since)
+    out = {
+        "version": str(version),
+        "title": got.get("title", ""),
+        "highlights": list(got.get("highlights") or ()),
+        "todo": [],
+    }
+    # 待办：把 seen 之后所有版本的待办都带上（含当前版本），按顺序编号
+    for v in versions_after(seen, version):
+        for item in NOTES[v].get("todo") or ():
+            go = item.get("go") or ""
+            out["todo"].append({
+                "text": item.get("text", ""),
+                "go": go,
+                "from": v,
+                # 界面上那个按钮写「去设置 / 去运行 / …」——标签由后端给，
+                # 前端不自己维护一份（各写一份必然有一天对不上）
+                "go_label": ("去" + TAB_LABELS[go]) if go in TAB_LABELS else "",
+            })
+    return out
+
+
+def pending(root, version: str):
+    """控制台该不该弹；**没得弹就返回 `None`**。
+
+    三种情况不弹：
+
+    * 这一版在 `NOTES` 里没写（**有测试拦着，正常不会发生**）；
+    * 已经看过这一版了（`seen == version`）；
+    * 压根没有版本号。
+
+    ⚠ **「改了什么」只讲当前版本，「要做什么」按区间合并** ——
+    改动是"这一版新带来的"，而待办是"你还没做的"，
+    跳版本升级时两件事的范围本来就不一样（见 `versions_after`）。
+    """
+    if not version or seen_version(root) == str(version):
+        return None
+    return digest(root, version)

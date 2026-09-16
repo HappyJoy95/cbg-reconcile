@@ -175,3 +175,53 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
    这条兜住**所有**这种情况 —— 别再靠"记得给每个元素单独处理"。
    （JS 里没有用 `style.display` 操作这些元素，所以 `!important` 不会误伤。） */
 [hidden] { display: none !important; }
+
+/* ── 更新日志弹窗 ─────────────────────────────────────────────────────
+   更新后第一次打开控制台弹一次。用户 2026-09-16 要的：
+   "每次更新第一次启动加个更新日志的弹窗，然后给门店强调一下要做啥"。
+
+   ⚠ 「要做什么」那一段**视觉权重必须比「改了什么」高** ——
+   门店不看改动没关系，漏做那几步会真的出问题（比如旧定时任务没删 =
+   一天跑两遍）。所以用 warn 配色 + 编号，别做成一样的列表。 */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(15,23,42,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200; padding: 20px;
+}
+.modal-mask[hidden] { display: none; }
+.modal {
+  background: var(--card); border-radius: 14px; width: min(680px, 100%);
+  max-height: 86vh; overflow: auto; box-shadow: 0 18px 48px rgba(0,0,0,.28);
+}
+.modal-head {
+  padding: 16px 22px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: baseline; gap: 10px; position: sticky; top: 0;
+  background: var(--card); border-radius: 14px 14px 0 0;
+}
+.modal-head h2 { margin: 0; font-size: 16px; }
+.modal-body { padding: 16px 22px 6px 22px; }
+.modal-foot {
+  padding: 12px 22px 18px 22px; display: flex; justify-content: flex-end; gap: 10px;
+}
+.modal-sec { margin-bottom: 16px; }
+.modal-sec > h3 {
+  margin: 0 0 8px 0; font-size: 13px; color: var(--muted);
+  text-transform: none; letter-spacing: .02em; font-weight: 600;
+}
+.modal ul { margin: 0; padding-left: 20px; font-size: 13.5px; line-height: 1.85; }
+.modal ul li { margin-bottom: 2px; }
+.todo-box {
+  background: var(--warn-bg); border: 1px solid #fcd34d; border-radius: 10px;
+  padding: 12px 14px;
+}
+.todo-box > h3 { color: #78350f; margin: 0 0 10px 0; font-size: 13.5px; }
+.todo-item { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
+.todo-item:last-child { margin-bottom: 0; }
+.todo-num {
+  flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--warn);
+  color: #fff; font-size: 12.5px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; margin-top: 1px;
+}
+.todo-text { flex: 1; font-size: 13.5px; line-height: 1.75; color: #78350f; }
+.todo-text b { color: #7c2d12; }
+.todo-go { flex: 0 0 auto; }

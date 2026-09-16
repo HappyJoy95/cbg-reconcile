@@ -1138,6 +1138,8 @@ async function loadConfig() {
   });
   if (state.overview) renderSchedule(state.overview.schedule || {});
   if (state.overview) renderAutomation(state.overview.automation);
+  if (state.overview) renderWhatsNew(state.overview.whatsnew);
+  if (state.overview) renderUpgrades(state.overview.upgrades);
   loadErp();
   loadMail();
   loadWecom();
@@ -1289,6 +1291,91 @@ $('#btn-report-bug')?.addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+/* ───────────────── 更新日志弹窗（每版只弹一次）─────────────────
+   用户 2026-09-16："每次更新第一次启动加个更新日志的弹窗，
+   然后给门店强调一下要做啥"。
+
+   ⚠ 决定弹不弹的是**后端**（`overview.whatsnew` 为 null 就不弹）——
+     前端不自己判断"这个版本看过没"，那种状态放前端一定会漂。 */
+let wnShowing = null;
+
+function renderWhatsNew(wn) {
+  const mask = $('#whatsnew-mask');
+  if (!mask) return;
+  if (!wn || wnShowing === wn.version) return;   // 没有 / 正在显示同一个，都不重复弹
+  wnShowing = wn.version;
+  $('#wn-head').textContent = `已更新到 v${wn.version}`;
+  $('#wn-title').textContent = wn.title || '';
+  $('#wn-highlights').innerHTML = (wn.highlights || [])
+    .map((x) => `<li>${inlineMd(x)}</li>`).join('');
+  const todo = wn.todo || [];
+  $('#wn-todo-sec').hidden = !todo.length;
+  // 「要做什么」**必须比「改了什么」显眼** —— 门店不看改动没关系，
+  // 漏做那几步会真的出问题（比如旧定时任务没删 = 一天跑两遍）
+  $('#wn-todo').innerHTML = todo.map((t, i) => `
+    <div class="todo-item">
+      <div class="todo-num">${i + 1}</div>
+      <div class="todo-text">${inlineMd(t.text)}</div>
+      ${t.go ? `<button class="btn small todo-go" data-go="${esc(t.go)}">
+                  ${esc(t.go_label || '去看看')}</button>` : ''}
+    </div>`).join('');
+  $$('#wn-todo [data-go]').forEach((b) => b.addEventListener('click', () => {
+    closeWhatsNew();
+    goto(b.dataset.go);
+  }));
+  mask.hidden = false;
+}
+
+function closeWhatsNew() {
+  const mask = $('#whatsnew-mask');
+  if (mask) mask.hidden = true;
+}
+
+async function ackWhatsNew() {
+  const v = wnShowing;
+  closeWhatsNew();
+  if (!v) return;
+  try {
+    await api('/api/whatsnew/seen', { method: 'POST', body: { version: v } });
+  } catch (e) { /* 记不上就下次再弹一次，不值得打扰用户 */ }
+}
+
+/* 弹窗里的文字允许 **粗体** 和 `代码`（后端写的是 markdown 风格）。
+   ⚠ 先 esc 再替换 —— 反过来的话就是自己给自己开了个 XSS 口子。
+   （`table()` 那个「忘了包 {html:}」的坑是"显示成源码"，这个是"注进去"，两回事。） */
+function inlineMd(s) {
+  return esc(String(s || ''))
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+/* 跳到某个标签页 —— 弹窗里「去设置 / 去运行」那些按钮用 */
+function goto(tab) {
+  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + tab));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+$('#btn-wn-ok')?.addEventListener('click', ackWhatsNew);
+$('#whatsnew-mask')?.addEventListener('click', (e) => {
+  // 点遮罩也算"知道了" —— 但不点按钮就不会记（用户可能是误触）
+  if (e.target === $('#whatsnew-mask')) closeWhatsNew();
+});
+
+/* 升级记录 —— 「什么时候升的级、从哪一版升上来的」。
+   ⚠ 只显示**真升过级**的那几条（第一条例是 `from: ""`，那是刚装上）。 */
+function renderUpgrades(list) {
+  const box = $('#upgrade-history');
+  if (!box) return;
+  const items = list || [];
+  if (!items.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="hint" style="line-height:1.9"><b>升级记录</b><br>'
+    + items.slice(-6).reverse().map((h) =>
+        `· v${esc(h.from)} → <b>v${esc(h.to)}</b>
+         <span class="hint">${esc(h.at || '')}</span>`).join('<br>')
+    + '</div>';
+}
 
 function renderSchedule(sch) {
   const box = $('#schedule-box');

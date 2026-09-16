@@ -409,6 +409,8 @@
       <span class="hint" id="update-status"></span>
     </div>
     <div id="update-box"></div>
+    <!-- 升级记录 —— 由 app.js 的 renderUpgrades 填。没有升级记录时是空的。 -->
+    <div id="upgrade-history" style="margin:8px 0"></div>
     <div class="form-row">
       <button class="btn" id="btn-update-check">检查更新</button>
       <button class="btn primary" id="btn-update-apply" hidden>立即更新</button>
@@ -494,6 +496,32 @@
 </main>
 
 <div class="toast" id="toast" hidden></div>
+
+<!-- ─────────────────── 更新日志（每版只弹一次）───────────────────
+     更新后第一次打开控制台弹出来。内容来自 `src/whatsnew.py` ——
+     ⚠ 不能读 `发布说明.md`：那个文件不在 git 里，走自更新的门店
+     拿到的永远是当初拷包那一版，弹出来会是"上一版的更新日志"。 -->
+<div class="modal-mask" id="whatsnew-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="wn-head">
+    <div class="modal-head">
+      <h2 id="wn-head">已更新</h2>
+      <span class="hint" id="wn-title"></span>
+    </div>
+    <div class="modal-body">
+      <div class="modal-sec" id="wn-highlights-sec">
+        <h3>这一版改了什么</h3>
+        <ul id="wn-highlights"></ul>
+      </div>
+      <div class="todo-box" id="wn-todo-sec" hidden>
+        <h3>⚠ 你需要做这几件事</h3>
+        <div id="wn-todo"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary" id="btn-wn-ok">知道了</button>
+    </div>
+  </div>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>

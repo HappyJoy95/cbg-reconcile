@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (autostart, browser, config_io, elevate, mailer, run_daily, schedule,
-               selfupdate, service, version, wecom)
+               selfupdate, service, upgrade, version, wecom, whatsnew)
 from .cbg import CbgClient, CbgError
 from .erp import (DEFAULT_ENV_FILE, ErpCaptchaRequired, ErpClient, ErpError,
                   describe_credentials, load_credentials, save_credentials)
@@ -446,6 +446,15 @@ class App:
             "runner_rebuilt": self._runner_rebuilt,
             "reports": list_reports(self.out_dir),
             "run": latest.snapshot(0) if latest else None,
+            # 「更新了，这一版要做什么」—— 每版只弹一次（记在 .secrets/whatsnew.json，
+            # 那是自更新不碰的地方，所以跨版本有效）。
+            # ⚠ 内容在 `src/whatsnew.py` 里、跟着代码走 —— 不能读 `发布说明.md`：
+            #   那个文件**不在 git 里**，自更新的门店拿到的永远是当初拷包那一版。
+            "whatsnew": whatsnew.pending(self.root, version.VERSION),
+            # 升级记录 —— 「你什么时候升的级、从哪一版升上来的」。
+            # 这类"门店自己用、没人管"的工具上很值：报上来的现象经常
+            # 跟"它其实还在跑半年前的版本"有关。
+            "upgrades": upgrade.history(self.root),
             "running": bool(manager.current()),
         }
 
@@ -985,6 +994,14 @@ class Handler(BaseHTTPRequestHandler):
             if rebuilt:
                 st["script_rebuilt"] = True
             return self._json(st)
+
+        if path == "/api/whatsnew/seen" and method == "POST":
+            # 「知道了」—— 记下这一版看过了，以后不再弹。
+            # ⚠ 记不上也返回 ok（`mark_seen` 写不成只是下次再弹一次），
+            #   为了记状态把界面卡住不值得。
+            body = self._read_json()
+            v = str(body.get("version") or version.VERSION)
+            return self._json({"ok": True, "saved": whatsnew.mark_seen(app.root, v)})
 
         if path == "/api/report-bug" and method == "POST":
             # ⚠ 同步跑（跟 `/api/mail/test`、`/api/wecom/test` 一个路子）——

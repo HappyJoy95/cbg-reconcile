@@ -14,7 +14,7 @@
 `bootstrap.py autostart --elevated`，而那条路会让抓会话失败，见坑 7）。
 
 ```bash
-python -m pytest tests/ -q          # 1006 条，约 38 秒。改完必须全绿
+python -m pytest tests/ -q          # 1062 条，约 39 秒。改完必须全绿
 python bootstrap.py selftest        # 逐项自检（版本 / 门店 / 依赖 / 会话 / 服务）
 python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
 python -m src.cli daily             # 日常流程：抓华为数据 → 报量排查 → POS 合规
@@ -46,6 +46,9 @@ src/pos_metric.py  POS 使用率口径（**纯函数、无 IO**，业务规则�
 src/pos_report.py  POS 的口径 IO 层（读库）+ 推送文案
 src/pos_export.py  POS 明细 Excel
 src/bugreport.py   「上报 bug」：收集现场 → 打包 → 推送（**先落盘再发**）
+src/whatsnew.py    每版的「改了什么 + 门店要做什么」（更新后弹一次）
+                   ⚠ **升 VERSION 必须在这里补一条**，有测试拦着
+src/upgrade.py     升级记录 + **大版本升级就把「要做的事」推出去**
 src/web.py         控制台后端（HTTP + JSON API，无框架）与 App/Handler
 web/app.js         控制台前端（原生 JS，**无构建步骤**，改完刷新即可）
 web/index.html     页面骨架（id 要和 app.js 里 $('#xxx') 对得上）
@@ -63,7 +66,7 @@ src/winutil.py     schtasks 的两个坑（输出编码、字段本地化）集�
 src/runtime.py     记住"安装时用的是哪个 Python"（多 Python 机器不装错）
 src/elevate.py     按需提权：只把"删旧任务/建定时任务"那一步弹一次 UAC
 bootstrap.py       所有 .bat 的统一入口（**纯标准库**，装依赖前就能跑）
-tests/             1006 条单元测试（pytest）
+tests/             1062 条单元测试（pytest）
 tools/build_package.sh  打发布包（见下）
 运维手册.md         完整手册（部署/维护用，**不发门店**）
 门店操作手册.md     发门店的精简版（五六步，打包时进包的是这份）
@@ -153,7 +156,7 @@ update-debug.py    更新失败时的现场诊断脚本
 * 提交信息写清**为什么**（这个项目的注释和提交信息都是"记录踩过的坑"风格，
   请保持）。中文。
 
-## 十二个踩过的坑（都真踩过，别再踩）
+## 十三个踩过的坑（都真踩过，别再踩）
 
 **1. 路径比较别用 `str(Path)` —— Windows 上是反斜杠**
 
@@ -357,6 +360,25 @@ Python 的 `%` **只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组�
 
 → **一律配 `assert 旧串 in s`**。批量改源码时再加一条：**改完立刻 `py_compile`**，
 并按行号锚定（"往第 N 行插一段"比"按内容替换"稳）。
+
+**13. 「看到过」和「做完了」是两个状态**，别用一个标志位表示
+
+做更新日志弹窗时踩的：`whatsnew.digest()` 原来用"**看过没**"（`seen`）
+决定要带哪些待办。于是门店在控制台点过「知道了」之后，
+**升级推送里的「需要你做的事」那一段整个是空的** —— 而推送的全部意义
+就是那一段。
+
+→ 拆成两个概念、两个参数：
+
+* **控制台弹窗**看"上次看过的版本之后新增了什么"（`since=None` → 用 `seen`）；
+* **推送**看"**这次升级带来了什么**"（`since=升级前的版本`）。
+
+同理还有一对容易混的：**`pushed`（真发出去过）≠ `should_push`（判断该发）**。
+只有**真发出去过**才记 `pushed` —— 全跳过（门店当时没配邮箱）或全失败
+（网不通）时记了的话，"后来配上了"就**永远收不到**那条提醒了。
+
+**判断"要不要做某事"的条件，要跟"真正做出去的内容"用同一个口径** ——
+不然会出现"判据说该推、推出来却是空的"这种自相矛盾。
 
 ## 数据与凭据（别提交）
 

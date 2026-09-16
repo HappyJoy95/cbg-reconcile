@@ -880,6 +880,9 @@ def cmd_autostart(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    # 开控制台也算一次"启动" —— 更新完马上打开控制台的话，这里就能记上升级。
+    # ⚠ 同一版只推一次（`upgrade` 里记着 `pushed`），所以跟 daily 不会重复推。
+    _upgrade_check(args.config)
     from .web import serve
     serve(port=args.port, host=args.host, open_browser=not args.no_open,
           root=ROOT, config=args.config)
@@ -1037,6 +1040,29 @@ def cmd_report_bug(args) -> int:
     return EXIT_OK
 
 
+def _upgrade_check(config_path, *, push=True) -> dict:
+    """比对"上次跑的是哪一版"：是升级就记一条；该推就把「要做的事」推出去。
+
+    ⚠ **任何异常都不许冒泡** —— 升级提醒是锦上添花，
+    为了它把每天的对账搞失败是本末倒置。（`upgrade.check` 内部已经全吞了，
+    这里再兜一层，因为连 `load_config` 都可能抛。）
+    """
+    try:
+        from . import upgrade
+        cfg = None
+        try:
+            cfg = load_config(config_path, root=ROOT)
+        except BaseException:                                 # noqa: BLE001
+            # ⚠ `load_config` 找不到配置文件时抛的是 **SystemExit**，它是
+            #   `BaseException` —— 只接 `Exception` 的话会**穿过去**，
+            #   在 `daily` 第一行就把整条流程带走（见 AGENTS.md 坑 11）。
+            pass
+        return upgrade.check(ROOT, cfg, version.VERSION, push=push)
+    except BaseException as e:                                # noqa: BLE001
+        return {"checked": False, "change": None, "pushed": False,
+                "why": "", "result": "升级检测跳过：%s" % e}
+
+
 def cmd_daily(args) -> int:
     """日常流程 —— 一条定时任务跑完三步（编排在 `run_daily` 里）。
 
@@ -1046,6 +1072,11 @@ def cmd_daily(args) -> int:
     把它迁到 `daily` 时，`check` 认得的参数在这里必须都接得住
     （子解析器是超集，见 `daily` 那段）。
     """
+    # 「升级记录 + 大版本升级就推提醒」挂在这儿，因为**这是每天都会跑的那条**：
+    # 门店更新完，第二天的定时任务就会检测到并把"要做的事"推出去。
+    # （光靠控制台弹窗不够 —— 门店的日常是"它自己跑，我不看"。）
+    _upgrade_check(args.config)
+
     from . import run_daily
     argv = ["-c", args.config]
     # argparse 默认值 vs "用户真给了" —— 空串/None 表示没给，别把默认值当成用户意图
