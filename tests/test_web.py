@@ -65,6 +65,31 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertNotIn("name: target.full_name", block,
                          "发 full_name 会被后端判非法字符，点了没反应")
 
+    def test_captcha_state_has_its_own_banner(self):
+        """⚠ 状态映射漏了 `need_captcha` 的话，`cls`/`title` 都取到 `undefined`，
+        横幅会渲染成空的 —— 用户看到的还是"什么都没说"，正是这次要修的毛病。
+        """
+        self.assertIn("need_captcha", APP_JS)
+        # ⚠ 必须**精确切片**，不能取个 300 字符的窗口就断言 ——
+        #   紧挨着的 `title` 映射里也有 `need_captcha`，窗口会把它框进去，
+        #   于是"从 cls 里删掉 need_captcha"这个改动**测试照样绿**。
+        #   （第一版就是这么写的，故意改坏验证时才发现。）
+        i = APP_JS.index("const cls = {")
+        cls = APP_JS[i:APP_JS.index("const title = {", i)]
+        self.assertIn("need_captcha", cls, "cls 映射缺 need_captcha → 横幅会是空的")
+        j = APP_JS.index("const title = {")
+        title = APP_JS[j:APP_JS.index("|| job.state", j)]
+        self.assertIn("需要验证码", title, "title 映射缺文案")
+
+    def test_running_captcha_shows_a_banner_not_only_the_log(self):
+        """⚠ 运行期间就要提示，别等结束了才说 —— 用户正在等的时候最需要知道
+        "现在轮到你操作了"。只写进 `#auto-log` 那个滚动日志是不够的。
+        """
+        i = APP_JS.index("function pollAuto")
+        block = APP_JS[i:i + 1500]
+        self.assertIn("job.need", block, "运行期横幅要看 need 字段")
+        self.assertIn("#auto-result", block, "要写进醒目横幅，不是日志")
+
     def test_no_leftover_single_delete_button(self):
         """老的单删按钮已经拆成行内按钮，别再被谁加回来。"""
         self.assertNotIn("btn-sched-remove", APP_JS)

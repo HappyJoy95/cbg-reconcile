@@ -333,13 +333,25 @@ function pollAuto() {
     el.hidden = false;
     el.textContent = (job.steps || []).join('\n') + (job.running ? '\n…' : '');
     el.scrollTop = el.scrollHeight;
+    // ⚠ 运行期间就要提示，别等结束了才说 —— 用户正在等的时候最需要知道
+    //   "现在轮到你操作了"。只写进上面那个滚动日志是不够的（用户不会去翻）。
+    if (job.running && job.need === 'captcha') {
+      $('#auto-result').innerHTML =
+        `<div class="banner warn">⚠️ 页面要<b>图形验证码</b> ——
+           请到浏览器窗口里输一下，输完程序会自己继续。</div>`;
+    }
     if (job.running) return pollAuto();
 
     $('#btn-auto-login').disabled = false;
     $('#btn-auto-refresh').disabled = false;
-    const cls = { ok: 'ok', saved: 'warn', error: 'bad' }[job.state] || '';
+    // ⚠ 漏一个状态的话 cls/title 都取到 undefined，横幅渲染成空的 ——
+    //   用户看到的还是"什么都没说"，正是这次要修的毛病。
+    const cls = { ok: 'ok', saved: 'warn', error: 'bad',
+                  need_captcha: 'warn' }[job.state] || '';
     const title = { ok: '✅ 抓到了，会话可用', saved: '⚠️ 抓到了，但自检没过',
-                    error: '❌ 抓取失败' }[job.state] || job.state;
+                    error: '❌ 抓取失败',
+                    need_captcha: '⚠️ 需要验证码 —— 请手动登录一次' }[job.state]
+                  || job.state;
     $('#auto-result').innerHTML =
       `<div class="banner ${cls}">${title}${job.message ? '：' + esc(job.message) : ''}</div>`;
     if (job.state === 'ok') {
