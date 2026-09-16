@@ -25,7 +25,12 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "CBG报量对账"
-VERSION = "1.6.0"           # 功能有增删就动这个；打包时间看 BUILD.txt
+VERSION = "1.6.1"           # 功能有增删就动这个；打包时间看 BUILD.txt
+                            # 1.6.1：抓会话撞图形验证码时**当场醒目提示**并收尾 ——
+                            #        自动登录撞的：中止 + 关窗 + 重置 profile；
+                            #        手动登录撞的：只提示、不打扰用户操作。
+                            #        并记住"上次撞过"，下次不自动填账号密码
+                            #        （否则重试会撞同一个验证码，死循环）。
                             # 1.6.0（主线：**兼容 Windows 7**）
                             #        ① 支持 Windows 7 / Python 3.8.10（代码降到 3.8 能跑，
                             #           三头 3.8.20 / 3.9.25 / 3.14 各自跑全套测试）

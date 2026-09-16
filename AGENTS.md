@@ -14,7 +14,7 @@
 `bootstrap.py autostart --elevated`，而那条路会让抓会话失败，见坑 7）。
 
 ```bash
-python -m pytest tests/ -q          # 708 条，约 27 秒。改完必须全绿
+python -m pytest tests/ -q          # 728 条，约 28 秒。改完必须全绿
 python bootstrap.py selftest        # 逐项自检（版本 / 门店 / 依赖 / 会话 / 服务）
 python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
 ```
@@ -51,7 +51,7 @@ src/winutil.py     schtasks 的两个坑（输出编码、字段本地化）集�
 src/runtime.py     记住"安装时用的是哪个 Python"（多 Python 机器不装错）
 src/elevate.py     按需提权：只把"删旧任务/建定时任务"那一步弹一次 UAC
 bootstrap.py       所有 .bat 的统一入口（**纯标准库**，装依赖前就能跑）
-tests/             708 条单元测试（pytest）
+tests/             728 条单元测试（pytest）
 tools/build_package.sh  打发布包（见下）
 运维手册.md         完整手册（部署/维护用，**不发门店**）
 门店操作手册.md     发门店的精简版（五六步，打包时进包的是这份）
