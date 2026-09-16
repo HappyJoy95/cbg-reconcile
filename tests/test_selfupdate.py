@@ -311,6 +311,47 @@ class TestWhitelist(unittest.TestCase):
         self.assertIn(".dsh", selfupdate.NEVER_TOUCH,
                       "自更新也该明说不碰 .dsh/")
 
+    def test_agent_md_is_blocked_from_both_paths(self):
+        """`agent.md` 必须同时挡在**两条路**外面：正式包 + 自更新。
+
+        ⚠ 它跟 `AGENTS.md` **不撞名** —— `AGENTS` 是六个字母（`agents.md`），
+        别以为改个大小写就是同一个文件。
+
+        为什么单独挡它，而 README / AGENTS / 运维手册 仍然照铺（那是 AGENTS.md
+        里"有意留着"的决定）：那三本是**查资料**用的，翻到也就翻到了；
+        这本是**叫人动手**的（备份、改代码、跑测试），出现在门店目录里性质不一样。
+
+        和 `.dsh/` 那条一样，同时钉住**两处**：打包脚本（排除项 + 自检断言）
+        和 `NEVER_TOUCH`。⚠ 这次还发现自检断言**漏了 `AGENTS.md`** ——
+        rsync 排除了它，但反查没查，而 AGENTS.md 正文里写着"两道"。
+        文档承诺了、代码没做，所以一并补上。
+        """
+        tools = Path(__file__).resolve().parent.parent / "tools"
+        if not tools.is_dir():
+            self.skipTest("装出来的包里没有 tools/（打包脚本不进包）—— 这条只在仓库里跑")
+        script = (tools / "build_package.sh").read_text(encoding="utf-8")
+
+        self.assertIn("--exclude 'agent.md'", script, "打包脚本没排除 agent.md")
+        self.assertIn(
+            "for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md;",
+            script,
+            "自检断言的名单和 --exclude 对不上 —— 排除项哪天被删了没人会发现")
+        self.assertIn("agent.md", selfupdate.NEVER_TOUCH,
+                      "自更新也该不碰 agent.md")
+
+    def test_never_touch_accepts_a_top_level_file(self):
+        """光把 `agent.md` 写进黑名单不够 —— 要验它**真的**被拦下来。
+
+        `NEVER_TOUCH` 的判定是 `rel.parts[0] in NEVER_TOUCH`，对**文件**同样成立
+        （顶层文件的 `parts[0]` 就是它自己的名字）。这条钉住这个前提：
+        哪天有人把判定改成"只认目录"，agent.md 会**静默地**重新开始往门店铺。
+        """
+        self._mk("agent.md")
+        self._mk("src/cli.py")
+        targets = {str(rel) for _, rel in selfupdate._targets(self.zip_root)}
+        self.assertNotIn("agent.md", targets, "agent.md 还是被铺下去了")
+        self.assertIn("src/cli.py", targets, "别把不相干的文件也拦了")
+
     def test_release_notes_python_has_no_invalid_escapes(self):
         """⚠ 发布说明那段 Python 里的反斜杠必须**写两个**。
 

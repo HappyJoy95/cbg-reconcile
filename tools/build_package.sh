@@ -64,6 +64,7 @@ rsync -a \
   --exclude '.gitignore' \
   --exclude 'README.md' \
   --exclude 'AGENTS.md' \
+  --exclude 'agent.md' \
   --exclude '运维手册.md' \
   "${ROOT}/" "${STAGE}/"
 # ⚠ `.dsh/` **必须排除** —— 它是工作区隔离区（记忆日志 / 备份 / 临时任务 /
@@ -417,10 +418,16 @@ if [ -n "${_stray}" ]; then
   fail=1
 fi
 [ -f "${STAGE}/requirements.txt" ] || { echo "    ✗ 缺 requirements.txt"; fail=1; }
-# ⚠ 这两份**不该**进包：README 是给开发者的（而且里面那节"部署到门店"讲的是
-#   手工流程，跟 install.bat 那套不一样，门店照着做会错），设计文档是技术架构。
+# ⚠ 这几份**不该**进包：README 是给开发者的（而且里面那节"部署到门店"讲的是
+#   手工流程，跟 install.bat 那套不一样，门店照着做会错），设计文档是技术架构，
+#   AGENTS.md / agent.md 是给 AI 看的开发规矩和动手指令。
 #   加这条是防止以后谁顺手又拷回去 —— 门店那边"文档越多越乱"。
-for _doc in README.md 设计文档.md 运维手册.md; do
+#
+# ⚠ 这道断言以前**漏了 `AGENTS.md`**（rsync 排除了，但反查没查它）——
+#   而 AGENTS.md 正文里写着"rsync 排除 + 反查断言，两道"，等于文档承诺了、
+#   代码没做。2026-09-16 补上，顺便加 `agent.md`。
+#   名单要和 `--exclude` 那一段**一一对上**，对不上就是下次踩坑的开始。
+for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md; do
   if [ -e "${STAGE}/${_doc}" ]; then
     echo "    ✗ 包里混进了不给门店看的文档：${_doc}（门店只看 门店操作手册.md）"
     fail=1
