@@ -103,6 +103,18 @@ class PendingLogin:
         return self.client is not None and (time.time() - self.created_at) < self.TTL
 
 
+def _fmt_ts(sec) -> str:
+    """unix 秒 → `YYYY-MM-DD HH:MM`。
+
+    ⚠ 用**本机时区**，跟前端 `fmtTs()` 一模一样 —— 两边不一致的话，
+    同一个时间在抽屉里和「玲珑授权」页上会差几个小时，看着像两个数。
+    """
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(sec)))
+    except (TypeError, ValueError):
+        return "—"
+
+
 pending_login = PendingLogin()
 capture_job = CaptureJob()
 
@@ -298,6 +310,80 @@ class App:
         elif self.check_stale(s):
             info["check_stale"] = True
         return info
+
+    def status_brief(self) -> dict:
+        """右下角那个状态抽屉要的一屏 —— **一个请求给全，话也由后端写好**。
+
+        用户 2026-09-18：「点击后的悬窗显示目前门店的名称，编码，公司云商账号状态、
+        玲珑会话状态，推送哪个通道是开着的，下面是运行一次按钮和日志窗口」。
+
+        ⚠ **别让前端自己拼**（overview + /api/erp + /api/mail + /api/wecom 四个请求）：
+        ① 那四个接口的字段名一改，抽屉就静默变空，而界面上只会显示一个「—」；
+        ② 措辞（"内置账号" / "自检失败" / "都没开"）本身就是**判断**，
+           散在前端就只能靠肉眼看，`pytest` 一条也测不到 —— 这个项目在
+           "同一件事两处各写一份"上栽过好几次。
+
+        返回的是**可以直接渲染的行**：`{label, value, kind}`，
+        `kind` 只用来上色（`ok` / `warn` / `bad` / 空）。
+        """
+        cfg = config_io.load_raw(self.config_path)
+        v = config_io.pick(cfg)
+        rows = []
+
+        def add(label, value, kind=""):
+            rows.append({"label": label, "value": value, "kind": kind})
+
+        # ---- 这台电脑是哪家店
+        erp_name = (v.get("erp_store_name") or "").strip()
+        add("门店名称", erp_name or "未配置", "" if erp_name else "bad")
+        code = (v.get("store_code") or "").strip()
+        add("华为门店编码", code or "会话默认", "" if code else "warn")
+        marker = (v.get("marker") or "").strip()
+        add("串号标识（本店码）", marker or "未配置", "" if marker else "bad")
+
+        # ---- 公司云商账号
+        # ⚠ 这一行**必须一句话说完**。第一版拆成两行（"没配置" +
+        #   "密码实际来自 ~/.dsh/secrets/erp.env"），看着自相矛盾 ——
+        #   `describe_credentials` 按设计**只读指定的那个文件**，
+        #   所以"这个文件里没有"不等于"没账号"，得把回落来源写进同一句里。
+        d = describe_credentials(self.erp_env_file())
+        src = d.get("used_from")
+        who = d.get("username") or ""
+        if d.get("builtin"):
+            add("公司云商账号", "内置账号%s" % ("（%s）" % who if who else ""), "ok")
+        elif d.get("has_password"):
+            add("公司云商账号", "已配置（%s）" % (who or "?"), "ok")
+        elif src:
+            add("公司云商账号", "可用，密码来自 %s" % src, "ok")
+        elif d.get("has_token"):
+            # 只有 token 没密码：现在能用，但 token 一过期就续不上
+            add("公司云商账号", "只有 token，没存密码 —— 过期后续不上", "warn")
+        else:
+            add("公司云商账号", "没配置", "bad")
+
+        # ---- 玲珑（华为）会话
+        s = self.session_info()
+        if not s.get("exists"):
+            add("玲珑会话", "未导入", "bad")
+        elif s.get("check_ok"):
+            add("玲珑会话", "自检通过（%s）" % _fmt_ts(s.get("checked_at")), "ok")
+        elif s.get("checked_at"):
+            add("玲珑会话", "自检失败：%s" % (s.get("check_message") or "未知原因"), "bad")
+        else:
+            add("玲珑会话", "已导入，还没自检过", "warn")
+
+        # ---- 推送通道：**开着的**才列出来，一个都没有就直说
+        chans = []
+        mc = mailer.describe_mail(self.mail_config())
+        if mc.get("enabled"):
+            chans.append("邮件" + ("" if mc.get("ready") else "（缺配置）"))
+        wc = wecom.describe_wecom(self.wecom_config())
+        if wc.get("enabled"):
+            chans.append("企业微信" + ("" if wc.get("ready") else "（缺配置）"))
+        add("推送通道", "、".join(chans) if chans else "都没开",
+            "ok" if chans else "warn")
+
+        return {"rows": rows}
 
     def cbg_client(self) -> CbgClient:
         cfg = config_io.load_raw(self.config_path)
@@ -582,6 +668,9 @@ class Handler(BaseHTTPRequestHandler):
             if app.server:
                 threading.Thread(target=app.server.shutdown, daemon=True).start()
             return self._json({"ok": True, "message": "正在停止"})
+
+        if path == "/api/status" and method == "GET":
+            return self._json(app.status_brief())
 
         if path == "/api/overview" and method == "GET":
             return self._json(app.overview())

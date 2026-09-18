@@ -226,10 +226,48 @@ function setRunDrawer(open) {
   }
 }
 
-$('#btn-drawer')?.addEventListener('click', () => setRunDrawer(true));
+$('#btn-drawer')?.addEventListener('click', () => { setRunDrawer(true); loadStatus(); });
+$('#btn-status-refresh')?.addEventListener('click', loadStatus);
 $('#btn-drawer-close')?.addEventListener('click', () => setRunDrawer(false));
 // Esc 收起 —— 抽屉盖住半屏，得给一个不用找按钮的出口
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setRunDrawer(false); });
+
+/* ────────────────────── 状态抽屉（本机状态）──────────────────────
+
+   用户 2026-09-18：「点击后的悬窗显示目前门店的名称，编码，公司云商账号状态、
+   玲珑会话状态，推送哪个通道是开着的，下面是运行一次按钮和日志窗口」。
+
+   ⚠ **判断和措辞全在后端**（`/api/status` → `App.status_brief()`），
+     前端只把 `{label, value, kind}` 画成行。放前端的话就没法用 pytest 测 ——
+     而"公司云商账号到底算配好了没"恰好是最容易写错、又最不容易看出来的那种判断
+     （`describe_credentials` 只读指定那个文件，"这个文件里没有" ≠ "没账号"）。 */
+
+const STATUS_KIND = { ok: 'ok', warn: 'warn', bad: 'bad' };
+
+function renderStatus(rows) {
+  const box = $('#status-rows');
+  if (!box) return;
+  if (!rows || !rows.length) { box.innerHTML = '<div class="hint">读不到状态</div>'; return; }
+  box.innerHTML = rows.map((r) => {
+    const k = STATUS_KIND[r.kind] || '';
+    return `<div class="kv-row">`
+      + `<span class="kv-k">${esc(r.label || '')}</span>`
+      + `<span class="kv-v ${k}">${esc(r.value == null ? '' : r.value)}</span>`
+      + `</div>`;
+  }).join('');
+}
+
+async function loadStatus() {
+  const box = $('#status-rows');
+  if (box && !box.dataset.loaded) box.innerHTML = '<div class="hint">正在读取…</div>';
+  try {
+    const d = await api('/api/status');
+    renderStatus(d && d.rows);
+    if (box) box.dataset.loaded = '1';
+  } catch (e) {
+    if (box) box.innerHTML = `<div class="hint">读不到状态：${esc(e.message)}</div>`;
+  }
+}
 
 /* ─────────────────────────── 销售达成 ───────────────────────────
 

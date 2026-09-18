@@ -510,14 +510,45 @@
 <!-- ─────────────────── 运行抽屉（常驻，任何页都能拉开）───────────────────
      用户 2026-09-18：「运行日志要一直在、且好找」。
      它**不是一个页签** —— 右下角一个把手，点开从右侧滑出，日志和「跑一次」都在里面。 -->
-<button class="drawer-fab" id="btn-drawer" aria-controls="run-drawer" aria-expanded="false">
-  运行日志</button>
-<aside class="drawer" id="run-drawer" hidden aria-label="运行">
+<!-- 右下角把手：用户 2026-09-18 给的图（蓝色 info 圆标），点了开状态抽屉。
+     ⚠ 用**内联 SVG**，不是图片文件 —— 项目没有构建步骤、也不该为它多一个静态资源；
+       而且 SVG 能跟着 CSS 缩放，`aria-label` 也写得清（原来那个字按钮
+       「运行日志」现在已经名不副实：抽屉里主要是状态信息）。 -->
+<button class="drawer-fab" id="btn-drawer" aria-controls="run-drawer" aria-expanded="false"
+        title="状态" aria-label="状态">
+  <svg viewBox="0 0 32 32" aria-hidden="true">
+    <defs>
+      <radialGradient id="fab-gloss" cx="34%" cy="26%" r="82%">
+        <stop offset="0" stop-color="#6ec1ff"/>
+        <stop offset="52%" stop-color="#1e8ff5"/>
+        <stop offset="1" stop-color="#0a6fdb"/>
+      </radialGradient>
+    </defs>
+    <circle cx="16" cy="16" r="16" fill="url(#fab-gloss)"/>
+    <circle cx="16" cy="16" r="12.6" fill="none" stroke="#fff" stroke-width="1.5"
+            opacity=".55"/>
+    <circle cx="16" cy="10.1" r="2.25" fill="#fff"/>
+    <rect x="14.35" y="14.1" width="3.3" height="9.6" rx="1.35" fill="#fff"/>
+  </svg>
+</button>
+<aside class="drawer" id="run-drawer" hidden aria-label="状态">
   <div class="drawer-head">
-    <h2>运行</h2>
+    <h2>状态</h2>
     <button class="btn ghost small" id="btn-drawer-close">收起</button>
   </div>
   <div class="drawer-body">
+    <!-- 状态信息：这台电脑是谁 / 两个授权 / 推送通道。
+         ⚠ 内容**全部由后端给**（`/api/status` → `App.status_brief()`）——
+           前端只画行，不自己判断措辞。「内置账号」「自检失败」那种判断
+           散在前端就只能靠肉眼看，pytest 一条也测不到。 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>本机状态</h2>
+        <button class="btn ghost small" id="btn-status-refresh">刷新</button>
+      </div>
+      <div class="kv" id="status-rows"><div class="hint">正在读取…</div></div>
+    </div>
+
     <!-- 原来的一级「运行」页 —— 2026-09-18 搬进常驻抽屉。 -->
     <div id="panel-run">
       <div class="card">
