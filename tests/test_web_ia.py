@@ -319,6 +319,34 @@ class Test左侧栏折叠(unittest.TestCase):
         # 开关在 <aside> **之前**
         self.assertLess(INDEX_HTML.index('id="btn-sidebar"'), side.start())
 
+    def test_开关不要框(self):
+        """⚠ 用户 2026-09-18：「这个按钮能不能不要这样，**不要框**」。
+
+        所以 `.side-toggle` 那条规则里**不许有 border / 底色 / 阴影** ——
+        它就是个箭头。hover 那圈淡蓝是"能点"的反馈，不算框。
+        （分开写一条是因为"调样式"最容易顺手把框加回来。）"""
+        i = STYLE_CSS.index(".side-toggle {")
+        rule = STYLE_CSS[i:STYLE_CSS.index("}", i)]
+        # ⚠ 正面断言"显式无框"，别用 `assertNotIn("border:", ...)` ——
+        #   `border: 0` 里**就是**含 `border:` 三个字，那样写必假红（第一版就写了）
+        self.assertIn("border: 0", rule, "折叠开关要有显式的 border: 0")
+        self.assertIn("background: none", rule, "折叠开关不该有底色")
+        self.assertNotIn("box-shadow", rule, "折叠开关不该有阴影")
+
+    def test_展开时跨在侧栏边界上(self):
+        """「展开时突出半个按钮」—— `left` 是侧栏宽 **减半个按钮**，
+        所以它一半在侧栏里、一半探到内容区。"""
+        i = STYLE_CSS.index(".side-toggle {")
+        rule = STYLE_CSS[i:STYLE_CSS.index("}", i)]
+        self.assertIn("left: calc(var(--side-w) - 13px)", rule)
+        self.assertIn("width: 26px", rule)
+
+    def test_折叠时留在左上角(self):
+        """「折叠时留个按钮」—— 侧栏没了它也得在，否则展不开。"""
+        self.assertIn("body.side-collapsed .side-toggle", STYLE_CSS)
+        i = STYLE_CSS.index("body.side-collapsed .side-toggle")
+        self.assertIn("left: 10px", STYLE_CSS[i:i + 80])
+
     def test_开关是固定定位(self):
         i = STYLE_CSS.index(".side-toggle")
         self.assertIn("position: fixed", STYLE_CSS[i:i + 400])
