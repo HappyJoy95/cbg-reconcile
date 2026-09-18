@@ -18,13 +18,19 @@
        任何页面都能拉开看日志、「跑一次」。
      * **四池比对和 POS 合规不混在一张表** —— 合规页下两个并列的二级标签。
      见 `.dsh/docs/2026-09-18-3.0.0-开发目标.md` 四·五。 -->
+<!-- 左侧栏的折叠开关（用户 2026-09-18：「加个折叠的按钮，可以把左侧的标签栏
+     折叠隐藏和展开」）。⚠ 它**必须在侧栏外面**、固定定位 ——
+     放里面的话一收起它自己也被藏了，就再也展不开。 -->
+<button class="side-toggle" id="btn-sidebar" type="button"
+        title="收起左侧栏" aria-controls="sidebar" aria-expanded="true">‹</button>
+
 <div class="shell">
   <!-- ───────────────────────── 侧边栏 ─────────────────────────
        ⚠ 2026-09-18（用户定）：改成**左右布局**，导航挪到左侧一竖列，
        而原来挂在顶栏的**门店设置 / 状态 / 版本**全部挪到**左下角**
        （`side-foot`，用 `margin-top:auto` 顶到底）。
        顶栏那条横条整个去掉了 —— 页面少一层，内容区也更宽。 -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <span class="logo">⇄</span>
       <h1>云商 ↔ 华为报量对账</h1>
@@ -62,7 +68,6 @@
         <span class="pill" id="pill-schedule" title="定时执行状态">定时</span>
         <span class="pill" id="pill-update" title="有新版本" hidden></span>
       </div>
-      <button class="btn primary block" id="btn-quick-run">立即运行</button>
     </div>
   </aside>
 

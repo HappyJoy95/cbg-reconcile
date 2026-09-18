@@ -153,13 +153,16 @@ class Test运行日志常驻抽屉(unittest.TestCase):
         self.assertIn("$('#btn-drawer')?.addEventListener", APP_JS)
         self.assertIn("$('#btn-drawer-close')?.addEventListener", APP_JS)
 
-    def test_立即运行是开抽屉不是切页签(self):
-        """⚠ 这个按钮原来是把「运行」**页签**点亮 —— 页签没了，
-        不改成开抽屉的话，点下去跑是跑了，**日志一个字看不见**。"""
-        i = APP_JS.index("$('#btn-quick-run').addEventListener")
-        block = APP_JS[i:i + 300]
-        self.assertIn("setRunDrawer(true)", block)
-        self.assertNotIn("dataset.tab === 'run'", block)
+    def test_立即运行按钮已删且没留悬空引用(self):
+        """⚠ 用户 2026-09-18：「左下那个立即运行按钮不要了」。
+
+        ⚠ **元素删了、引用必须一起删** —— 留着的话 `$('#btn-quick-run')`
+        拿到 null 再 `.addEventListener` 就抛 TypeError，
+        **它后面的整段 app.js 都不会执行**（前端没 lint，只有浏览器控制台露一行）。
+        这跟 2.x 那次 `daysAgo` 是同一类错。"""
+        self.assertNotIn('id="btn-quick-run"', INDEX_HTML)
+        used = set(re.findall(r"""\$\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)""", APP_JS))
+        self.assertNotIn("btn-quick-run", used, "按钮没了但 JS 还在引用它")
 
     def test_抽屉里的日志不被高度封顶(self):
         """`.log` 默认 `max-height: 460px` —— 抽屉里再封一次就白搬了。"""
@@ -292,7 +295,7 @@ class Test首屏加载(unittest.TestCase):
         """用户 2026-09-18：「把上面的门店设置这些放到左下角」。"""
         foot = re.search(r'<div class="side-foot">(.*?)</div>\s*</aside>',
                          INDEX_HTML, re.S).group(1)
-        for ident in ("store-line", "build-line", "pill-session", "btn-quick-run"):
+        for ident in ("store-line", "build-line", "pill-session"):
             with self.subTest(ident=ident):
                 self.assertIn('id="%s"' % ident, foot)
         # 顶栏整个去掉了
@@ -304,6 +307,46 @@ class Test首屏加载(unittest.TestCase):
         """接口没上时也要**明确说一句** —— 不能给一张空卡片。"""
         self.assertIn("function renderAttainPlaceholder", APP_JS)
         self.assertIn("还没接上数据", APP_JS)
+
+
+class Test左侧栏折叠(unittest.TestCase):
+    """用户 2026-09-18：「加个折叠的按钮，可以把左侧的标签栏折叠隐藏和展开」。"""
+
+    def test_开关在侧栏外面(self):
+        """⚠ **开关不能放在侧栏里** —— 一收起它自己也被藏了，就再也展不开。"""
+        side = re.search(r'<aside class="sidebar"[^>]*>', INDEX_HTML)
+        self.assertIsNotNone(side)
+        # 开关在 <aside> **之前**
+        self.assertLess(INDEX_HTML.index('id="btn-sidebar"'), side.start())
+
+    def test_开关是固定定位(self):
+        i = STYLE_CSS.index(".side-toggle")
+        self.assertIn("position: fixed", STYLE_CSS[i:i + 400])
+
+    def test_折叠就是藏掉侧栏(self):
+        self.assertIn("body.side-collapsed .sidebar", STYLE_CSS)
+        self.assertIn("display: none", STYLE_CSS)
+
+    def test_侧栏宽度只有一处定义(self):
+        """开关的位置靠 `--side-w` 算 —— 宽度写死两处迟早对不上。"""
+        self.assertIn("--side-w:", STYLE_CSS)
+        self.assertIn("flex: 0 0 var(--side-w)", STYLE_CSS)
+        self.assertIn("left: calc(var(--side-w) - 30px)", STYLE_CSS)
+
+    def test_有折叠逻辑且首屏就应用(self):
+        self.assertIn("function setSidebarCollapsed", APP_JS)
+        i = APP_JS.index("function setSidebarCollapsed")
+        self.assertIn("setSidebarCollapsed(sidebarCollapsed)", APP_JS[i:],
+                      "首屏没应用 —— 会先展开一下再收起（闪一下）")
+
+    def test_折叠状态记得住(self):
+        self.assertIn("localStorage", APP_JS)
+        self.assertIn("cbg-side-collapsed", APP_JS)
+
+    def test_窄屏时开关不飘在中间(self):
+        """<820px 侧栏横过来铺在上面，开关得跟着回左上角。"""
+        i = STYLE_CSS.index("@media (max-width: 820px)")
+        self.assertIn(".side-toggle", STYLE_CSS[i:i + 400])
 
 
 class Test前端不做构建步骤(unittest.TestCase):

@@ -495,12 +495,12 @@ function setRunButtons(running) {
   $$('#panel-run [data-what]').forEach((b) => { b.disabled = running; });
 }
 
-// ⚠ 2026-09-18：这里原来是把「运行」页签点亮 —— 「运行」已经不是页签了，
-//   改成**先把抽屉拉开**（日志就在里面），再开跑。
-$('#btn-quick-run').addEventListener('click', () => {
-  setRunDrawer(true);
-  startRun('all');
-});
+// ⚠ 2026-09-18（用户）：「立即运行」按钮**去掉了** ——
+//   要跑就开右下角的「运行日志」抽屉，里面那个「整个项目」就是它。
+//   ⚠ 那个按钮的 handler 也**必须一起删**：元素没了还在 JS 里对 `#btn-quick-run`
+//   取元素（`$('#…')`），拿到 null 再 `.addEventListener` 就抛 TypeError，
+//   **它后面的整段 app.js 都不会执行**（前端没 lint，只有浏览器控制台会露一行）。
+//   `TestFrontendWiring::test_every_referenced_id_exists_in_html` 也盯着这条。
 
 // 「运行」页的按钮 —— 跑哪几件事由 data-what 决定，映射表在后端
 // （src/run_daily.py 的 BUTTON_STEPS），前端**不重复一份**。
@@ -2045,6 +2045,37 @@ $('#btn-sched-install').addEventListener('click', async () => {
     loadOverview();
   } catch (e) { toast('注册失败：' + e.message, 'bad'); }
 });
+
+/* ─────────────────── 左侧栏折叠（收起来给内容区腾地方）───────────────────
+
+   用户 2026-09-18：「加个折叠的按钮，可以把左侧的标签栏折叠隐藏和展开」。
+   ⚠ 开关本身**在侧栏外面**（固定定位，见 index.html）——
+   放里面的话一收起它自己也被藏了，就再也展不开。
+   状态记在 localStorage：收起是"我要看宽表格"的意思，刷新一次就弹回来很烦。 */
+
+const SIDE_KEY = 'cbg-side-collapsed';
+
+function setSidebarCollapsed(collapsed) {
+  document.body.classList.toggle('side-collapsed', collapsed);
+  const btn = $('#btn-sidebar');
+  if (btn) {
+    btn.textContent = collapsed ? '›' : '‹';        // 箭头跟着指：收起往左、展开往右
+    btn.title = (collapsed ? '展开' : '收起') + '左侧栏';
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+  try {
+    localStorage.setItem(SIDE_KEY, collapsed ? '1' : '0');
+  } catch (e) { /* 无痕/禁用存储：记不住就记不住，不影响用 */ }
+}
+
+let sidebarCollapsed = false;
+try {
+  sidebarCollapsed = localStorage.getItem(SIDE_KEY) === '1';
+} catch (e) { /* 同上 */ }
+setSidebarCollapsed(sidebarCollapsed);   // ⚠ 首屏就得应用，不然会"闪一下再收起"
+
+$('#btn-sidebar')?.addEventListener('click', () =>
+  setSidebarCollapsed(!document.body.classList.contains('side-collapsed')));
 
 /* ───────────────────────────── 启动 ───────────────────────────── */
 
