@@ -22,7 +22,12 @@
      折叠隐藏和展开」）。⚠ 它**必须在侧栏外面**、固定定位 ——
      放里面的话一收起它自己也被藏了，就再也展不开。 -->
 <button class="side-toggle" id="btn-sidebar" type="button"
-        title="收起左侧栏" aria-controls="sidebar" aria-expanded="true">‹</button>
+        title="收起左侧栏" aria-controls="sidebar" aria-expanded="true">
+  <!-- ⚠ 箭头用 **SVG**，不用 `‹`/`›` 字形 —— 那两个字形在 Windows 的默认字体
+       里跟 mac 上长得不一样（有的字体还偏上/偏小）。收起时靠 CSS 旋转 180°，
+       JS 不用换内容。 -->
+  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>
+</button>
 
 <div class="shell">
   <!-- ───────────────────────── 侧边栏 ─────────────────────────

@@ -331,7 +331,9 @@ class Test左侧栏折叠(unittest.TestCase):
         """开关的位置靠 `--side-w` 算 —— 宽度写死两处迟早对不上。"""
         self.assertIn("--side-w:", STYLE_CSS)
         self.assertIn("flex: 0 0 var(--side-w)", STYLE_CSS)
-        self.assertIn("left: calc(var(--side-w) - 30px)", STYLE_CSS)
+        # ⚠ 只断言"位置是**算**出来的"，不钉具体像素 ——
+        #   钉死了以后调个 1px 就得改测试（第一版就写成 `- 30px`，白红一次）
+        self.assertIn("left: calc(var(--side-w)", STYLE_CSS)
 
     def test_有折叠逻辑且首屏就应用(self):
         self.assertIn("function setSidebarCollapsed", APP_JS)

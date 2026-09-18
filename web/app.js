@@ -146,7 +146,22 @@ function switchTab(tab, subtab) {
    ⚠ **菜单里的二级标签只在导航里有一份**（页内那行**去掉了**，用户定）——
    两处各写一份的话，迟早有一处不同步（这个项目为"两份定义"栽过好几次）。 */
 
+//: 鼠标离开一级菜单后**等这么久**再收 —— 见下面的注释
+const NAV_CLOSE_GRACE = 260;
+let navCloseTimer = null;
+
+function scheduleCloseNavMenus() {
+  clearTimeout(navCloseTimer);
+  navCloseTimer = setTimeout(() => closeNavMenus(), NAV_CLOSE_GRACE);
+}
+function cancelCloseNavMenus() {
+  clearTimeout(navCloseTimer);
+  navCloseTimer = null;
+}
+
 function closeNavMenus(keep) {
+  clearTimeout(navCloseTimer);
+  navCloseTimer = null;
   $$('.nav-item').forEach((item) => {
     if (item === keep) return;
     item.classList.remove('open');
@@ -158,6 +173,7 @@ function closeNavMenus(keep) {
 }
 
 function openNavMenu(item) {
+  cancelCloseNavMenus();
   const menu = item.querySelector('.nav-menu');
   const btn = item.querySelector('.tab');
   closeNavMenus(item);
@@ -167,8 +183,14 @@ function openNavMenu(item) {
 }
 
 $$('.nav-item').forEach((item) => {
+  // ⚠ 用户 2026-09-18：「鼠标在一级菜单悬停后移到二级菜单时，**慢一点就点不上**」。
+  //   两个原因，都堵上：
+  //   ① 菜单和导航之间那 8px **缝** —— 指针跨过去的一瞬间两边都不沾，
+  //      `mouseleave` 立刻触发、菜单当场收掉（CSS 里给菜单加了个透明的"桥"补住）；
+  //   ② 就算不走缝，斜着挪/挪得慢也容易碰到边 —— 所以**离开后不立刻收**，
+  //      留 `NAV_CLOSE_GRACE` 毫秒宽限期，这段时间里回到菜单/导航就撤销。
   item.addEventListener('mouseenter', () => openNavMenu(item));
-  item.addEventListener('mouseleave', () => closeNavMenus());
+  item.addEventListener('mouseleave', () => scheduleCloseNavMenus());
   // ⚠ 光靠 hover 的话**触屏机上一辈子打不开** —— 聚焦也展开一份
   item.addEventListener('focusin', () => openNavMenu(item));
   Array.from(item.querySelectorAll('[data-subtab]')).forEach((b) =>
@@ -2059,7 +2081,8 @@ function setSidebarCollapsed(collapsed) {
   document.body.classList.toggle('side-collapsed', collapsed);
   const btn = $('#btn-sidebar');
   if (btn) {
-    btn.textContent = collapsed ? '›' : '‹';        // 箭头跟着指：收起往左、展开往右
+    // 箭头方向靠 CSS 转（`.side-collapsed .side-toggle svg { rotate(180deg) }`）——
+    // JS 只管语义（title / aria），不碰像素
     btn.title = (collapsed ? '展开' : '收起') + '左侧栏';
     btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   }
