@@ -333,9 +333,19 @@ class App:
         cfg = config_io.load_raw(self.config_path)
         return (cfg.get("erp") or {}).get("env_file") or DEFAULT_ENV_FILE
 
-    def erp_client(self) -> ErpClient:
-        f = self.erp_env_file()
-        return ErpClient(load_credentials(f), env_file=f, timeout=60)
+    def erp_client(self, role: str = ROLE_COMPANY) -> ErpClient:
+        """按角色造一个云商客户端。
+
+        ⚠ `role` **必须一路传进 `ErpClient`** —— 见 `ErpClient.__init__` 那段注释：
+        不带角色的 `_save_token` 会按默认的公司账号写文件
+        （实测把公司账号整份覆盖成门店账号）。
+
+        ⚠ 目前全项目**没人调它**（`grep erp_client` 只有这一处定义）。
+        留着是因为它是 App 上"拿一个云商客户端"的正规入口；
+        将来要用请直接 `self.erp_client(ROLE_STORE)`，别再绕开角色。
+        """
+        f = _erp_env(self, role)
+        return ErpClient(load_credentials(f, role=role), env_file=f, role=role, timeout=60)
 
     # ------------------------------------------------------------------ 邮件
     MAIL_KEYS = ("enabled", "host", "port", "security", "sender", "recipients",
@@ -714,7 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             if new_comp:
                 creds["company"] = new_comp
 
-            client = ErpClient(creds, env_file=env, timeout=60)
+            client = ErpClient(creds, env_file=env, role=role, timeout=60)
             try:
                 r = client.login_and_verify(save=False)
             except ErpCaptchaRequired as e:

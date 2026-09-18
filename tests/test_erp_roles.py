@@ -190,6 +190,71 @@ class TestSaveAndDescribeByRole(unittest.TestCase):
                         "回落了就要说清实际生效的是哪个文件")
 
 
+class TestClientCarriesRole(unittest.TestCase):
+    """⚠ 这几条是**实测踩出来的**，不是推演出来的。
+
+    2026-09-18 拿门店账号（`sl18765917990`）登录验证了一次，`_save_token` 把
+    `.secrets/erp.env`（**公司账号**那份）整份覆盖成了门店账号 —— 用户名、密码、
+    token 全换了，而且**不报任何错**。原因是当时写的是
+
+        ErpClient(load_credentials(role=ROLE_STORE), env_file=f)
+
+    只给了 `creds`、没给 `role`，`_save_token` 于是按默认的 company 去写文件。
+
+    为什么四条角色测试全绿却漏了它：那些测的是 `load_credentials` /
+    `save_credentials` 自己，**而 bug 在"谁把 role 传下去"这一跳**。
+
+    → 修法不是"记得在调用处补 `role=`"（下一个人还会忘），而是让 client
+      **从 `creds` 里自己认**：`load_credentials()` 返回的字典本来就带 `role`。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.files = {erp.ROLE_COMPANY: str(self.root / "company.env"),
+                      erp.ROLE_STORE: str(self.root / "store.env")}
+        for role, path in self.files.items():
+            Path(path).write_text("ERP_USERNAME=%s\nERP_PASSWORD=pw\n" % role,
+                                  encoding="utf-8")
+
+    def _client(self, cred_role, **kw):
+        with mock.patch.multiple(erp, ROLE_ENV_FILES=self.files, LEGACY_ENV_PATHS=[]):
+            creds = erp.load_credentials(role=cred_role)
+        return erp.ErpClient(creds, **kw)
+
+    def test_只给_creds_也认得出角色(self):
+        """⚠ 就是踩过的那一行写法 —— `creds` 里带着 role，client 必须接住。"""
+        c = self._client(erp.ROLE_STORE)
+        self.assertEqual(c.role, erp.ROLE_STORE)
+
+    def test_门店登录的_token_写门店文件(self):
+        """⚠ 修之前这条会红：token 会落到 company.env 里，公司账号被覆盖。"""
+        c = self._client(erp.ROLE_STORE)
+        with mock.patch.multiple(erp, ROLE_ENV_FILES=self.files, LEGACY_ENV_PATHS=[]):
+            c._save_token("TOK-STORE")
+        self.assertIn("TOK-STORE", (self.root / "store.env").read_text(encoding="utf-8"))
+        self.assertNotIn("TOK-STORE", (self.root / "company.env").read_text(encoding="utf-8"),
+                         "门店登录把 token 写到公司账号那份文件里了")
+
+    def test_没角色的裸字典还是公司(self):
+        """老代码 `ErpClient({"username": ...})` 到处都在，必须还是公司账号。"""
+        c = erp.ErpClient({"username": "u", "password": "p", "token": ""})
+        self.assertEqual(c.role, erp.ROLE_COMPANY)
+
+    def test_显式给的_role_优先(self):
+        c = self._client(erp.ROLE_COMPANY, role=erp.ROLE_STORE)
+        self.assertEqual(c.role, erp.ROLE_STORE)
+
+    def test_web_那两处都传了_role(self):
+        """后端那两处构造点也得传 —— 双保险（client 自己能认是兜底，不是借口）。"""
+        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        for line in src.splitlines():
+            if "ErpClient(" in line and "def " not in line:
+                with self.subTest(line=line.strip()):
+                    self.assertIn("role=role", line)
+
+
 class TestWebApiRoles(unittest.TestCase):
     """HTTP 接口那一层 —— 角色要能传到底，认不出来要**报错**而不是默认成公司账号。"""
 

@@ -368,8 +368,20 @@ def _column_form(cols=SALES_COLUMNS) -> dict:
 # ------------------------------------------------------------------- 客户端
 class ErpClient:
     def __init__(self, creds: dict | None = None, timeout: int = 180, verbose: bool = False,
-                 env_file: str | None = None):
-        self.creds = creds or load_credentials(env_file)
+                 env_file: str | None = None, role: str | None = None):
+        # ⚠ **角色必须跟着 client 走**：`_save_token` 靠它决定往哪个文件写。
+        #
+        #   2026-09-18 实测踩过 —— `ErpClient(load_credentials(role=store))`
+        #   只给了 `creds`、没给 `role`，登录完 `_save_token` 就按默认的 company
+        #   写进 `.secrets/erp.env`，**把公司账号整份覆盖成门店账号**（token 也换了）。
+        #   症状很隐蔽：门店账号"配好了"，公司那边从此用门店的身份取数。
+        #
+        #   所以这里**不靠调用方记得传**：`load_credentials()` 返回的字典里本来就带
+        #   `role`，没显式给就从它那儿认。这样
+        #   `ErpClient(load_credentials(role=ROLE_STORE))` 这种写法**天然是对的**，
+        #   这个 bug 结构上不可能再犯（`tests/test_erp_roles.py::TestClientCarriesRole`）。
+        self.role = role or (creds or {}).get("role") or ROLE_COMPANY
+        self.creds = creds or load_credentials(env_file, role=self.role)
         self.timeout = timeout
         self.verbose = verbose
         self.env_file = env_file
@@ -427,7 +439,8 @@ class ErpClient:
         return token
 
     def _save_token(self, token: str):
-        save_credentials(self.env_file, token=token,
+        # ⚠ role 一定要传 —— 不传就按默认的 company 写，见 `__init__` 那段注释
+        save_credentials(self.env_file, role=self.role, token=token,
                          username=self.creds.get("username"),
                          company=self.creds.get("company"))
 
