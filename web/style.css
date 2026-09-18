@@ -98,10 +98,6 @@ body.side-collapsed .sidebar { display: none; }
 body.side-collapsed .side-toggle { left: 10px; color: var(--muted); }
 body.side-collapsed .side-toggle svg { transform: rotate(180deg); }
 
-@media (max-width: 820px) {
-  /* 横排时侧栏铺在上面，折叠开关跟着回到左上角，别飘在中间 */
-  .side-toggle { left: 12px; }
-}
 
 .pill {
   font-size: 12px; padding: 3px 10px; border-radius: 999px;
@@ -330,6 +326,10 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* 窄屏：侧边栏横过来铺在上面（别把内容挤成一条缝） */
 @media (max-width: 820px) {
+  /* ⚠ 同一个断点**只留这一个块**：原来 `.side-toggle { left: 12px }` 单独写在
+     折叠开关那段旁边，跟这里隔了 230 行 —— 改这个块的人根本看不见那一条。
+     横排时折叠开关跟着回到左上角，别飘在中间。 */
+  .side-toggle { left: 12px; }
   .shell { flex-direction: column; }
   .sidebar {
     position: static; height: auto; flex: 0 0 auto;
