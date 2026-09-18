@@ -9,23 +9,6 @@
 </head>
 <body>
 
-<header class="top">
-  <div class="brand">
-    <span class="logo">⇄</span>
-    <div>
-      <h1>云商 ↔ 华为报量对账</h1>
-      <div class="sub" id="store-line">加载中…</div>
-      <div class="sub" id="build-line" style="opacity:.55;font-size:11.5px"></div>
-    </div>
-  </div>
-  <div class="top-right">
-    <span class="pill" id="pill-session" title="华为会话状态">会话</span>
-    <span class="pill" id="pill-schedule" title="定时执行状态">定时</span>
-    <span class="pill" id="pill-update" title="有新版本" hidden></span>
-    <button class="btn primary" id="btn-quick-run">立即运行</button>
-  </div>
-</header>
-
 <!-- ⚠ 2026-09-18（用户定）：一级页签按**业务**分家 ——
      销售 / 合规 / 会话 / 通用设置。
      原来是「一个功能一个页签」（四池比对 / POS 合规 / 运行 / 会话 / 设置），
@@ -35,7 +18,19 @@
        任何页面都能拉开看日志、「跑一次」。
      * **四池比对和 POS 合规不混在一张表** —— 合规页下两个并列的二级标签。
      见 `.dsh/docs/2026-09-18-3.0.0-开发目标.md` 四·五。 -->
-<nav class="tabs">
+<div class="shell">
+  <!-- ───────────────────────── 侧边栏 ─────────────────────────
+       ⚠ 2026-09-18（用户定）：改成**左右布局**，导航挪到左侧一竖列，
+       而原来挂在顶栏的**门店设置 / 状态 / 版本**全部挪到**左下角**
+       （`side-foot`，用 `margin-top:auto` 顶到底）。
+       顶栏那条横条整个去掉了 —— 页面少一层，内容区也更宽。 -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">⇄</span>
+      <h1>云商 ↔ 华为报量对账</h1>
+    </div>
+
+    <nav class="tabs">
   <!-- ⚠ 2026-09-18（用户定，参考苹果官网那种）：**悬停只展开菜单，点击才跳**；
        二级标签**只在下拉里**，页内不再占一行。
        没有二级的（会话 / 通用设置）就是普通按钮，不挂菜单。 -->
@@ -58,7 +53,20 @@
   <button class="tab" data-tab="settings">通用设置</button>
 </nav>
 
-<main>
+    <!-- 左下角：这台电脑是谁、现在什么状态 -->
+    <div class="side-foot">
+      <div class="sub" id="store-line">加载中…</div>
+      <div class="sub mono-build" id="build-line"></div>
+      <div class="pills">
+        <span class="pill" id="pill-session" title="华为会话状态">会话</span>
+        <span class="pill" id="pill-schedule" title="定时执行状态">定时</span>
+        <span class="pill" id="pill-update" title="有新版本" hidden></span>
+      </div>
+      <button class="btn primary block" id="btn-quick-run">立即运行</button>
+    </div>
+  </aside>
+
+  <main>
 
 <!-- ───────────────────────────── 销售 ───────────────────────────── -->
 <section class="panel active" id="panel-sales">
@@ -517,6 +525,7 @@
 </section>
 
 </main>
+</div>
 
 
 <!-- ─────────────────── 运行抽屉（常驻，任何页都能拉开）───────────────────

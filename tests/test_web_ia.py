@@ -271,14 +271,34 @@ class Test首屏加载(unittest.TestCase):
 
     def _boot(self):
         i = APP_JS.index("/* ───────────────────────────── 启动")
-        return APP_JS[i:i + 500]
+        # ⚠ 切**够长** —— 这段注释本身就占好几百字符，切短了会把
+        #   `loadOverview();` 那行留在窗口外面，断言变成假绿
+        return APP_JS[i:i + 1400]
 
     def test_启动跟着当前页签(self):
         self.assertIn("switchTab(", self._boot())
 
-    def test_不再写死拉四池(self):
-        self.assertNotIn("\nloadOverview();", self._boot(),
-                         "首屏又写死拉四池了 —— 默认页不是它")
+    def test_侧边栏的状态也要拉(self):
+        """⚠ `loadOverview()` **不能删** —— 它不只是四池那页的数据，
+        侧边栏左下角的**门店名 / 会话·定时徽章**也是它填的。
+
+        第一次改版时顺手删了它，左下角就一直停在「加载中…」、徽章也没字
+        （截图抓到的）。所以两个都要：`switchTab` 管当前页内容，
+        `loadOverview` 管这一圈的常驻状态。"""
+        self.assertIn("loadOverview();", self._boot(),
+                      "删了 loadOverview → 左下角门店信息永远是「加载中…」")
+
+    def test_门店信息在左下角(self):
+        """用户 2026-09-18：「把上面的门店设置这些放到左下角」。"""
+        foot = re.search(r'<div class="side-foot">(.*?)</div>\s*</aside>',
+                         INDEX_HTML, re.S).group(1)
+        for ident in ("store-line", "build-line", "pill-session", "btn-quick-run"):
+            with self.subTest(ident=ident):
+                self.assertIn('id="%s"' % ident, foot)
+        # 顶栏整个去掉了
+        self.assertNotIn("<header", INDEX_HTML)
+        self.assertIn(".side-foot", STYLE_CSS)
+        self.assertIn("margin-top: auto", STYLE_CSS)
 
     def test_销售页的空状态渲染得出来(self):
         """接口没上时也要**明确说一句** —— 不能给一张空卡片。"""

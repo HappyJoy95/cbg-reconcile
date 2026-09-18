@@ -2055,6 +2055,12 @@ $('#btn-sched-install').addEventListener('click', async () => {
 const bootTab = (document.querySelector('.tab.active') || {}).dataset;
 switchTab((bootTab && bootTab.tab) || 'sales');
 
+// ⚠ `loadOverview()` 还得留着 —— 它不只是四池那页的数据，**侧边栏左下角的
+//   门店名 / 会话·定时徽章也是它填的**。第一次改的时候顺手删了它，
+//   结果左下角一直停在「加载中…」、徽章也没字（截图抓到的）。
+//   现在两个都要：`switchTab` 管**当前页的内容**，`loadOverview` 管**这一圈的常驻状态**。
+loadOverview();
+
 loadBrowserInfo();
 loadHwLogin();
 // 刷新页面时如果抓取还在跑，接着显示进度（别让用户以为丢了）
