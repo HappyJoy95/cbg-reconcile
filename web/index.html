@@ -60,7 +60,8 @@
       <button class="subtab" data-subtab="compliance-settings">设置</button>
     </div>
   </div>
-  <button class="tab" data-tab="session">会话</button>
+  <button class="tab" data-tab="linglong">玲珑授权</button>
+  <button class="tab" data-tab="erp">云商授权</button>
   <button class="tab" data-tab="settings">通用设置</button>
 </nav>
 
@@ -179,8 +180,60 @@
   </div>
 </section>
 
-<!-- ───────────────────────────── 会话 ───────────────────────────── -->
-<section class="panel" id="panel-session">
+<!-- ─────────────────────────── 云商授权 ───────────────────────────
+     用户 2026-09-18：「再做个云商授权，直接复用设置里的云商登录就行了」。
+     所以**原来「通用设置 → 云商账号」那张卡整张搬过来**（id 一个没改，
+     `loadConfig()` / `/api/erp/*` 那些接线原样能用）。 -->
+<section class="panel" id="panel-erp">
+<div class="card">
+    <div class="card-head">
+      <h2>云商账号</h2>
+      <span class="hint" id="erp-status"></span>
+    </div>
+    <div class="form-row"><label>账号</label>
+      <input id="erp-username" placeholder="云商登录账号" autocomplete="off"></div>
+    <div class="form-row"><label>密码</label>
+      <input type="password" id="erp-password" placeholder="云商登录密码" autocomplete="new-password">
+      <span class="hint">只存本机 <code>.secrets/erp.env</code>，界面不回显</span></div>
+    <div class="form-row"><label>公司代码</label>
+      <input id="erp-company" placeholder="00001937"></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-erp-save">保存</button>
+      <button class="btn" id="btn-erp-login">测试登录</button>
+      <span class="hint" id="erp-msg"></span>
+    </div>
+    <div id="erp-captcha" hidden>
+      <div class="banner warn" style="margin-bottom:8px">
+        云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
+      </div>
+      <div class="form-row">
+        <img id="erp-captcha-img" alt="验证码"
+             style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
+        <input id="erp-captcha-code" style="min-width:130px" placeholder="填图上的字"
+               autocomplete="off" maxlength="10">
+        <button class="btn primary" id="btn-erp-captcha">提交验证码</button>
+        <span class="hint" id="erp-captcha-msg"></span>
+      </div>
+      <p class="hint" style="margin-top:-4px">看不清就再点一次「测试登录」换一张。</p>
+    </div>
+    <div class="hint" id="erp-warn"></div>
+    <p class="hint">「测试登录」用上面填的值去换一次真 token，<b>失败不会保存</b>。
+      ⚠️ <b>别连着点</b> —— 云商连着登几次会要求图形验证码，歇几分钟再试。</p>
+    <details class="adv">
+      <summary>账号要图形验证码？手动填 token（退路）</summary>
+      <div class="form-row"><label>token</label>
+        <input id="erp-token" placeholder="浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串"
+               autocomplete="off"></div>
+      <div class="form-row">
+        <button class="btn small" id="btn-erp-token-save">只存 token</button>
+        <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 玲珑 ───────────────────────────── -->
+<section class="panel" id="panel-linglong">
   <div class="card">
     <div class="card-head">
       <h2>自动抓取 <span class="hint">（推荐，不用手抄）</span></h2>
@@ -261,51 +314,7 @@
       到「会话」页用<b>那个店的账号</b>重新抓一次。</p>
   </div>
 
-  <div class="card">
-    <div class="card-head">
-      <h2>云商账号</h2>
-      <span class="hint" id="erp-status"></span>
-    </div>
-    <div class="form-row"><label>账号</label>
-      <input id="erp-username" placeholder="云商登录账号" autocomplete="off"></div>
-    <div class="form-row"><label>密码</label>
-      <input type="password" id="erp-password" placeholder="云商登录密码" autocomplete="new-password">
-      <span class="hint">只存本机 <code>.secrets/erp.env</code>，界面不回显</span></div>
-    <div class="form-row"><label>公司代码</label>
-      <input id="erp-company" placeholder="00001937"></div>
-    <div class="form-row">
-      <button class="btn primary" id="btn-erp-save">保存</button>
-      <button class="btn" id="btn-erp-login">测试登录</button>
-      <span class="hint" id="erp-msg"></span>
-    </div>
-    <div id="erp-captcha" hidden>
-      <div class="banner warn" style="margin-bottom:8px">
-        云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
-      </div>
-      <div class="form-row">
-        <img id="erp-captcha-img" alt="验证码"
-             style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
-        <input id="erp-captcha-code" style="min-width:130px" placeholder="填图上的字"
-               autocomplete="off" maxlength="10">
-        <button class="btn primary" id="btn-erp-captcha">提交验证码</button>
-        <span class="hint" id="erp-captcha-msg"></span>
-      </div>
-      <p class="hint" style="margin-top:-4px">看不清就再点一次「测试登录」换一张。</p>
-    </div>
-    <div class="hint" id="erp-warn"></div>
-    <p class="hint">「测试登录」用上面填的值去换一次真 token，<b>失败不会保存</b>。
-      ⚠️ <b>别连着点</b> —— 云商连着登几次会要求图形验证码，歇几分钟再试。</p>
-    <details class="adv">
-      <summary>账号要图形验证码？手动填 token（退路）</summary>
-      <div class="form-row"><label>token</label>
-        <input id="erp-token" placeholder="浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串"
-               autocomplete="off"></div>
-      <div class="form-row">
-        <button class="btn small" id="btn-erp-token-save">只存 token</button>
-        <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
-      </div>
-    </details>
-  </div>
+  
 
   <div class="card">
     <div class="card-head">
@@ -536,7 +545,6 @@
 
 </main>
 </div>
-
 
 <!-- ─────────────────── 运行抽屉（常驻，任何页都能拉开）───────────────────
      用户 2026-09-18：「运行日志要一直在、且好找」。

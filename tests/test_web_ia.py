@@ -53,11 +53,16 @@ def _nav_item(tab, nxt=None):
     return INDEX_HTML[i:j]
 
 
-class Test一级页签就四个业务(unittest.TestCase):
-    """用户要的是「四个页面」—— 多一个都是没按说的做。"""
+class Test一级页签(unittest.TestCase):
+    """用户 2026-09-18 先把一级页签定成四个（销售/合规/会话/通用设置），
+    随后又加了「云商授权」（「会话」同时改名「玲珑授权」）—— 现在是五个。
 
-    def test_就四个_且顺序对(self):
-        self.assertEqual(NAV_IDS, ["sales", "compliance", "session", "settings"])
+    ⚠ 个数不是重点，**顺序和名字**才是：它们就是门店眼里的目录。
+    """
+
+    def test_顺序和名字(self):
+        self.assertEqual(NAV_IDS,
+                         ["sales", "compliance", "linglong", "erp", "settings"])
 
     def test_每个都有对应的_panel(self):
         for tab in NAV_IDS:
@@ -76,14 +81,26 @@ class Test一级页签就四个业务(unittest.TestCase):
         self.assertIn(">通用设置<", NAV)
 
 
-class Test会话保持一级入口(unittest.TestCase):
-    """**会话不能藏太深**（用户明说）—— 抓会话是门店唯一要人工介入的地方。"""
+class Test两个授权都是一级入口(unittest.TestCase):
+    """**授权不能藏太深** —— 抓登录态是门店唯一要人工介入的地方。
 
-    def test_会话是一级页签(self):
-        self.assertIn("session", NAV_IDS)
+    ⚠ 2026-09-18：「会话」改名「玲珑授权」（玲珑 = 华为那个销售系统的代号），
+    并新增「云商授权」（复用原来「通用设置 → 云商账号」那张卡）。"""
 
-    def test_会话不在任何二级标签里(self):
-        self.assertNotIn('data-subtab="session"', BODY)
+    def test_两个授权都是一级页签(self):
+        for tab in ("linglong", "erp"):
+            with self.subTest(tab=tab):
+                self.assertIn(tab, NAV_IDS)
+
+    def test_授权不在任何二级标签里(self):
+        for tab in ("linglong", "erp"):
+            with self.subTest(tab=tab):
+                self.assertNotIn('data-subtab="%s"' % tab, BODY)
+
+    def test_页签名字对(self):
+        self.assertIn(">玲珑授权<", NAV)
+        self.assertIn(">云商授权<", NAV)
+        self.assertNotIn(">会话<", NAV, "「会话」应该已经改名成「玲珑授权」了")
 
 
 class Test合规页里两块并列不混(unittest.TestCase):
@@ -97,7 +114,7 @@ class Test合规页里两块并列不混(unittest.TestCase):
     def test_两个二级标签并列(self):
         """⚠ 二级标签现在**只在顶部导航的下拉菜单里**（用户 2026-09-18 定：
         「只在下拉菜单里」）—— 所以"并列"看菜单顺序，页内那行已经去掉了。"""
-        menu = _nav_item("compliance", nxt="session")
+        menu = _nav_item("compliance", nxt="linglong")
         self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu),
                          ["pos", "pools", "compliance-settings"])
 
@@ -377,6 +394,31 @@ class Test左侧栏折叠(unittest.TestCase):
         """<820px 侧栏横过来铺在上面，开关得跟着回左上角。"""
         i = STYLE_CSS.index("@media (max-width: 820px)")
         self.assertIn(".side-toggle", STYLE_CSS[i:i + 400])
+
+
+class Test不能有重复_id(unittest.TestCase):
+    """⚠ 同一个 `id` 在 HTML 里出现两次 —— 2026-09-18 真出现过一次。
+
+    搬「云商账号」那张卡时，脚本把"从通用设置里删掉"那一步漏了
+    （`rw()` 从磁盘重读，而改过的字符串忘了写回去），结果卡片**两份**、id 也两份。
+    后果很阴：`$('#erp-status')` 只拿到**第一个**，第二份永远是空的/旧的，
+    看着像"设置没保存"。
+
+    （`test_every_referenced_id_exists_in_html` 只查"有没有"，查不出"有几份"。）
+    """
+
+    def test_每个_id只出现一次(self):
+        ids = re.findall(r"""id=["']([A-Za-z0-9_-]+)["']""", _strip_html_comments(INDEX_HTML))
+        dup = sorted({i for i in ids if ids.count(i) > 1})
+        self.assertFalse(dup, "这些 id 出现了不止一次：%s" % dup)
+
+    def test_云商账号那几个字段只有一份(self):
+        """搬卡片最容易漏删旧的 —— 单独钉一遍，出错时直接说清是哪个字段。"""
+        for ident in ("erp-status", "erp-username", "erp-password", "erp-company",
+                      "btn-erp-save", "btn-erp-login", "erp-captcha", "erp-token"):
+            with self.subTest(ident=ident):
+                self.assertEqual(INDEX_HTML.count('id="%s"' % ident), 1,
+                                 "%s 有 %d 份" % (ident, INDEX_HTML.count('id="%s"' % ident)))
 
 
 class Test前端不做构建步骤(unittest.TestCase):

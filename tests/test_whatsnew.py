@@ -71,7 +71,11 @@ class TestEveryVersionHasNotes(unittest.TestCase):
         for v, got in whatsnew.NOTES.items():
             for t in got.get("todo") or ():
                 with self.subTest(v=v, go=t.get("go")):
-                    self.assertIn(t.get("go"), whatsnew.TABS,
+                    # ⚠ 老条目里的 go 还是**改版前**的页签 id（比如 `session`），
+                    #   真正拼给前端的会被 `LEGACY_GO` 翻译一遍 ——
+                    #   这里也得按翻译后的算，否则"历史条目"永远过不了新页签表
+                    go = whatsnew.LEGACY_GO.get(t.get("go"), t.get("go"))
+                    self.assertIn(go, whatsnew.TABS,
                                   "go 必须是已知的标签页 id")
 
     def test_标签页_id_和前端对得上(self):

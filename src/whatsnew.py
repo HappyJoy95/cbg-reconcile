@@ -33,12 +33,13 @@ from pathlib import Path
 #: ⚠ **`run` 是例外**：它**不再是页签**，而是右下角那个**常驻抽屉** ——
 #: 前端 `goto()` 里对它特判（开抽屉），不特判的话门店点完什么都看不见。
 #: 测试按这两条分别断言。
-TABS = ("sales", "compliance", "run", "session", "settings")
+TABS = ("sales", "compliance", "run", "linglong", "erp", "settings")
 TAB_LABELS = {
     "sales": "销售",
     "compliance": "合规",
     "run": "运行",
-    "session": "会话",
+    "linglong": "玲珑授权",
+    "erp": "云商授权",
     "settings": "通用设置",
 }
 
@@ -52,6 +53,7 @@ TAB_LABELS = {
 LEGACY_GO = {
     "reports": "compliance",
     "pos": "compliance",
+    "session": "linglong",     # 老条目里的「会话」现在叫「玲珑授权」
 }
 
 #: 版本 → 更新日志。**新的写在最前面**（按版本号倒序看着方便）。

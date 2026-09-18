@@ -102,7 +102,12 @@ const SUBTAB_LOADERS = {
 
 //: 一级页签（没有二级的那两个）→ 切过去要拉什么
 const TAB_LOADERS = {
-  session: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
+  // 「玲珑授权」= 原来的「会话」（玲珑是华为那个销售系统的代号）——
+  // 抓登录态那三件事原样搬过来，只换了页签名
+  linglong: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
+  // 「云商授权」：云商账号那些字段还是 `/api/config` 一起回来的，
+  // 所以跟「通用设置」用同一个加载器（幂等，重复拉没事）
+  erp: () => loadConfig(),
   settings: () => loadConfig(),
 };
 
