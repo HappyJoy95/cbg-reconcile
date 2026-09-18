@@ -1,6 +1,6 @@
 'use strict';
 
-/* 云商 ↔ 华为报量对账 · 本地控制台
+/* 门店数据平台 · 本地控制台
    无框架、无构建、无 CDN —— 门店电脑断网也能用。 */
 
 const $ = (s) => document.querySelector(s);
