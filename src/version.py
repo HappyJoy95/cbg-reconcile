@@ -25,7 +25,21 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "CBG报量对账"
-VERSION = "2.1.0"           # 功能有增删就动这个；打包时间看 BUILD.txt
+VERSION = "2.1.1"           # 功能有增删就动这个；打包时间看 BUILD.txt
+                            # 2.1.1：**beta 包能升回同号的正式版**
+                            #        ① 现象：装过 `2.1.0-beta3` 的机器 VERSION
+                            #           也是 2.1.0，正式版推上去之后
+                            #           `2.1.0 > 2.1.0` 不成立 ⇒ **永远看不到
+                            #           「有新版本」，卡在 beta 上**。
+                            #           （2.0.1 那次是"顺手升一位"绕过去的，
+                            #           见下面 2.0.1 的第 ④ 条 —— 权宜；
+                            #           正式版一旦跟 beta 同号就没救了。）
+                            #        ② 规则：`远端 > 本地`，**或**
+                            #           `远端 == 本地 且 本地是 beta 包`。
+                            #           判据只能是 `BUILD.txt` 里的 beta 标记
+                            #           （版本号同号，分不出来）。
+                            #        ③ 判据抽成 `version.is_beta()`，
+                            #           `dbmigrate` 那道安全门槛也用它。
                             # 2.1.0：**四池对账（玲珑 ↔ 云商）**
                             #        ① 四个数据池同库（还是 `out/cbg-<年>.db`）：
                             #           A 玲珑销售单（已有）/ B 玲珑在库 / C 云商销售单 /
@@ -203,6 +217,35 @@ def packaged() -> bool:
     而 `BUILD.txt` 存在的意义就是区分"有线索"和"什么都没有"。
     """
     return build_id() != UNPACKAGED
+
+
+#: `BUILD.txt` 里那个 beta 标记（打包脚本写的是 `beta1 · 2026-09-18 10:20`）。
+BETA_MARK = "beta"
+
+
+def _read_build() -> str:
+    try:
+        return BUILD_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def is_beta(build: Optional[str] = None) -> bool:
+    """这台机器上跑的是不是 **beta 测试包**。
+
+    ⚠ **只能靠 `BUILD.txt` 判，不能靠 `VERSION`** —— beta 包和正式包的
+    **版本号是同号的**（beta 只是"这一版正在测"的标记，见 AGENTS.md 发版那节），
+    从版本号上根本分不出来。
+
+    `build=None` 时读本机的 `BUILD.txt`；传字符串就判那串。
+
+    ⚠ **这条判据有两处在用，所以抽成一个函数**：
+    * `dbmigrate.only_in_release` —— "beta 包不许动门店的库"（**安全门槛**）；
+    * `selfupdate.has_update` —— "beta 包能升回同号的正式版"（2.1.1 加的）。
+    各写一份的话，哪天有人改了其中一处的大小写处理，另一处会**静默失效**。
+    """
+    txt = _read_build() if build is None else build
+    return BETA_MARK in str(txt or "").lower()
 
 
 def describe() -> str:

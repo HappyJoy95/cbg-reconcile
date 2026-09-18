@@ -78,8 +78,10 @@ def only_in_release(root) -> str:
         return "没有 BUILD.txt（源码运行 / git clone）"
     if not build:
         return "BUILD.txt 是空的"
-    low = build.lower()
-    if "beta" in low:
+    # ⚠ 判据抽在 `version.is_beta()` —— `selfupdate.has_update` 用的是同一条
+    #   （那边管"beta 包能不能升回同号正式版"）。各写一份的话，
+    #   哪天有人改了其中一处的大小写处理，另一处会**静默失效**。
+    if version.is_beta(build):
         return "这是 beta 包（%s）" % build
     # ⚠ 再收一道：**正式包的 BUILD.txt 就是 `YYYY-MM-DD HH:MM`**（打包脚本写的）。
     #   不匹配这个形状的一律不做 —— 免得项目根上随便一个同名的文件又把门槛骗过去。

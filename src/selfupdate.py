@@ -35,6 +35,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 # 更新源。想换仓库改这一行即可。
 REPO = "HappyJoy95/cbg-reconcile"
@@ -199,6 +200,42 @@ def is_newer(latest: str, current: str) -> bool:
     return parse_version(latest) > parse_version(current)
 
 
+def has_update(latest: str, current: str, *, beta: Optional[bool] = None) -> bool:
+    """远端算不算"有更新" —— **含「beta 包换成同号正式版」这一条**。
+
+    ⚠ **为什么需要这一条**（用户 2026-09-18 提的，「beta可以升级到正式版」）：
+    beta 包和正式包的**版本号是同号的**（beta 只是"这一版正在测"的标记），
+    所以装过 `2.1.0-beta3` 的机器 `VERSION` **也是 2.1.0** ——
+    正式版推上去之后 `2.1.0 > 2.1.0` 不成立 ⇒
+    **那台机器永远看不到「有新版本」，卡在 beta 上再也升不上来**。
+
+    （2.0.1 那次的"解法"是**顺手把版本号升一位**绕过去 —— 见
+    `src/version.py` 注释 ④。那是权宜：每发一次正式版都得多升一个号，
+    而且**正式版一旦跟 beta 同号就没救了**，2026-09-18 这次就是。）
+
+    现在的规则：
+
+        有更新 = 远端 > 本地                    ← 原有
+              或 远端 == 本地 且 本地是 beta 包   ← 新增
+
+    **为什么"同号也算"可以放宽**：GitHub 上只有一条 `main`，它**就是正式线**，
+    从那儿下下来的必然是正式包；而且 `apply_update` 装完会把 `BUILD.txt`
+    重写成 `GitHub main · v2.1.1`（不含 beta）⇒ 判据回到"远端 > 本地"，
+    **不会反复提示**。
+
+    ⚠ **不能写成 `>=`**：本地在测**更高版本**的 beta（比如 2.2.0）时，
+    不能反过来提示"降级到 2.1.1"。
+
+    `beta=None` 时读本机的 `BUILD.txt`（`version.is_beta()`）。
+    """
+    if is_newer(latest, current):
+        return True
+    if beta is None:
+        from . import version                      # 延迟 import：本模块要能被单独 import
+        beta = version.is_beta()
+    return bool(beta) and parse_version(latest) == parse_version(current)
+
+
 def _version_in_text(text: str) -> str:
     m = re.search(r'^VERSION\s*=\s*"([^"]+)"', text or "", re.M)
     if not m:
@@ -358,7 +395,7 @@ def check(root, current: str, *, force: bool = False, timeout: int = 15) -> dict
     info = {"at": now, "current": current, "repo": REPO, "web": WEB_URL}
     try:
         latest = remote_version(timeout=timeout)
-        info.update({"latest": latest, "has_update": is_newer(latest, current),
+        info.update({"latest": latest, "has_update": has_update(latest, current),
                      "checked_at": now})
     except UpdateError as e:
         # ⚠ `at`（"下次还查不查"）和 `checked_at`（"上次真问到了是什么时候"）
@@ -376,11 +413,15 @@ def _recompute(cached: dict, current: str) -> dict:
     """缓存里的 `has_update` 是按**当时的版本**算的 —— 升级之后要重算。
 
     不重算的话：升到最新版了，界面还在说"有新版本"（缓存 6 小时）。
+
+    ⚠ **两条路必须用同一个判据**：`check()` 是后台每天查一次的，
+    这里是**界面每次刷新读的**（`cached()`）。只改一条的话，
+    后台说"有更新"而界面照样显示"已是最新" —— 而那正是门店唯一看得到的地方。
     """
     out = dict(cached)
     if out.get("latest"):
         out["current"] = current
-        out["has_update"] = is_newer(out["latest"], current)
+        out["has_update"] = has_update(out["latest"], current)
     return out
 
 

@@ -54,6 +54,81 @@ class TestVersionCompare(unittest.TestCase):
         self.assertTrue(selfupdate.is_newer("1.3", "1.2.9"))
 
 
+class TestBetaCanUpgradeToRelease(unittest.TestCase):
+    """⭐ 2.1.1 的主线：**beta 包能升回同号的正式版**。
+
+    用户 2026-09-18：「还有个设定，beta可以升级到正式版，做到2.1.1吧」。
+
+    **现象（真卡住了）**：装过 `2.1.0-beta3` 的机器 `VERSION` **也是 2.1.0**
+    （beta 只是"这一版正在测"的标记），正式版推上去之后
+    `2.1.0 > 2.1.0` 不成立 ⇒ **那台机器永远看不到「有新版本」**，
+    再也不会自己升上来。
+
+    判据只能是 `BUILD.txt` 里的 beta 标记 —— 版本号同号，从号上分不出来。
+    """
+
+    def test_本地是beta_远端同号_算有更新(self):
+        self.assertTrue(selfupdate.has_update("2.1.0", "2.1.0", beta=True))
+
+    def test_本地是正式包_远端同号_不算(self):
+        """⚠ 原本就对，**别改坏** —— 这条错了会让所有正常门店
+        反复收到"有新版本"，点更新又是同一版。"""
+        self.assertFalse(selfupdate.has_update("2.1.0", "2.1.0", beta=False))
+
+    def test_远端更高两种本地都算(self):
+        self.assertTrue(selfupdate.has_update("2.1.1", "2.1.0", beta=False))
+        self.assertTrue(selfupdate.has_update("2.1.1", "2.1.0", beta=True))
+
+    def test_远端更低_不许提示降级(self):
+        """⚠ 本地在测**更高版本**的 beta（比如 2.2.0）时，
+        不能反过来提示"降级到 2.1.1" —— 所以判据是 `==` 不是 `>=`。"""
+        self.assertFalse(selfupdate.has_update("2.1.1", "2.2.0", beta=True))
+
+    def test_不给_beta_参数时读本机_BUILD_txt(self):
+        """⚠ 界面那条路（`cached` → `_recompute`）**不传 beta** ——
+        它得靠 `version.is_beta()` 自己读 `BUILD.txt`。
+        这条钉住"默认值真的读了本机状态"，不然两条路会一个说有一个说没有。
+        """
+        from src import version as V
+        with tempfile.TemporaryDirectory() as d:
+            bf = Path(d) / "BUILD.txt"
+            with mock.patch.object(V, "BUILD_FILE", bf):
+                bf.write_text("beta3 · 2026-09-18 10:20", encoding="utf-8")
+                self.assertTrue(selfupdate.has_update("2.1.1", "2.1.1"))
+                self.assertFalse(selfupdate.is_newer("2.1.1", "2.1.1"),
+                                 "前提：光比版本号是「不算」的")
+                bf.write_text("2026-09-18 11:00", encoding="utf-8")
+                self.assertFalse(selfupdate.has_update("2.1.1", "2.1.1"))
+
+    def test_两条路用同一个判据(self):
+        """⚠⚠ `check()` 是**后台每天查一次**的，`_recompute()` 是
+        **界面每次刷新读的**（`cached()`）。只改一条的话，
+        后台说"有更新"、界面照样显示"已是最新" ——
+        而那正是门店唯一看得到的地方。两条都得走 `has_update()`。
+        """
+        from src import version as V
+        with tempfile.TemporaryDirectory() as d:
+            bf = Path(d) / "BUILD.txt"
+            bf.write_text("beta1 · 2026-09-18 10:20", encoding="utf-8")
+            with mock.patch.object(V, "BUILD_FILE", bf):
+                out = selfupdate._recompute({"latest": "2.1.1", "at": 1}, "2.1.1")
+                self.assertTrue(out["has_update"], "_recompute 没走新判据（界面会说已是最新）")
+
+    def test_更新装完就不再提示(self):
+        """⚠ 这是"不会反复提示"的保证：`apply_update` 装完把 `BUILD.txt`
+        重写成 `GitHub main · v2.1.1`（**不含 beta**）⇒ 判据回到「远端 > 本地」。
+
+        不成立的话门店会陷入"更新完还说有新版本、点了又是同一版"的死循环。
+        """
+        from src import version as V
+        with tempfile.TemporaryDirectory() as d:
+            bf = Path(d) / "BUILD.txt"
+            bf.write_text("GitHub main · v2.1.1", encoding="utf-8")
+            with mock.patch.object(V, "BUILD_FILE", bf):
+                self.assertFalse(V.is_beta(), "自更新写的那行不该被判成 beta")
+                self.assertFalse(selfupdate.has_update("2.1.1", "2.1.1"))
+
+
 class TestCheck(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
