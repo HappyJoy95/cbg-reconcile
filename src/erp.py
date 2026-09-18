@@ -109,32 +109,25 @@ LEGACY_ENV_PATHS = [
 
 DEFAULT_ENV_FILE = ".secrets/erp.env"
 
-#: 两个云商账号（用户 2026-09-18：「需要存两个云商账号，一个是门店的账号，
-#: 用来获取门店登录信息，一个是我的最高权限账号，用来拉取全公司的数据」）。
+#: 云商账号**只有一个**（公司账号，最高权限，能拉全公司数据）。
 #:
-#: * **公司账号**（最高权限）—— 拉**全公司**的数据（池C/池D 那些 `全部门店·云商…`）。
-#: * **门店账号** —— 本店的。
+#: 2026-09-18 一度做过"两个账号"（公司 + 门店），当天就被用户砍掉了：
+#: 「我想了想，不要门店云商账号了，没必要」。
+#: ⚠ 实测也证明门店账号没必要 —— 除了组织架构树，**销售明细 / 仓库列表 /
+#: 公司门店对照两边返回的一模一样**（公司账号 41 家店 vs 门店账号 1 家店那条
+#: 只影响"认本店是哪家"，而那个改用门店名单表解决了，见 `config/stores.yaml`）。
 #:
-#: ⚠ **公司账号要回落读老的 `.secrets/erp.env`**（见 `_role_chain`）：
-#: 门店电脑上现成就配着那一个账号，而且它本来就是能看全公司的那个 ——
-#: 不回落的话，14 家店升级完就"没账号了"，而界面上只会显示一行空。
-ROLE_COMPANY = "company"
-ROLE_STORE = "store"
-ROLES = (ROLE_COMPANY, ROLE_STORE)
-ROLE_LABELS = {
-    ROLE_COMPANY: "公司账号（最高权限）",
-    ROLE_STORE: "门店账号",
-}
-#: 角色 → 配置文件（相对项目根）。
+#: 现在的凭据来源（低 → 高，后面的覆盖前面的）：
+#: `~/.dsh/secrets/erp.env` → `.secrets/erp.env` → 配置里指定的文件 → 环境变量，
+#: 一个都没有时兜到**内置账号**（见下）。
 #:
-#: ⚠ **公司账号就沿用它原来那个 `.secrets/erp.env`** ——
-#: 门店机器上现成配着的那一个本来就是能看全公司的（实测它能拉到 42 家店的销售），
-#: 另起一个 `erp-company.env` 只会让 14 家店升级完"没账号了"。
-#: **门店账号是新文件**，谁都不受影响。
-ROLE_ENV_FILES = {
-    ROLE_COMPANY: DEFAULT_ENV_FILE,          # .secrets/erp.env（沿用）
-    ROLE_STORE: ".secrets/erp-store.env",    # 新增
-}
+#: ⚠ **回落链是故意的**：门店电脑上现成配着 `.secrets/erp.env` 那个账号，
+#: 不回落的话 14 家店升级完就"没账号了"，而界面上只会显示一行空。
+DEFAULT_ENV_FILE = ".secrets/erp.env"
+
+#: 环境变量名 —— 不带前缀的老名字（开发机 / CI 一直是那么配的）
+_CRED_KEYS = ("TOKEN", "USERNAME", "PASSWORD", "COMPANY_CODE")
+
 # ---------------------------------------------------------------- 内置公司账号
 #: 公司账号的**内置默认值**（用户 2026-09-18：「后端默认用 sL18917405716…」）。
 #:
@@ -169,11 +162,6 @@ def _deobfuscate(blob: str) -> str:
         return ""
 
 
-#: 角色 → 环境变量前缀。**公司账号额外认不带前缀的老名字**（`ERP_USERNAME` 等）
-ROLE_ENV_PREFIX = {ROLE_COMPANY: "ERP_COMPANY_", ROLE_STORE: "ERP_STORE_"}
-_CRED_KEYS = ("TOKEN", "USERNAME", "PASSWORD", "COMPANY_CODE")
-
-
 def resolve_env_path(env_file: str | None = None) -> Path:
     """相对路径按**项目根**解析（cwd 不可靠：门店电脑上可能从别处启动）。"""
     return envfile.resolve(env_file or DEFAULT_ENV_FILE, _ROOT)
@@ -200,39 +188,30 @@ def _parse_env_file(path: Path) -> dict:
     return envfile.parse(path)
 
 
-def _role_chain(role: str, extra_env_file: str | None = None):
-    """按**从低到高**的优先级列出这个角色要读的文件（后面的覆盖前面的）。
+def env_chain(extra_env_file: str | None = None) -> list[Path]:
+    """按**从低到高**的优先级列出要读的文件（后面的覆盖前面的）。
 
-    * **公司账号**：老路径（`~/.dsh/secrets/erp.env` → `.secrets/erp.env`）
-      → `.secrets/erp-company.env` → 显式指定的文件。
-      回落老路径是**故意**的，见 `ROLE_COMPANY` 的注释。
-    * **门店账号**：只有 `.secrets/erp-store.env`（+ 显式指定的）。
-      **故意不回落到老文件** —— 那是公司账号，拿它冒充门店账号
-      会让"这台机器到底用哪个账号"变得谁也说不清。
+    ⚠ **保序去重**：`LEGACY_ENV_PATHS` 里 `Path.cwd()/.secrets/erp.env` 和
+    `_ROOT/.secrets/erp.env` 在"从项目根启动"时是**同一个文件**，不去重它会出现两次。
+    重复本身无害（`merged.update` 幂等），但 `effective_env_file` 报的"实际来自"
+    看着会莫名其妙 —— 同一份文件凭什么算两个来源。
     """
-    if role not in ROLES:
-        raise ValueError("不认识的角色：%r（只认 %s）" % (role, "、".join(ROLES)))
-    chain = list(reversed(LEGACY_ENV_PATHS)) if role == ROLE_COMPANY else []
-    role_file = resolve_env_path(ROLE_ENV_FILES[role])
-    # ⚠ 去重后再补 —— 公司账号的角色文件**就是**老链里那个 `.secrets/erp.env`，
-    #   不去重的话它会被插两次（虽然结果一样，但 `effective_env_file` 看着莫名其妙）
-    chain = [p for p in chain if p != role_file] + [role_file]
+    chain: list[Path] = []
+    for p in reversed(LEGACY_ENV_PATHS):
+        if p not in chain:
+            chain.append(p)
     if extra_env_file:
         specified = resolve_env_path(extra_env_file)
         chain = [p for p in chain if p != specified] + [specified]
     return chain
 
 
-def role_env_file(role: str = ROLE_COMPANY) -> Path:
-    """这个角色**该写哪个文件**（界面上的「实际来自」也按它算）。"""
-    if role not in ROLES:
-        raise ValueError("不认识的角色：%r（只认 %s）" % (role, "、".join(ROLES)))
-    return resolve_env_path(ROLE_ENV_FILES[role])
+#: 老名字。`_role_chain` 随"两个账号"一起删了，这里留个别名免得外面还得改一轮。
+_env_chain = env_chain
 
 
-def load_credentials(extra_env_file: str | None = None,
-                     role: str = ROLE_COMPANY) -> dict:
-    """优先级：环境变量 > 指定文件 > 角色文件 > 老文件（仅公司账号） > ~/.dsh/secrets/erp.env
+def load_credentials(extra_env_file: str | None = None) -> dict:
+    """优先级：环境变量 > 指定文件 > `.secrets/erp.env` > `~/.dsh/secrets/erp.env`
 
     ⚠ **整份都是空值的文件直接跳过**（安装时生成的空模板）。项目里的
     `.secrets/erp.env` 就是这样一个模板：四个键都在、值全是空串。
@@ -246,27 +225,22 @@ def load_credentials(extra_env_file: str | None = None,
     所以粒度是**整个文件**，不是单个键。
     """
     merged: dict = {}
-    for p in _role_chain(role, extra_env_file):
+    for p in env_chain(extra_env_file):
         d = _parse_env_file(p)
         if not any(str(v).strip() for v in d.values()):
             continue                      # 空模板：不参与覆盖
         merged.update(d)
-    # 环境变量最高优先级。公司账号额外认不带前缀的老名字（`ERP_USERNAME` 等）——
-    # 开发机/CI 里一直是那么配的，别让升级把它们弄丢。
-    prefixes = [ROLE_ENV_PREFIX[role]]
-    if role == ROLE_COMPANY:
-        prefixes.append("ERP_")
-    for prefix in prefixes:
-        for key in _CRED_KEYS:
-            name = prefix + key
-            if os.environ.get(name):
-                merged["ERP_" + key] = os.environ[name]
+    for key in _CRED_KEYS:                # 环境变量最高优先级
+        if os.environ.get("ERP_" + key):
+            merged["ERP_" + key] = os.environ["ERP_" + key]
     username = merged.get("ERP_USERNAME", "")
     password = merged.get("ERP_PASSWORD", "")
-    # ⚠ **公司账号什么都没有时兜到内置那一对**（用户 2026-09-18：
+    # ⚠ **什么都没有时兜到内置那一对**（用户 2026-09-18：
     #   「后端默认用 sL18917405716…」）—— 这样新装的机器开箱就能拉全公司数据，
-    #   门店不用手填。门店账号**不兜**：它本来就该是每家店自己的。
-    if role == ROLE_COMPANY and not (username and password):
+    #   门店不用手填。注意"兜"是**逐项**的：只配了账号没配密码时，
+    #   密码那一半也会兜进来（否则就是个永远登不上的半截配置）。
+    builtin = not (username and password)
+    if builtin:
         username = username or _deobfuscate(_BUILTIN_COMPANY_USER)
         password = password or _deobfuscate(_BUILTIN_COMPANY_PASS)
     return {
@@ -274,49 +248,35 @@ def load_credentials(extra_env_file: str | None = None,
         "username": username,
         "password": password,
         "company": merged.get("ERP_COMPANY_CODE") or DEFAULT_COMPANY,
-        "role": role,
         # True = 这一对**是内置兜底来的**（没有任何文件/环境变量给过）
-        "builtin": bool(username) and not (merged.get("ERP_USERNAME")
-                                           or merged.get("ERP_PASSWORD")),
+        "builtin": builtin,
     }
 
 
-def _env_chain(extra_env_file: str | None = None,
-               role: str = ROLE_COMPANY) -> list[Path]:
-    """`_role_chain` 的老名字（默认公司账号，行为跟以前一致）。"""
-    return _role_chain(role, extra_env_file)
-
-
-def effective_env_file(extra_env_file: str | None = None,
-                       role: str = ROLE_COMPANY) -> Path | None:
+def effective_env_file(extra_env_file: str | None = None) -> Path | None:
     """**密码**实际来自哪个文件。
 
     只看密码：token 是跑一次就有的缓存，而密码才是人要编辑的东西 ——
     界面提示"实际用的是别处"时，指的应该是密码来源。
     """
-    for p in reversed(_env_chain(extra_env_file, role)):
+    for p in reversed(env_chain(extra_env_file)):
         if _parse_env_file(p).get("ERP_PASSWORD"):
             return p
     return None
 
 
-def describe_credentials(env_file: str | None = None,
-                         role: str = ROLE_COMPANY) -> dict:
+def describe_credentials(env_file: str | None = None) -> dict:
     """给界面看的凭据状态。
 
     **只读指定的那个文件** —— 不能走回落链，否则配置文件明明是空的，
     界面却因为读到了别处的凭据而显示"已配置"，人会一头雾水。
     真有回落时用 `used_from` 如实说明。
     """
-    # ⚠ 不传 env_file 时按**角色自己的文件** —— 以前写死 `DEFAULT_ENV_FILE`，
-    #   加了两个角色之后还那样就是"门店账号也去读公司那个文件"。
-    path = resolve_env_path(env_file) if env_file else role_env_file(role)
+    path = resolve_env_path(env_file)
     d = _parse_env_file(path)
     tok = d.get("ERP_TOKEN", "")
-    src = effective_env_file(env_file, role)
+    src = effective_env_file(env_file)
     return {
-        "role": role,
-        "role_label": ROLE_LABELS.get(role, role),
         "env_file": str(path),
         "exists": path.exists(),
         "username": d.get("ERP_USERNAME", ""),
@@ -325,13 +285,14 @@ def describe_credentials(env_file: str | None = None,
         "has_token": bool(tok),
         "token": f"{tok[:6]}…{tok[-4:]}" if len(tok) > 12 else "",
         "used_from": "" if (src is None or src == path) else str(src),
+        # 没有任何文件/环境变量给过凭据 → 用的是**内置公司账号**
+        "builtin": bool(load_credentials(env_file).get("builtin")),
     }
 
 
 def save_credentials(env_file: str | None = None, *, username=None, password=None,
-                     company=None, token=None, clear_token: bool = False,
-                     role: str = ROLE_COMPANY) -> Path:
-    """写回 .secrets/erp.env —— **定点替换，保留注释**。
+                     company=None, token=None, clear_token: bool = False) -> Path:
+    """写回 `.secrets/erp.env` —— **定点替换，保留注释**。
 
     只传要改的字段；传 None 表示不动它。
     改了账号或密码时应当 clear_token=True —— 旧 token 属于旧账号。
@@ -347,10 +308,7 @@ def save_credentials(env_file: str | None = None, *, username=None, password=Non
         updates["ERP_TOKEN"] = token
     if clear_token and "ERP_TOKEN" not in updates:
         updates["ERP_TOKEN"] = ""
-    # ⚠ 不传 env_file 就写**角色自己的文件** —— 以前写死 `DEFAULT_ENV_FILE`，
-    #   加了角色之后还那样就会"改门店账号、结果把公司账号覆盖了"。
-    return envfile.update(resolve_env_path(env_file) if env_file else role_env_file(role),
-                          updates)
+    return envfile.update(resolve_env_path(env_file), updates)
 
 
 def _column_form(cols=SALES_COLUMNS) -> dict:
@@ -368,20 +326,13 @@ def _column_form(cols=SALES_COLUMNS) -> dict:
 # ------------------------------------------------------------------- 客户端
 class ErpClient:
     def __init__(self, creds: dict | None = None, timeout: int = 180, verbose: bool = False,
-                 env_file: str | None = None, role: str | None = None):
-        # ⚠ **角色必须跟着 client 走**：`_save_token` 靠它决定往哪个文件写。
-        #
-        #   2026-09-18 实测踩过 —— `ErpClient(load_credentials(role=store))`
-        #   只给了 `creds`、没给 `role`，登录完 `_save_token` 就按默认的 company
-        #   写进 `.secrets/erp.env`，**把公司账号整份覆盖成门店账号**（token 也换了）。
-        #   症状很隐蔽：门店账号"配好了"，公司那边从此用门店的身份取数。
-        #
-        #   所以这里**不靠调用方记得传**：`load_credentials()` 返回的字典里本来就带
-        #   `role`，没显式给就从它那儿认。这样
-        #   `ErpClient(load_credentials(role=ROLE_STORE))` 这种写法**天然是对的**，
-        #   这个 bug 结构上不可能再犯（`tests/test_erp_roles.py::TestClientCarriesRole`）。
-        self.role = role or (creds or {}).get("role") or ROLE_COMPANY
-        self.creds = creds or load_credentials(env_file, role=self.role)
+                 env_file: str | None = None):
+        # ⚠ 这里一度有个 `role` 参数（两个账号那会儿）。删掉的原因见 `DEFAULT_ENV_FILE`
+        #   上面那段 —— 现在只有一个账号，`_save_token` 写哪个文件没有第二种可能。
+        #   （当时它踩过的坑值得记着：`ErpClient` 只拿到 `creds`、没拿到 `role`，
+        #    登录完把**公司账号那份文件整份覆盖成门店账号**，还不报错。
+        #    教训是"参数化的东西，测了被调用者不等于测了调用链"。）
+        self.creds = creds or load_credentials(env_file)
         self.timeout = timeout
         self.verbose = verbose
         self.env_file = env_file
@@ -439,8 +390,7 @@ class ErpClient:
         return token
 
     def _save_token(self, token: str):
-        # ⚠ role 一定要传 —— 不传就按默认的 company 写，见 `__init__` 那段注释
-        save_credentials(self.env_file, role=self.role, token=token,
+        save_credentials(self.env_file, token=token,
                          username=self.creds.get("username"),
                          company=self.creds.get("company"))
 

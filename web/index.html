@@ -66,7 +66,6 @@
     <div class="nav-menu" hidden>
       <button class="subtab" data-subtab="general">通用</button>
       <button class="subtab" data-subtab="linglong">玲珑授权</button>
-      <button class="subtab" data-subtab="erp">云商授权</button>
     </div>
   </div>
 </nav>
@@ -186,10 +185,10 @@
   </div>
 </section>
 
-<!-- ─────────────────────────── 云商授权 ───────────────────────────
-     用户 2026-09-18：「再做个云商授权，直接复用设置里的云商登录就行了」。
-     所以**原来「通用设置 → 云商账号」那张卡整张搬过来**（id 一个没改，
-     `loadConfig()` / `/api/erp/*` 那些接线原样能用）。 -->
+<!-- ⚠ 「云商授权」这个二级标签 2026-09-18 当天就删了 ——
+     用户先说「不要门店云商账号了，没必要」，而公司账号早就改成后端内置、
+     界面上不显示。两个都没了，那一页就是空的。
+     云商账号现在只在 `.secrets/erp.env`（或内置兜底）里，界面上没有入口。 -->
 
 
 <!-- ───────────────────────────── 设置 ───────────────────────────── -->
@@ -503,60 +502,6 @@
       </div>
     </div>
 
-    <div class="subpanel" id="subpanel-erp">
-
-
-    <div class="card">
-        <p class="hint" style="margin:-6px 0 12px 0">
-          本店自己的云商账号（取<b>门店的登录信息</b>用）。<br>
-          拉全公司数据用的<b>公司账号</b>不在这里 —— 它由后端内置，不用填、界面也不显示；
-          两个账号<b>分开存</b>（两个文件），互不影响。
-        </p>
-        <div class="card-head">
-          <h2>门店账号</h2>
-          <span class="hint" id="erp-store-status"></span>
-        </div>
-        <div class="form-row"><label>账号</label>
-          <input id="erp-store-username" placeholder="云商登录账号" autocomplete="off"></div>
-        <div class="form-row"><label>密码</label>
-          <input type="password" id="erp-store-password" placeholder="云商登录密码" autocomplete="new-password">
-          <span class="hint">只存本机 <code>.secrets/erp-store.env</code>，界面不回显</span></div>
-        <div class="form-row"><label>公司代码</label>
-          <input id="erp-store-company" placeholder="00001937"></div>
-        <div class="form-row">
-          <button class="btn primary" id="btn-erp-store-save">保存</button>
-          <button class="btn" id="btn-erp-store-login">测试登录</button>
-          <span class="hint" id="erp-store-msg"></span>
-        </div>
-        <div id="erp-store-captcha" hidden>
-          <div class="banner warn" style="margin-bottom:8px">
-            云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
-          </div>
-          <div class="form-row">
-            <img id="erp-store-captcha-img" alt="验证码"
-                 style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
-            <input id="erp-store-captcha-code" style="min-width:130px" placeholder="填图上的字"
-                   autocomplete="off" maxlength="10">
-            <button class="btn primary" id="btn-erp-store-captcha">提交验证码</button>
-            <span class="hint" id="erp-store-captcha-msg"></span>
-          </div>
-          <p class="hint" style="margin-top:-4px">看不清就再点一次「测试登录」换一张。</p>
-        </div>
-        <div class="hint" id="erp-store-warn"></div>
-        <p class="hint">「测试登录」用上面填的值去换一次真 token，<b>失败不会保存</b>。
-          ⚠️ <b>别连着点</b> —— 云商连着登几次会要求图形验证码，歇几分钟再试。</p>
-        <details class="adv">
-          <summary>账号要图形验证码？手动填 token（退路）</summary>
-          <div class="form-row"><label>token</label>
-            <input id="erp-store-token" placeholder="浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串"
-                   autocomplete="off"></div>
-          <div class="form-row">
-            <button class="btn small" id="btn-erp-store-token-save">只存 token</button>
-            <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
-          </div>
-        </details>
-      </div>
-    </div>
 </section>
 
 </main>

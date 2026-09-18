@@ -90,7 +90,7 @@ const SUBTABS = {
   compliance: ['pos', 'pools', 'compliance-settings'],
   // ⚠ 2026-09-18（用户）：「把玲珑授权和云商授权做到设置的二级标签里面」——
   //   两个授权从一级页签降成「通用设置」的二级标签，一级回到三个。
-  settings: ['general', 'linglong', 'erp'],
+  settings: ['general', 'linglong'],
 };
 
 //: 二级标签 → 切过去要拉什么。key 必须在 HTML 里有 `data-subtab="key"`。
@@ -104,8 +104,6 @@ const SUBTAB_LOADERS = {
   general: () => loadConfig(),
   // 玲珑授权 = 原来的「会话」页（抓登录态那三件事）
   linglong: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
-  // 云商授权：账号字段还是 `/api/config` + `/api/erp` 一起回来的
-  erp: () => loadErpAll(),
 };
 
 //: 每个一级页签**上次停在哪个二级标签** —— 切回来还落在那儿。
@@ -794,196 +792,21 @@ $('#btn-clear-curl').addEventListener('click', () => {
   $('#curl-input').value = ''; $('#import-result').innerHTML = '';
 });
 
-/* ─────────────────── 云商账号（两个角色：公司 / 门店）───────────────────
+/* ───────────────────── 云商账号：界面上没有了 ─────────────────────
 
-   用户 2026-09-18：「需要存两个云商账号，一个是门店的账号，用来获取门店登录信息，
-   一个是我的最高权限账号，用来拉取全公司的数据」。
-   两个账号**存两个文件**（`.secrets/erp.env` / `.secrets/erp-store.env`），
-   所以下面**全部按角色参数化**，逻辑只写一份。
+   2026-09-18 一天之内走了个来回，最后**一个输入框都不留**：
 
-   ⚠ 但**界面上只有门店账号那一张卡**：用户 2026-09-18 后来定了
-   「公司账号前端不显示吧，后端默认用 sL18917405716」——
-   公司账号改成后端内置，前端不再有它的输入框（见 `ERP_ROLES`）。
+   1. 用户先说「需要存两个云商账号，一个是门店的账号…一个是我的最高权限账号」→
+      做了两张卡（`erp-*` 公司 / `erp-store-*` 门店）；
+   2. 然后说「公司账号前端不显示吧，后端默认用 sL18917405716」→ 删公司那张；
+   3. 最后说「我想了想，不要门店云商账号了，没必要」→ **门店那张也删**。
 
-   ⚠ 公司账号**沿用原来那套 id**（`erp-*` / `btn-erp-*`）：那张卡在门店机器上
-   已经跑熟了，重命名等于把接线整段重接一遍，平白多一层风险。
-   门店账号用 `erp-store-*` / `btn-erp-store-*`。 */
+   所以现在云商账号**只在内置兜底 + `.secrets/erp.env` 里**，界面上没有任何入口。
+   要换账号就手改 `.secrets/erp.env`（或 `~/.dsh/secrets/erp.env`）。
 
-//: 界面上**只画门店账号**。用户 2026-09-18：「公司账号前端不显示吧，
-//: 后端默认用 sL18917405716」—— 公司账号改成后端内置（`erp._BUILTIN_*`），
-//: 前端没有它的输入框，所以**别把这个数组加回 'company'**：
-//: 加了 `loadErp('company')` 会去 `#erp-username` 上取 null 当场报错。
-//: ⚠ 注释里别写出**美元符加括号的那种完整取法** —— `test_every_referenced_id_exists_in_html`
-//:   是按那个字面去扫 app.js 的，扫到就报"引用了不存在的 id"（我在这条注释上连踩两次）。
-const ERP_ROLES = ['store'];
-//: 角色 → 控件 id。`company` 那一行**留着但前端没卡片**（后端 role 还在、
-//: `/api/erp?role=company` 也还能用，将来要放开只要把 id 补进 HTML）。
-//: 字段和按钮分两套前缀，纯粹是因为老 id 就那么写的
-const ERP_F = { company: (n) => '#erp-' + n, store: (n) => '#erp-store-' + n };
-const ERP_B = { company: (n) => '#btn-erp-' + n, store: (n) => '#btn-erp-store-' + n };
-
-async function loadErp(role) {
-  const f = ERP_F[role];
-  let d;
-  try { d = await api('/api/erp?role=' + role); } catch (e) { return; }
-  $(f('username')).value = d.username || '';
-  $(f('company')).value = d.company || '';
-  $(f('password')).value = '';                       // 密码绝不回显
-  $(f('password')).placeholder = d.has_password ? '已设置（留空＝不修改）' : '云商登录密码';
-  $(f('token')).value = '';
-  $(f('token')).placeholder = d.has_token
-    ? `已有 token ${d.token}（要换再填）`
-    : '浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串';
-  $(f('status')).innerHTML = !d.exists
-    ? '<span style="color:var(--bad)">还没配</span>'
-    : (d.has_password
-        ? `<span style="color:var(--ok)">已配置</span>${d.has_token ? ' · token 已缓存' : ' · 还没换过 token'}`
-        : '<span style="color:var(--warn)">缺密码</span>');
-  // 实际生效的凭据来自别的文件时必须说清楚，否则人会以为改的是这个文件
-  $(f('warn')).innerHTML = (d.used_from && !d.has_password)
-    ? `<span style="color:var(--warn)">⚠️ 这个文件里没有密码 —— 实际生效的凭据来自
-       <span class="mono">${esc(d.used_from)}</span>。要在这台电脑上用，请把账号密码填在上面并保存。</span>`
-    : '';
-}
-
-/** 两张卡一起刷（进「云商授权」页 / 保存完 / 登录完都调它）。 */
-function loadErpAll() { ERP_ROLES.forEach((role) => loadErp(role)); }
-
-/** 把某个角色的表单存下去。返回 true 表示成功。 */
-async function saveErp(role, extra = {}) {
-  const f = ERP_F[role];
-  const body = {
-    role,
-    username: $(f('username')).value.trim(),
-    company: $(f('company')).value.trim(),
-    ...extra,
-  };
-  const pw = $(f('password')).value;
-  if (pw) body.password = pw;                          // 空 = 不改
-  try {
-    await api('/api/erp', { method: 'PUT', body });
-    $(f('password')).value = '';
-    return true;
-  } catch (e) {
-    $(f('msg')).textContent = '保存失败：' + e.message;
-    toast('保存失败：' + e.message, 'bad');
-    return false;
-  }
-}
-
-/* ---- 云商图形验证码（每个角色一个框，所以也带角色）---- */
-
-function showCaptcha(role, image, message) {
-  const f = ERP_F[role];
-  if (image) $(f('captcha-img')).src = image;
-  $(f('captcha')).hidden = false;
-  $(f('captcha-code')).value = '';
-  $(f('captcha-code')).focus();
-  $(f('captcha-msg')).innerHTML = message
-    ? `<span style="color:var(--warn)">${esc(message)}</span>` : '';
-}
-
-function hideCaptcha(role) {
-  const f = ERP_F[role];
-  $(f('captcha')).hidden = true;
-  $(f('captcha-code')).value = '';
-  $(f('captcha-msg')).textContent = '';
-}
-
-ERP_ROLES.forEach((role) => {
-  const f = ERP_F[role], b = ERP_B[role];
-  const label = role === 'store' ? '门店账号' : '公司账号';
-
-  $(b('save')).addEventListener('click', async () => {
-    if (!(await saveErp(role))) return;
-    $(f('msg')).textContent = '已保存 ' + new Date().toLocaleTimeString();
-    toast(label + '已保存', 'ok');
-    loadErp(role);
-  });
-
-  $(b('captcha')).addEventListener('click', async () => {
-    const code = $(f('captcha-code')).value.trim();
-    if (!code) return toast('先把验证码填上', 'bad');
-    const btn = $(b('captcha'));
-    btn.disabled = true; btn.textContent = '提交中…';
-    try {
-      // ⚠ 不带 role：服务端按**挂起的那次登录**（`pending_login.role`）继续 ——
-      //   验证码跟会话绑定，换个人重算角色反而会串
-      const r = await api('/api/erp/login/captcha', { method: 'POST', body: { code } });
-      if (r.ok) {
-        hideCaptcha(role);
-        $(f('msg')).innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
-          + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
-        toast('云商登录成功', 'ok');
-        loadErp(role);
-      } else if (r.need_captcha) {
-        showCaptcha(role, r.image, r.message || '验证码不对，再试一次');
-        toast('验证码不对，换一张再试', 'bad');
-      } else {
-        hideCaptcha(role);
-        $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '失败')}</span>`;
-        toast('登录失败', 'bad');
-      }
-    } catch (e) {
-      $(f('captcha-msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
-    } finally {
-      btn.disabled = false; btn.textContent = '提交验证码';
-    }
-  });
-
-  $(f('captcha-code')).addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $(b('captcha')).click();
-  });
-
-  $(b('token-save')).addEventListener('click', async () => {
-    const token = $(f('token')).value.trim();
-    if (!token) return toast('先把 token 粘进来', 'bad');
-    try {
-      await api('/api/erp', { method: 'PUT', body: { role, token } });
-      $(f('token')).value = '';
-      toast('token 已保存', 'ok');
-      loadErp(role);
-    } catch (e) { toast('保存失败：' + e.message, 'bad'); }
-  });
-
-  $(b('login')).addEventListener('click', async () => {
-    const btn = $(b('login'));
-    btn.disabled = true; btn.textContent = '登录中…';
-    $(f('msg')).textContent = '';
-    hideCaptcha(role);
-    try {
-      // 用**输入框里的值**测，不先保存 —— 打错的密码不该被存下来
-      const r = await api('/api/erp/login', {
-        method: 'POST',
-        body: {
-          role,
-          username: $(f('username')).value.trim(),
-          company: $(f('company')).value.trim(),
-          password: $(f('password')).value,
-        },
-      });
-      if (r.ok) {
-        $(f('msg')).innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
-          + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
-        $(f('password')).value = '';
-        hideCaptcha(role);
-        toast('云商登录成功', 'ok');
-      } else if (r.need_captcha) {
-        showCaptcha(role, r.image, r.message);
-        $(f('msg')).innerHTML = '';
-      } else {
-        $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '登录失败')}`
-          + `<br><span class="hint">没有保存任何改动 —— 请核对账号密码后重试</span></span>`;
-        toast('云商登录失败', 'bad');
-      }
-      loadErp(role);
-    } catch (e) {
-      $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
-    } finally {
-      btn.disabled = false; btn.textContent = '测试登录';
-    }
-  });
-});
+   ⚠ **别再照着 `2afb945` 那版把表单加回来** —— 后端那套角色参数也已经一并拆掉了
+     （`erp.ROLE_STORE` / `.secrets/erp-store.env` / `/api/erp?role=` 都不在了）。
+     真要让用户在界面上填云商账号，是**新开一件事**，别从历史里捡。 */
 
 /* ───────────────────────── 邮件推送 ───────────────────────── */
 
@@ -1437,7 +1260,6 @@ async function loadConfig() {
   if (state.overview) renderWhatsNew(state.overview.whatsnew);
   if (state.overview) renderLegacyPrompt(state.overview.legacy_prompt);
   if (state.overview) renderUpgrades(state.overview.upgrades);
-  loadErpAll();
   loadMail();
   loadWecom();
   loadService();
@@ -1698,7 +1520,6 @@ const GO_TARGETS = {
   settings: ['settings', 'general'],
   general: ['settings', 'general'],
   linglong: ['settings', 'linglong'],
-  erp: ['settings', 'erp'],
 };
 
 function goto(tab) {

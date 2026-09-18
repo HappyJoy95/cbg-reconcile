@@ -85,10 +85,15 @@ class TestEveryVersionHasNotes(unittest.TestCase):
           * `run` 不是页签，是右下角那个常驻抽屉（`goto()` 里特判开抽屉）；
           * `linglong` / `erp` / `general` 是**「通用设置」下的二级标签**。
         所以真正的路由表在前端的 `GO_TARGETS` 里 —— 按它查。
+
+        ⚠ 比对之前要先过一遍 `LEGACY_GO`：老条目里的 `go` 是**当时那个页签 id**，
+          页面改版后由它翻译到今天在的地方。不翻的话，一条 2.x 的老待办
+          就能让这条断言一直红着（而它其实是对的）。
         """
         i = APP_JS.index("const GO_TARGETS = {")
         block = APP_JS[i:APP_JS.index("};", i)]
-        for tab in whatsnew.TABS:
+        seen = {whatsnew.LEGACY_GO.get(t, t) for t in whatsnew.TABS}
+        for tab in sorted(seen):
             with self.subTest(tab=tab):
                 if tab == "run":
                     self.assertIn('id="run-drawer"', INDEX_HTML)

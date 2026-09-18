@@ -33,7 +33,7 @@ from pathlib import Path
 #: ⚠ **`run` 是例外**：它**不再是页签**，而是右下角那个**常驻抽屉** ——
 #: 前端 `goto()` 里对它特判（开抽屉），不特判的话门店点完什么都看不见。
 #: 测试按这两条分别断言。
-TABS = ("sales", "compliance", "run", "settings", "general", "linglong", "erp")
+TABS = ("sales", "compliance", "run", "settings", "general", "linglong")
 TAB_LABELS = {
     "sales": "销售",
     "compliance": "合规",
@@ -41,7 +41,7 @@ TAB_LABELS = {
     "settings": "通用设置",
     "general": "通用设置",
     "linglong": "玲珑授权",
-    "erp": "云商授权",
+    # ⚠ 「云商授权」（`erp`）2026-09-18 当天就删了 —— 见 `LEGACY_GO` 里的说明
 }
 
 #: 老更新日志里的 `go` 还是改版前的页签 id —— **按新结构翻译一遍**。
@@ -55,6 +55,10 @@ LEGACY_GO = {
     "reports": "compliance",
     "pos": "compliance",
     "session": "linglong",     # 老条目里的「会话」现在叫「玲珑授权」
+    # ⚠ 「云商授权」那一页删了（用户：「不要门店云商账号了，没必要」，
+    #   而公司账号早就内置、界面不显示）。老条目里若有 `go: "erp"`，
+    #   翻成「通用设置」—— 那是它原来挂着的父页签，落点最近。
+    "erp": "settings",
 }
 
 #: 版本 → 更新日志。**新的写在最前面**（按版本号倒序看着方便）。

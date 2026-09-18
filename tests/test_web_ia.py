@@ -83,49 +83,63 @@ class Test一级页签(unittest.TestCase):
         self.assertIn(">通用设置<", NAV)
 
 
-class Test两个授权在通用设置下面(unittest.TestCase):
+class Test授权页在通用设置下面(unittest.TestCase):
     """用户 2026-09-18：「把玲珑授权和云商授权做到设置的二级标签里面」。
 
     「会话」也一起改名成了「玲珑授权」（玲珑 = 华为那个销售系统的代号）。
 
-    ⚠ 它们**不是一级页签**了 —— 但也不能藏得不认识路：
+    ⚠ 同一天**「云商授权」又删了** —— 用户先砍掉公司账号那张卡
+    （「公司账号前端不显示吧，后端默认用…」），再砍掉门店账号
+    （「我想了想，不要门店云商账号了，没必要」）。两张卡都没了，
+    那一页就是空的，所以整个二级标签一起撤。
+    → 现在「通用设置」下面是 **通用 / 玲珑授权** 两个。
+
+    它们**不是一级页签** —— 但也不能藏得不认识路：
     `whatsnew` 里那几条「去会话」的待办得能跳对地方（见 `GO_TARGETS`）。"""
 
     def _settings(self):
         i = INDEX_HTML.index('id="panel-settings"')
         return _strip_html_comments(INDEX_HTML[i:INDEX_HTML.index("</section>", i)])
 
-    def test_两个授权是通用设置的二级标签(self):
-        """⚠ 它们是「通用设置」的二级标签 —— 落点在**导航下拉**里，
-        不是页内那排按钮（用户 2026-09-18 选的："跟销售/合规一样，页内那排删掉"）。"""
+    def test_玲珑是通用设置的二级标签(self):
+        """⚠ 落点在**导航下拉**里，不是页内那排按钮
+        （用户 2026-09-18 选的："跟销售/合规一样，页内那排删掉"）。"""
         menu = _nav_item("settings")
         self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu),
-                         ["general", "linglong", "erp"])
+                         ["general", "linglong"])
 
-    def test_两个授权的子面板都在通用设置里(self):
-        panel = self._settings()
-        for sub in ("linglong", "erp"):
-            with self.subTest(sub=sub):
-                self.assertIn('id="subpanel-%s"' % sub, panel)
+    def test_玲珑的子面板在通用设置里(self):
+        self.assertIn('id="subpanel-linglong"', self._settings())
 
-    def test_一级页签里没有它们(self):
-        for tab in ("linglong", "erp"):
-            with self.subTest(tab=tab):
-                self.assertNotIn(tab, NAV_IDS)
+    def test_云商授权整个撤掉了(self):
+        """⚠ 留着的话是个**空页** —— 点进去什么都没有，看着像坏了。"""
+        self.assertNotIn("erp", NAV_IDS)
+        self.assertNotIn("云商授权", _strip_html_comments(NAV))
+        self.assertNotIn('id="subpanel-erp"', INDEX_HTML)
+        self.assertNotIn("erp", re.findall(r'data-subtab="([a-z-]+)"',
+                                           _strip_html_comments(NAV)))
+        # 页面上也不许再有云商账号的输入框（两套 id 都查）
+        for dead in ("erp-username", "erp-password", "erp-store-username",
+                     "btn-erp-save", "btn-erp-store-save"):
+            with self.subTest(dead=dead):
+                self.assertNotIn('id="%s"' % dead, BODY,
+                                 "云商账号的表单又回来了？前端不该有它的入口")
+
+    def test_一级页签里没有它(self):
+        self.assertNotIn("linglong", NAV_IDS)
 
     def test_跳转表里有它们(self):
         """⚠ 少了映射，`whatsnew` 点「去会话」就会去切一个不存在的页签 ——
         门店看到的是**点了没反应**。"""
         i = APP_JS.index("const GO_TARGETS = {")
         block = APP_JS[i:APP_JS.index("};", i)]
-        for key in ("linglong", "erp", "settings", "general"):
+        for key in ("linglong", "settings", "general"):
             with self.subTest(key=key):
                 self.assertIn(key + ":", block)
 
     def test_名字对(self):
         menu = _nav_item("settings")
         self.assertIn(">玲珑授权<", menu)
-        self.assertIn(">云商授权<", menu)
         self.assertNotIn(">会话<", menu, "「会话」应该已经改名成「玲珑授权」了")
         # ⚠ 名字也**不许**在页内再写一份（同一件事两份定义必然有一天不同步）
         self.assertNotIn("玲珑授权", BODY.replace(_strip_html_comments(NAV), ""))
@@ -469,31 +483,41 @@ class Test不能有重复_id(unittest.TestCase):
         dup = sorted({i for i in ids if ids.count(i) > 1})
         self.assertFalse(dup, "这些 id 出现了不止一次：%s" % dup)
 
-    def test_云商账号字段只有门店那一套(self):
-        """⚠ 用户 2026-09-18：「**公司账号前端不显示**」——
-        公司那套 `erp-*` 控件整张卡删掉了（后端内置兜底），
-        页面上只留门店账号那套 `erp-store-*`。
+    def test_云商账号在界面上没有任何入口(self):
+        """⚠ 2026-09-18 **一天之内走了个来回**，最后是一个输入框都不留：
 
-        搬/删卡片最容易漏 —— 单独钉一遍，出错时直接说清是哪个字段。
-        尤其是**公司那套还在**：留着的话 `$('#erp-username')` 拿得到元素，
-        看着一切正常，实际改的是一个界面上看不见的账号。"""
-        for ident in ("erp-store-status", "erp-store-username", "erp-store-password",
-                      "erp-store-company", "btn-erp-store-save", "btn-erp-store-login",
-                      "erp-store-captcha", "erp-store-token"):
+        1. 「需要存两个云商账号」（公司 + 门店）→ 做了两张卡；
+        2. 「公司账号前端不显示吧，后端默认用 sL18917405716」→ 删公司那张；
+        3. 「我想着，不要门店云商账号了，没必要」→ **门店那张也删**
+           （原话是「我想了想」，意思是想了想决定不要了）。
+
+        钉住"真删干净了"：两套 id 一个都不许剩 —— 留着的话
+        `$('#erp-username')` 拿得到元素、看着一切正常，
+        实际改的是一个界面上看不见的账号（上一版正是这个形状）。
+        """
+        for ident in ("erp-username", "erp-password", "erp-company", "erp-token",
+                      "erp-status", "btn-erp-save", "btn-erp-login",
+                      "erp-store-username", "erp-store-password", "erp-store-company",
+                      "erp-store-token", "erp-store-status", "erp-store-captcha",
+                      "btn-erp-store-save", "btn-erp-store-login"):
             with self.subTest(ident=ident):
-                self.assertEqual(INDEX_HTML.count('id="%s"' % ident), 1,
-                                 "%s 有 %d 份" % (ident, INDEX_HTML.count('id="%s"' % ident)))
-        for gone in ("erp-username", "erp-password", "btn-erp-save", "btn-erp-login"):
-            with self.subTest(gone=gone):
-                self.assertNotIn('id="%s"' % gone, INDEX_HTML,
-                                 "公司账号那套控件还在 —— 用户说前端不显示")
+                self.assertNotIn('id="%s"' % ident, BODY,
+                                 "云商账号的表单又回来了？前端不该有它的入口")
 
-    def test_前端只驱动门店账号(self):
-        """⚠ 公司卡删了、前端却还遍历 `['company','store']`：
-        `$('#erp-username')` 拿到 null，`loadErpAll()` 一抛 ——
-        **它后面的初始化全不执行**（前端没 lint，只在控制台露一行）。"""
-        self.assertIn("const ERP_ROLES = ['store'];", APP_JS)
-        self.assertNotIn("'company'", APP_JS.split("const ERP_ROLES")[1].split(";")[0])
+    def test_前端不再有云商账号的接线(self):
+        """⚠ 表单删了、接线还留着 = `$('#…')` 全部拿到 null，
+        `loadErpAll()` 一抛 —— **它后面的初始化全不执行**
+        （前端没 lint，只在浏览器控制台露一行，门店只会说"这页是空的"）。"""
+        for dead in ("loadErpAll", "ERP_ROLES", "ERP_F", "ERP_B", "saveErp",
+                     "loadErp("):
+            with self.subTest(dead=dead):
+                self.assertNotIn(dead, APP_JS,
+                                 "%s 还留着 —— 云商账号那张卡已经删了" % dead)
+
+    def test_云商授权那个二级标签也没了(self):
+        """⚠ 两张卡都删之后那一页是**空的**，留着就是个点了没反应的死页签。"""
+        self.assertNotIn("erp", re.findall(r'data-subtab="([a-z-]+)"',
+                                           _strip_html_comments(NAV)))
 
 
 class Test前端不做构建步骤(unittest.TestCase):

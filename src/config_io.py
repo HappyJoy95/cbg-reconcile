@@ -36,6 +36,38 @@ def load_raw(path) -> dict:
     return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
 
 
+#: 门店映射表 —— **云商门店名 → 串号标识 → 华为门店编码**。
+#: 加新店要改的就是它（`selfupdate.ALLOW_EVEN_IF_NEVER` 里唯一放行的那份配置）。
+STORES_REL = "config/stores.yaml"
+
+
+def stores_table(root) -> list:
+    """读 `config/stores.yaml` 的 `stores:` 列表。
+
+    读不到/格式不对就给**空表** —— 调用方要能区分"表里没有这家店"和"表根本没读到"，
+    所以这里不抛异常，由调用方按空表处理并说清。
+    """
+    doc = load_raw(Path(root) / STORES_REL) or {}
+    return [s for s in (doc.get("stores") or []) if isinstance(s, dict)]
+
+
+def find_store(erp_name, root):
+    """按**云商门店名**在映射表里找那一家，找不到返回 None。
+
+    ⚠ 比对只去掉首尾空白（门店名是手填进 yaml 的，前后多个空格很常见），
+    **绝不做模糊/包含匹配** —— 「青岛城阳万达店」和「联想城阳万达店」是两家店，
+    模糊一下就会把配置填成隔壁那家，而界面上**看不出来**（门店名看着都对）。
+    找不到就老老实实返回 None，让界面提示手填。
+    """
+    want = (erp_name or "").strip()
+    if not want:
+        return None
+    for s in stores_table(root):
+        if str(s.get("erp_name") or "").strip() == want:
+            return s
+    return None
+
+
 def pick(raw: dict) -> dict:
     """挑出前端要展示/编辑的字段（点号路径）。"""
     out = {}

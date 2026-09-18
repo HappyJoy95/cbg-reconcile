@@ -9,6 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
+from src import erp
 from src.erp import (DEFAULT_COMPANY, describe_credentials, load_credentials,
                      resolve_env_path, save_credentials)
 
@@ -21,6 +24,73 @@ class TestResolveEnvPath(unittest.TestCase):
 
     def test_absolute_kept(self):
         self.assertEqual(resolve_env_path("/tmp/x.env"), Path("/tmp/x.env"))
+
+
+class TestEnvChain(unittest.TestCase):
+    """凭据文件链 —— 从"两个账号"那版收回来时挪过来的，行为没变。
+
+    ⚠ 这几条**原来在 `tests/test_erp_roles.py`** 里，那个文件随"门店云商账号"
+    一起删了（用户 2026-09-18：「我想了想，不要门店云商账号了，没必要」）。
+    但链本身跟角色无关，是"别把 `~/.dsh/secrets/erp.env` 里的真账密
+    整份盖成空"那条规矩的守卫，所以搬过来留着。
+    """
+
+    def test_链里包含所有老路径(self):
+        chain = erp.env_chain()
+        for p in erp.LEGACY_ENV_PATHS:
+            with self.subTest(p=p):
+                self.assertIn(erp.resolve_env_path(str(p)), chain)
+
+    def test_链里没有重复(self):
+        """⚠ 重复本身无害，但 `effective_env_file` 的"实际来自"会看着莫名其妙。"""
+        chain = erp.env_chain()
+        self.assertEqual(len(chain), len(set(chain)), chain)
+
+    def test_优先级是从低到高(self):
+        """后面的覆盖前面的 —— 所以 `.secrets/erp.env` 必须排在
+        `~/.dsh/secrets/erp.env` **后面**（项目自己的那份说了算）。"""
+        chain = erp.env_chain()
+        home = erp.resolve_env_path(str(erp.LEGACY_ENV_PATHS[2]))
+        local = erp.resolve_env_path(str(erp.LEGACY_ENV_PATHS[0]))
+        self.assertLess(chain.index(home), chain.index(local))
+
+    def test_显式指定的文件排最后(self):
+        chain = erp.env_chain("/tmp/other.env")
+        self.assertEqual(chain[-1], erp.resolve_env_path("/tmp/other.env"))
+
+
+class Test内置公司账号(unittest.TestCase):
+    """一个文件都没配时，要能兜到内置账号（用户 2026-09-18：「后端默认用…」）。"""
+
+    def _clean(self):
+        return mock.patch.multiple(
+            erp, LEGACY_ENV_PATHS=[], _deobfuscate=lambda blob: "X" if blob else "")
+
+    def test_什么都没有就用内置的(self):
+        with self._clean(), mock.patch.dict("os.environ", {}, clear=True):
+            d = erp.load_credentials()
+        self.assertEqual(d["username"], "X")
+        self.assertEqual(d["password"], "X")
+        self.assertTrue(d["builtin"], "没标成 builtin，界面上会说不出这是哪来的账号")
+
+    def test_文件里有真凭据就不算内置(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "erp.env"
+            f.write_text("ERP_USERNAME=real\nERP_PASSWORD=pw\n", encoding="utf-8")
+            with mock.patch.multiple(erp, LEGACY_ENV_PATHS=[f]):
+                d = erp.load_credentials()
+        self.assertEqual(d["username"], "real")
+        self.assertFalse(d["builtin"])
+
+    def test_内置的账号密码能解开(self):
+        """⚠ 混淆串写错一个字符就静默变成空串 —— 那样门店只会看到"缺少账号密码"。"""
+        self.assertEqual(erp._deobfuscate(erp._BUILTIN_COMPANY_USER), "sL18917405716")
+        self.assertEqual(erp._deobfuscate(erp._BUILTIN_COMPANY_PASS), "047081")
+
+    def test_describe_里也有_builtin(self):
+        with self._clean(), mock.patch.dict("os.environ", {}, clear=True):
+            d = erp.describe_credentials()
+        self.assertTrue(d["builtin"])
 
 
 class TestSaveCredentials(unittest.TestCase):

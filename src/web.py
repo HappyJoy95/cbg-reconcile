@@ -26,8 +26,7 @@ from . import (autostart, browser, config_io, elevate, mailer,
                run_daily, schedule,
                selfupdate, service, upgrade, version, wecom, whatsnew)
 from .cbg import CbgClient, CbgError
-from .erp import (DEFAULT_ENV_FILE, ROLE_COMPANY, ROLES, ErpCaptchaRequired,
-                  ErpClient, ErpError,
+from .erp import (DEFAULT_ENV_FILE, ErpCaptchaRequired, ErpClient, ErpError,
                   describe_credentials, load_credentials, save_credentials)
 from .report import delete_report, list_reports, load_report
 from .runner import manager
@@ -90,9 +89,8 @@ class PendingLogin:
         self.image = ""
         self.tries = 0
         self.created_at = 0.0
-        self.role = ROLE_COMPANY       # 这次验证码是**哪个账号**的
 
-    def hold(self, client, username, password, company, image, role=ROLE_COMPANY):
+    def hold(self, client, username, password, company, image):
         self.reset()
         self.client = client
         self.username = username
@@ -100,31 +98,9 @@ class PendingLogin:
         self.company = company
         self.image = image
         self.created_at = time.time()
-        self.role = role
 
     def alive(self) -> bool:
         return self.client is not None and (time.time() - self.created_at) < self.TTL
-
-
-def _erp_role(query, body=None):
-    """这次请求针对**哪个云商账号**。认不出来就报错，别默认成公司账号 ——
-    默认错了就是"想改门店账号、结果把公司账号覆盖了"，而且不报错。"""
-    # ⚠ **body 优先于 query**：写请求以载荷为准（POST/PUT 都带 body）。
-    #   GET 没有 body，自然落到 query 上。
-    role = ((body or {}).get("role") or (query.get("role") or [""])[0] or ROLE_COMPANY)
-    role = str(role).strip()
-    if role not in ROLES:
-        return None, "不认识的角色：%r（只认 %s）" % (role, "、".join(ROLES))
-    return role, ""
-
-
-def _erp_env(app, role):
-    """这个角色该读写哪个文件。
-
-    公司账号沿用配置里那个路径（老门店可能自己改过 `erp.env_file`）；
-    门店账号固定走自己的文件 —— 不接受的覆盖。
-    """
-    return app.erp_env_file() if role == ROLE_COMPANY else None
 
 
 pending_login = PendingLogin()
@@ -333,19 +309,14 @@ class App:
         cfg = config_io.load_raw(self.config_path)
         return (cfg.get("erp") or {}).get("env_file") or DEFAULT_ENV_FILE
 
-    def erp_client(self, role: str = ROLE_COMPANY) -> ErpClient:
-        """按角色造一个云商客户端。
-
-        ⚠ `role` **必须一路传进 `ErpClient`** —— 见 `ErpClient.__init__` 那段注释：
-        不带角色的 `_save_token` 会按默认的公司账号写文件
-        （实测把公司账号整份覆盖成门店账号）。
+    def erp_client(self) -> ErpClient:
+        """造一个云商客户端（**只有一个账号**，见 `erp.DEFAULT_ENV_FILE`）。
 
         ⚠ 目前全项目**没人调它**（`grep erp_client` 只有这一处定义）。
-        留着是因为它是 App 上"拿一个云商客户端"的正规入口；
-        将来要用请直接 `self.erp_client(ROLE_STORE)`，别再绕开角色。
+        留着是因为它是 App 上"拿一个云商客户端"的正规入口。
         """
-        f = _erp_env(self, role)
-        return ErpClient(load_credentials(f, role=role), env_file=f, role=role, timeout=60)
+        f = self.erp_env_file()
+        return ErpClient(load_credentials(f), env_file=f, timeout=60)
 
     # ------------------------------------------------------------------ 邮件
     MAIL_KEYS = ("enabled", "host", "port", "security", "sender", "recipients",
@@ -676,19 +647,18 @@ class Handler(BaseHTTPRequestHandler):
                 p.unlink()
             return self._json({"deleted": True})
 
-        # ---- 云商账号（两个角色：公司账号 / 门店账号）
+        # ---- 云商账号
+        # ⚠ 界面上的入口 2026-09-18 全删了（公司账号内置、门店账号不要了），
+        #   所以**没有前端在调这几个接口**。留着是因为它们是"用程序改一次云商账号"
+        #   的入口（另一个是 `python -m src.cli erp-login`，带终端验证码流程）——
+        #   云商偶尔会强制图形验证码，那时候自动登录走不通，总得有条路。
+        #   要彻底删也行，但那是"再开一件事"，别顺手删。
         if path == "/api/erp" and method == "GET":
-            role, err = _erp_role(query)
-            if err:
-                return self._json({"error": err}, 400)
-            return self._json(describe_credentials(_erp_env(app, role), role=role))
+            return self._json(describe_credentials(app.erp_env_file()))
 
         if path == "/api/erp" and method in ("PUT", "POST"):
             body = self._read_json()
-            role, err = _erp_role(query, body)
-            if err:
-                return self._json({"error": err}, 400)
-            env = _erp_env(app, role)
+            env = app.erp_env_file()
             username = (body.get("username") or "").strip() or None
             company = (body.get("company") or "").strip() or None
             password = body.get("password") or None          # 空串 = 不改
@@ -698,25 +668,22 @@ class Handler(BaseHTTPRequestHandler):
 
             # 只有**账号或密码真的变了**才作废旧 token。
             # 否则界面上点一次「保存」就会把好好的 token 清掉，下次还得重登（还会撞限流）。
-            old = describe_credentials(env, role=role)
+            old = describe_credentials(env)
             changed = (username is not None and username != old["username"]) or password is not None
             clear = changed and token is None
             save_credentials(env, username=username, password=password,
-                             company=company, token=token, clear_token=clear, role=role)
+                             company=company, token=token, clear_token=clear)
             return self._json({"ok": True, "token_cleared": clear,
-                               **describe_credentials(env, role=role)})
+                               **describe_credentials(env)})
 
         if path == "/api/erp/login" and method == "POST":
             body = self._read_json()
-            role, err = _erp_role(query, body)
-            if err:
-                return self._json({"error": err}, 400)
-            env = _erp_env(app, role)
+            env = app.erp_env_file()
             new_user = (body.get("username") or "").strip()
             new_pwd = body.get("password") or ""
             new_comp = (body.get("company") or "").strip()
 
-            creds = dict(load_credentials(env, role=role))
+            creds = dict(load_credentials(env))
             if new_user:
                 creds["username"] = new_user
             if new_pwd:
@@ -724,14 +691,14 @@ class Handler(BaseHTTPRequestHandler):
             if new_comp:
                 creds["company"] = new_comp
 
-            client = ErpClient(creds, env_file=env, role=role, timeout=60)
+            client = ErpClient(creds, env_file=env, timeout=60)
             try:
                 r = client.login_and_verify(save=False)
             except ErpCaptchaRequired as e:
                 # 账号要图形验证码 —— 把图交给页面，**同时留着这个 client**
                 # （验证码跟会话绑定，换个 client 再提交一定验不过）
                 pending_login.hold(client, creds.get("username", ""), new_pwd or None,
-                                   creds.get("company"), e.image, role)
+                                   creds.get("company"), e.image)
                 return self._json({"ok": False, "need_captcha": True, "image": e.image,
                                    "message": str(e), "saved": False}, 200)
             except ErpError as e:
@@ -744,9 +711,9 @@ class Handler(BaseHTTPRequestHandler):
             pending_login.reset()
             save_credentials(env, username=creds.get("username"),
                              password=(new_pwd or None), company=creds.get("company"),
-                             token=r["token"], clear_token=False, role=role)
+                             token=r["token"], clear_token=False)
             return self._json({"ok": True, "who": r.get("who", ""), "saved": True,
-                               **describe_credentials(env, role=role)})
+                               **describe_credentials(env)})
 
         if path == "/api/erp/login/captcha" and method == "POST":
             body = self._read_json()
@@ -759,10 +726,7 @@ class Handler(BaseHTTPRequestHandler):
             if not code:
                 return self._json({"ok": False, "message": "先把验证码填上"})
 
-            # ⚠ 用**挂起时那个角色**，不是重算的 —— 用户可能在等验证码的时候
-            #   又去点了另一个账号的「测试登录」（`hold()` 会覆盖成新的那次），
-            #   所以这里以 `pending_login.role` 为准、`env` 也跟着它走。
-            env = _erp_env(app, pending_login.role)
+            env = app.erp_env_file()
             try:
                 # 用**同一个 client** 提交 —— 它带着发验证码时那个会话的 cookie
                 r = pending_login.client.login_and_verify(vcode=code, save=False)
@@ -783,8 +747,7 @@ class Handler(BaseHTTPRequestHandler):
             save_credentials(env, username=pending_login.username,
                              password=pending_login.password,
                              company=pending_login.company,
-                             token=r["token"], clear_token=False,
-                             role=pending_login.role)
+                             token=r["token"], clear_token=False)
             who = r.get("who", "")
             pending_login.reset()
             return self._json({"ok": True, "who": who, "saved": True,
