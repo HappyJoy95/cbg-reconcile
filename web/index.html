@@ -186,15 +186,19 @@
      `loadConfig()` / `/api/erp/*` 那些接线原样能用）。 -->
 <section class="panel" id="panel-erp">
 <div class="card">
+    <p class="hint" style="margin:-6px 0 12px 0">
+      拉<b>全公司</b>数据用的（四池里的「云商销售单 / 云商在库」都是全公司的）。
+      ⚠ 这个账号在门店机器上<b>已经配好了</b> —— 就是从「设置 → 云商账号」搬过来的那一份。
+    </p>
     <div class="card-head">
-      <h2>云商账号</h2>
+      <h2>公司账号 <span class="hint">（最高权限）</span></h2>
       <span class="hint" id="erp-status"></span>
     </div>
     <div class="form-row"><label>账号</label>
       <input id="erp-username" placeholder="云商登录账号" autocomplete="off"></div>
     <div class="form-row"><label>密码</label>
       <input type="password" id="erp-password" placeholder="云商登录密码" autocomplete="new-password">
-      <span class="hint">只存本机 <code>.secrets/erp.env</code>，界面不回显</span></div>
+      <span class="hint">只存本机 <code>.secrets/erp.env</code>（公司账号），界面不回显</span></div>
     <div class="form-row"><label>公司代码</label>
       <input id="erp-company" placeholder="00001937"></div>
     <div class="form-row">
@@ -226,6 +230,55 @@
                autocomplete="off"></div>
       <div class="form-row">
         <button class="btn small" id="btn-erp-token-save">只存 token</button>
+        <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
+      </div>
+    </details>
+  </div>
+
+<div class="card">
+    <p class="hint" style="margin:-6px 0 12px 0">
+      本店自己的云商账号。跟上面那个<b>分开存</b>（两个文件），互不影响。
+    </p>
+    <div class="card-head">
+      <h2>门店账号</h2>
+      <span class="hint" id="erp-store-status"></span>
+    </div>
+    <div class="form-row"><label>账号</label>
+      <input id="erp-store-username" placeholder="云商登录账号" autocomplete="off"></div>
+    <div class="form-row"><label>密码</label>
+      <input type="password" id="erp-store-password" placeholder="云商登录密码" autocomplete="new-password">
+      <span class="hint">只存本机 <code>.secrets/erp-store.env</code>，界面不回显</span></div>
+    <div class="form-row"><label>公司代码</label>
+      <input id="erp-store-company" placeholder="00001937"></div>
+    <div class="form-row">
+      <button class="btn primary" id="btn-erp-store-save">保存</button>
+      <button class="btn" id="btn-erp-store-login">测试登录</button>
+      <span class="hint" id="erp-store-msg"></span>
+    </div>
+    <div id="erp-store-captcha" hidden>
+      <div class="banner warn" style="margin-bottom:8px">
+        云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
+      </div>
+      <div class="form-row">
+        <img id="erp-store-captcha-img" alt="验证码"
+             style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
+        <input id="erp-store-captcha-code" style="min-width:130px" placeholder="填图上的字"
+               autocomplete="off" maxlength="10">
+        <button class="btn primary" id="btn-erp-store-captcha">提交验证码</button>
+        <span class="hint" id="erp-store-captcha-msg"></span>
+      </div>
+      <p class="hint" style="margin-top:-4px">看不清就再点一次「测试登录」换一张。</p>
+    </div>
+    <div class="hint" id="erp-store-warn"></div>
+    <p class="hint">「测试登录」用上面填的值去换一次真 token，<b>失败不会保存</b>。
+      ⚠️ <b>别连着点</b> —— 云商连着登几次会要求图形验证码，歇几分钟再试。</p>
+    <details class="adv">
+      <summary>账号要图形验证码？手动填 token（退路）</summary>
+      <div class="form-row"><label>token</label>
+        <input id="erp-store-token" placeholder="浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串"
+               autocomplete="off"></div>
+      <div class="form-row">
+        <button class="btn small" id="btn-erp-store-token-save">只存 token</button>
         <span class="hint">脚本过不了验证码时走这条；token 会自动续期，一般不用管</span>
       </div>
     </details>

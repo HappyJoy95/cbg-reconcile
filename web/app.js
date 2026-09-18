@@ -797,153 +797,183 @@ $('#btn-clear-curl').addEventListener('click', () => {
   $('#curl-input').value = ''; $('#import-result').innerHTML = '';
 });
 
-/* ───────────────────────── 云商账号 ───────────────────────── */
+/* ─────────────────── 云商账号（两个角色：公司 / 门店）───────────────────
 
-async function loadErp() {
+   用户 2026-09-18：「需要存两个云商账号，一个是门店的账号，用来获取门店登录信息，
+   一个是我的最高权限账号，用来拉取全公司的数据」。
+   两个账号**存两个文件**（`.secrets/erp.env` / `.secrets/erp-store.env`），
+   页面上是两张一模一样的卡 —— 所以下面**全部按角色参数化**，逻辑只写一份。
+
+   ⚠ 公司账号**沿用原来那套 id**（`erp-*` / `btn-erp-*`）：那张卡在门店机器上
+   已经跑熟了，重命名等于把接线整段重接一遍，平白多一层风险。
+   门店账号用 `erp-store-*` / `btn-erp-store-*`。 */
+
+const ERP_ROLES = ['company', 'store'];
+//: 角色 → 控件 id。字段和按钮分两套前缀，纯粹是因为老 id 就那么写的
+const ERP_F = { company: (n) => '#erp-' + n, store: (n) => '#erp-store-' + n };
+const ERP_B = { company: (n) => '#btn-erp-' + n, store: (n) => '#btn-erp-store-' + n };
+
+async function loadErp(role) {
+  const f = ERP_F[role];
   let d;
-  try { d = await api('/api/erp'); } catch (e) { return; }
-  $('#erp-username').value = d.username || '';
-  $('#erp-company').value = d.company || '';
-  $('#erp-password').value = '';                       // 密码绝不回显
-  $('#erp-password').placeholder = d.has_password ? '已设置（留空＝不修改）' : '云商登录密码';
-  $('#erp-token').value = '';
-  $('#erp-token').placeholder = d.has_token
+  try { d = await api('/api/erp?role=' + role); } catch (e) { return; }
+  $(f('username')).value = d.username || '';
+  $(f('company')).value = d.company || '';
+  $(f('password')).value = '';                       // 密码绝不回显
+  $(f('password')).placeholder = d.has_password ? '已设置（留空＝不修改）' : '云商登录密码';
+  $(f('token')).value = '';
+  $(f('token')).placeholder = d.has_token
     ? `已有 token ${d.token}（要换再填）`
     : '浏览器 F12 → 任意请求 → Authorization: Bearer 后面那串';
-  $('#erp-status').innerHTML = !d.exists
+  $(f('status')).innerHTML = !d.exists
     ? '<span style="color:var(--bad)">还没配</span>'
     : (d.has_password
         ? `<span style="color:var(--ok)">已配置</span>${d.has_token ? ' · token 已缓存' : ' · 还没换过 token'}`
         : '<span style="color:var(--warn)">缺密码</span>');
   // 实际生效的凭据来自别的文件时必须说清楚，否则人会以为改的是这个文件
-  $('#erp-warn').innerHTML = (d.used_from && !d.has_password)
+  $(f('warn')).innerHTML = (d.used_from && !d.has_password)
     ? `<span style="color:var(--warn)">⚠️ 这个文件里没有密码 —— 实际生效的凭据来自
        <span class="mono">${esc(d.used_from)}</span>。要在这台电脑上用，请把账号密码填在上面并保存。</span>`
     : '';
 }
 
-/** 把表单存下去。返回 true 表示成功。 */
-async function saveErp(extra = {}) {
+/** 两张卡一起刷（进「云商授权」页 / 保存完 / 登录完都调它）。 */
+function loadErpAll() { ERP_ROLES.forEach((role) => loadErp(role)); }
+
+/** 把某个角色的表单存下去。返回 true 表示成功。 */
+async function saveErp(role, extra = {}) {
+  const f = ERP_F[role];
   const body = {
-    username: $('#erp-username').value.trim(),
-    company: $('#erp-company').value.trim(),
+    role,
+    username: $(f('username')).value.trim(),
+    company: $(f('company')).value.trim(),
     ...extra,
   };
-  const pw = $('#erp-password').value;
+  const pw = $(f('password')).value;
   if (pw) body.password = pw;                          // 空 = 不改
   try {
     await api('/api/erp', { method: 'PUT', body });
-    $('#erp-password').value = '';
+    $(f('password')).value = '';
     return true;
   } catch (e) {
-    $('#erp-msg').textContent = '保存失败：' + e.message;
+    $(f('msg')).textContent = '保存失败：' + e.message;
     toast('保存失败：' + e.message, 'bad');
     return false;
   }
 }
 
-$('#btn-erp-save').addEventListener('click', async () => {
-  if (!(await saveErp())) return;
-  $('#erp-msg').textContent = '已保存 ' + new Date().toLocaleTimeString();
-  toast('云商账号已保存', 'ok');
-  loadErp();
-});
+/* ---- 云商图形验证码（每个角色一个框，所以也带角色）---- */
 
-/* ---- 云商图形验证码 ---- */
-
-function showCaptcha(image, message) {
-  if (image) $('#erp-captcha-img').src = image;
-  $('#erp-captcha').hidden = false;
-  $('#erp-captcha-code').value = '';
-  $('#erp-captcha-code').focus();
-  $('#erp-captcha-msg').innerHTML = message
+function showCaptcha(role, image, message) {
+  const f = ERP_F[role];
+  if (image) $(f('captcha-img')).src = image;
+  $(f('captcha')).hidden = false;
+  $(f('captcha-code')).value = '';
+  $(f('captcha-code')).focus();
+  $(f('captcha-msg')).innerHTML = message
     ? `<span style="color:var(--warn)">${esc(message)}</span>` : '';
 }
 
-function hideCaptcha() {
-  $('#erp-captcha').hidden = true;
-  $('#erp-captcha-code').value = '';
-  $('#erp-captcha-msg').textContent = '';
+function hideCaptcha(role) {
+  const f = ERP_F[role];
+  $(f('captcha')).hidden = true;
+  $(f('captcha-code')).value = '';
+  $(f('captcha-msg')).textContent = '';
 }
 
-$('#btn-erp-captcha').addEventListener('click', async () => {
-  const code = $('#erp-captcha-code').value.trim();
-  if (!code) return toast('先把验证码填上', 'bad');
-  const btn = $('#btn-erp-captcha');
-  btn.disabled = true; btn.textContent = '提交中…';
-  try {
-    const r = await api('/api/erp/login/captcha', { method: 'POST', body: { code } });
-    if (r.ok) {
-      hideCaptcha();
-      $('#erp-msg').innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
-        + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
-      toast('云商登录成功', 'ok');
-      loadErp();
-    } else if (r.need_captcha) {
-      showCaptcha(r.image, r.message || '验证码不对，再试一次');
-      toast('验证码不对，换一张再试', 'bad');
-    } else {
-      hideCaptcha();
-      $('#erp-msg').innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '失败')}</span>`;
-      toast('登录失败', 'bad');
+ERP_ROLES.forEach((role) => {
+  const f = ERP_F[role], b = ERP_B[role];
+  const label = role === 'store' ? '门店账号' : '公司账号';
+
+  $(b('save')).addEventListener('click', async () => {
+    if (!(await saveErp(role))) return;
+    $(f('msg')).textContent = '已保存 ' + new Date().toLocaleTimeString();
+    toast(label + '已保存', 'ok');
+    loadErp(role);
+  });
+
+  $(b('captcha')).addEventListener('click', async () => {
+    const code = $(f('captcha-code')).value.trim();
+    if (!code) return toast('先把验证码填上', 'bad');
+    const btn = $(b('captcha'));
+    btn.disabled = true; btn.textContent = '提交中…';
+    try {
+      // ⚠ 不带 role：服务端按**挂起的那次登录**（`pending_login.role`）继续 ——
+      //   验证码跟会话绑定，换个人重算角色反而会串
+      const r = await api('/api/erp/login/captcha', { method: 'POST', body: { code } });
+      if (r.ok) {
+        hideCaptcha(role);
+        $(f('msg')).innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
+          + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
+        toast('云商登录成功', 'ok');
+        loadErp(role);
+      } else if (r.need_captcha) {
+        showCaptcha(role, r.image, r.message || '验证码不对，再试一次');
+        toast('验证码不对，换一张再试', 'bad');
+      } else {
+        hideCaptcha(role);
+        $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '失败')}</span>`;
+        toast('登录失败', 'bad');
+      }
+    } catch (e) {
+      $(f('captcha-msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
+    } finally {
+      btn.disabled = false; btn.textContent = '提交验证码';
     }
-  } catch (e) {
-    $('#erp-captcha-msg').innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
-  } finally {
-    btn.disabled = false; btn.textContent = '提交验证码';
-  }
-});
+  });
 
-$('#erp-captcha-code').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('#btn-erp-captcha').click();
-});
+  $(f('captcha-code')).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $(b('captcha')).click();
+  });
 
-$('#btn-erp-token-save').addEventListener('click', async () => {
-  const token = $('#erp-token').value.trim();
-  if (!token) return toast('先把 token 粘进来', 'bad');
-  try {
-    await api('/api/erp', { method: 'PUT', body: { token } });
-    $('#erp-token').value = '';
-    toast('token 已保存', 'ok');
-    loadErp();
-  } catch (e) { toast('保存失败：' + e.message, 'bad'); }
-});
+  $(b('token-save')).addEventListener('click', async () => {
+    const token = $(f('token')).value.trim();
+    if (!token) return toast('先把 token 粘进来', 'bad');
+    try {
+      await api('/api/erp', { method: 'PUT', body: { role, token } });
+      $(f('token')).value = '';
+      toast('token 已保存', 'ok');
+      loadErp(role);
+    } catch (e) { toast('保存失败：' + e.message, 'bad'); }
+  });
 
-$('#btn-erp-login').addEventListener('click', async () => {
-  const btn = $('#btn-erp-login');
-  btn.disabled = true; btn.textContent = '登录中…';
-  $('#erp-msg').textContent = '';
-  hideCaptcha();
-  try {
-    // 用**输入框里的值**测，不先保存 —— 打错的密码不该被存下来
-    const r = await api('/api/erp/login', {
-      method: 'POST',
-      body: {
-        username: $('#erp-username').value.trim(),
-        company: $('#erp-company').value.trim(),
-        password: $('#erp-password').value,
-      },
-    });
-    if (r.ok) {
-      $('#erp-msg').innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
-        + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
-      $('#erp-password').value = '';
-      hideCaptcha();
-      toast('云商登录成功', 'ok');
-    } else if (r.need_captcha) {
-      showCaptcha(r.image, r.message);
-      $('#erp-msg').innerHTML = '';
-    } else {
-      $('#erp-msg').innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '登录失败')}`
-        + `<br><span class="hint">没有保存任何改动 —— 请核对账号密码后重试</span></span>`;
-      toast('云商登录失败', 'bad');
+  $(b('login')).addEventListener('click', async () => {
+    const btn = $(b('login'));
+    btn.disabled = true; btn.textContent = '登录中…';
+    $(f('msg')).textContent = '';
+    hideCaptcha(role);
+    try {
+      // 用**输入框里的值**测，不先保存 —— 打错的密码不该被存下来
+      const r = await api('/api/erp/login', {
+        method: 'POST',
+        body: {
+          role,
+          username: $(f('username')).value.trim(),
+          company: $(f('company')).value.trim(),
+          password: $(f('password')).value,
+        },
+      });
+      if (r.ok) {
+        $(f('msg')).innerHTML = `<span style="color:var(--ok)">✅ 登录成功`
+          + `${r.who ? '：' + esc(r.who) : ''} · token ${esc(r.token || '')}（已保存）</span>`;
+        $(f('password')).value = '';
+        hideCaptcha(role);
+        toast('云商登录成功', 'ok');
+      } else if (r.need_captcha) {
+        showCaptcha(role, r.image, r.message);
+        $(f('msg')).innerHTML = '';
+      } else {
+        $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(r.message || '登录失败')}`
+          + `<br><span class="hint">没有保存任何改动 —— 请核对账号密码后重试</span></span>`;
+        toast('云商登录失败', 'bad');
+      }
+      loadErp(role);
+    } catch (e) {
+      $(f('msg')).innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
+    } finally {
+      btn.disabled = false; btn.textContent = '测试登录';
     }
-    loadErp();
-  } catch (e) {
-    $('#erp-msg').innerHTML = `<span style="color:var(--bad)">❌ ${esc(e.message)}</span>`;
-  } finally {
-    btn.disabled = false; btn.textContent = '测试登录';
-  }
+  });
 });
 
 /* ───────────────────────── 邮件推送 ───────────────────────── */
@@ -1398,7 +1428,7 @@ async function loadConfig() {
   if (state.overview) renderWhatsNew(state.overview.whatsnew);
   if (state.overview) renderLegacyPrompt(state.overview.legacy_prompt);
   if (state.overview) renderUpgrades(state.overview.upgrades);
-  loadErp();
+  loadErpAll();
   loadMail();
   loadWecom();
   loadService();
