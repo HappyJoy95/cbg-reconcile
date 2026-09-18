@@ -568,9 +568,12 @@ class TestRunPageOnlyOneButton(unittest.TestCase):
     """
 
     def _panel(self):
+        # ⚠ 2026-09-18：运行块**搬进了常驻抽屉**（`<aside class="drawer" id="run-drawer">`），
+        #   不再是 `<section class="panel" id="panel-run">`。
+        #   所以切片按抽屉的 `</aside>` 收尾 —— 还按 `id="panel-session"` 找的话，
+        #   抽屉在 `</main>` **之后**，那个标记在它前面，直接 ValueError。
         i = INDEX_HTML.index('id="panel-run"')
-        j = INDEX_HTML.index('id="panel-sessions"', i) if 'id="panel-sessions"' in INDEX_HTML \
-            else INDEX_HTML.index('id="panel-session"', i)
+        j = INDEX_HTML.index("</aside>", i)
         # ⚠ **先去掉 HTML 注释再断言"没有 X"** —— 那块删掉的说明我们留在了注释里
         #   （"为什么删"比"删了什么"更值钱），不去掉的话注释自己会把断言顶掉。
         return re.sub(r"<!--.*?-->", "", INDEX_HTML[i:j], flags=re.S)

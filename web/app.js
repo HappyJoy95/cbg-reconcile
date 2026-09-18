@@ -70,16 +70,222 @@ function table(header, rows, cls = []) {
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-/* ───────────────────────────── 页签 ───────────────────────────── */
+/* ───────────────────────── 页签（一级 = 业务）─────────────────────────
+
+   ⚠ 2026-09-18 前端融合改版（用户定）：一级页签从「一个功能一个」
+   （四池比对 / POS 合规 / 运行 / 会话 / 设置）改成**按业务分家** ——
+   **销售 / 合规 / 会话 / 通用设置**。三个原因：
+     * 3.0.0 加了「销售达成」就 6 个，门店面对的是一排平铺的功能名，没有层级；
+     * 一个业务页里放不下的（功能 / 设置）用**二级标签**切（`wireSubtabs`）；
+     * **「运行」不再是页签** —— 进了右下角那个常驻抽屉（`setRunDrawer`），
+       因为它要「一直在、且好找」，做成页签反而要求你先切过去。
+   ⚠ **会话保持一级** —— 抓会话是门店唯一要人工介入的地方，不能藏深。
+
+   见 `.dsh/docs/2026-09-18-3.0.0-开发目标.md` 四·五。 */
+
+//: 一级页签 → 它的二级标签（顺序 = 下拉菜单里的顺序）。
+//: ⚠ 没有二级的（会话 / 通用设置）**不出现在这里** —— 它们是普通按钮，不挂菜单。
+const SUBTABS = {
+  sales: ['attain', 'sales-settings'],
+  compliance: ['pos', 'pools', 'compliance-settings'],
+};
+
+//: 二级标签 → 切过去要拉什么。key 必须在 HTML 里有 `data-subtab="key"`。
+//: ⚠ 纯说明性的标签（`*_settings`）故意留空 —— 别为了"对称"硬塞一个请求。
+const SUBTAB_LOADERS = {
+  attain: () => loadAttain(),
+  pos: () => loadPos(),
+  pools: () => loadOverview(),
+  'sales-settings': () => {},
+  'compliance-settings': () => {},
+};
+
+//: 一级页签（没有二级的那两个）→ 切过去要拉什么
+const TAB_LOADERS = {
+  session: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
+  settings: () => loadConfig(),
+};
+
+//: 每个一级页签**上次停在哪个二级标签** —— 切回来还落在那儿。
+//: 不记的话每次回来都被弹回第一个（比如"我一直在看四池，一切走再回来变 POS 了"）。
+const lastSubtab = {};
+
+function switchTab(tab, subtab) {
+  const subs = SUBTABS[tab] || null;
+  if (subs) {
+    subtab = subtab || lastSubtab[tab] || subs[0];
+    if (subs.indexOf(subtab) < 0) subtab = subs[0];   // 传了个不认识的，别做半截
+    lastSubtab[tab] = subtab;
+  } else {
+    subtab = null;
+  }
+  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + tab));
+  if (subtab) {
+    const panel = $('#panel-' + tab);
+    if (panel) {
+      Array.from(panel.querySelectorAll('.subpanel')).forEach((p) =>
+        p.classList.toggle('active', p.id === 'subpanel-' + subtab));
+    }
+  }
+  // 菜单里把"当前停在哪一页"标出来 —— 展开时一眼能对上
+  Array.from($$('.nav-item[data-tab="' + tab + '"] .nav-menu .subtab')).forEach((x) =>
+    x.classList.toggle('current', x.dataset.subtab === subtab));
+  closeNavMenus();
+  const load = SUBTAB_LOADERS[subtab] || TAB_LOADERS[tab];
+  if (load) load();
+}
+
+/* ─────────────── 顶部导航：悬停**只展开菜单**，点击才跳 ───────────────
+
+   用户 2026-09-18：「参考苹果这个，最上面几个，鼠标移动过去自动显示对应的二级标签」。
+   所以是**两段式**：悬停看一眼有哪些二级页 → 点哪个才去哪儿。
+   ⚠ **别改成"悬停即切换"** —— 鼠标扫过顶部就切页，误触率很高，
+   而且门店那台机器上还可能是触摸屏（手指划过去就是一次 hover）。
+
+   ⚠ **菜单里的二级标签只在导航里有一份**（页内那行**去掉了**，用户定）——
+   两处各写一份的话，迟早有一处不同步（这个项目为"两份定义"栽过好几次）。 */
+
+function closeNavMenus(keep) {
+  $$('.nav-item').forEach((item) => {
+    if (item === keep) return;
+    item.classList.remove('open');
+    const menu = item.querySelector('.nav-menu');
+    if (menu) menu.hidden = true;
+    const btn = item.querySelector('.tab');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function openNavMenu(item) {
+  const menu = item.querySelector('.nav-menu');
+  const btn = item.querySelector('.tab');
+  closeNavMenus(item);
+  if (menu) menu.hidden = false;         // 没有菜单的（会话 / 通用设置）就是普通按钮
+  item.classList.add('open');
+  if (btn && menu) btn.setAttribute('aria-expanded', 'true');
+}
+
+$$('.nav-item').forEach((item) => {
+  item.addEventListener('mouseenter', () => openNavMenu(item));
+  item.addEventListener('mouseleave', () => closeNavMenus());
+  // ⚠ 光靠 hover 的话**触屏机上一辈子打不开** —— 聚焦也展开一份
+  item.addEventListener('focusin', () => openNavMenu(item));
+  Array.from(item.querySelectorAll('[data-subtab]')).forEach((b) =>
+    b.addEventListener('click', () => switchTab(item.dataset.tab, b.dataset.subtab)));
+});
 
 $$('.tab').forEach((b) => b.addEventListener('click', () => {
-  $$('.tab').forEach((x) => x.classList.toggle('active', x === b));
-  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + b.dataset.tab));
-  if (b.dataset.tab === 'reports') loadOverview();
-  if (b.dataset.tab === 'pos') loadPos();
-  if (b.dataset.tab === 'session') { renderSession(); loadBrowserInfo(); loadHwLogin(); }
-  if (b.dataset.tab === 'settings') loadConfig();
+  switchTab(b.dataset.tab);
+  // ⚠ `switchTab` 会把菜单收起来，但点完之后**鼠标还停在导航上** ——
+  //   不补这一下的话，用户得先把鼠标移开再移回来才看得到菜单（实测很别扭）。
+  //   点的是别的页签时鼠标早就不在这儿了，`:hover` 自然为假，不会误开。
+  const item = b.closest('.nav-item');
+  if (item && item.matches(':hover')) openNavMenu(item);
 }));
+// 点空白处收菜单（它是浮层，留着挡视线）
+document.addEventListener('click', (e) => {
+  if (!e.target.closest || !e.target.closest('.nav-item')) closeNavMenus();
+});
+
+/* ────────────────────── 运行抽屉（常驻，任何页可开）──────────────────────
+
+   用户 2026-09-18：「运行日志要一直在、且好找」。所以它**不是页签** ——
+   右下角一个把手，点开从右侧滑出，「跑一次」和日志都在里面。 */
+
+function setRunDrawer(open) {
+  const drawer = $('#run-drawer');
+  const fab = $('#btn-drawer');
+  if (!drawer) return;
+  drawer.hidden = !open;
+  if (fab) {
+    fab.hidden = open;                 // 开着的时候藏把手，别压在日志上
+    fab.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+}
+
+$('#btn-drawer')?.addEventListener('click', () => setRunDrawer(true));
+$('#btn-drawer-close')?.addEventListener('click', () => setRunDrawer(false));
+// Esc 收起 —— 抽屉盖住半屏，得给一个不用找按钮的出口
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setRunDrawer(false); });
+
+/* ─────────────────────────── 销售达成 ───────────────────────────
+
+   ⚠ **后端还没做**（3.0.0 的 M4）。用户 2026-09-18：「先单独做前端，
+   与后端的链接先不做」。所以这一页先落版式：
+   默认渲染一句说明，**只有点「刷新」才去碰接口** ——
+   接口没上就明说"还没接上"，**不装作"没有数据"**
+   （那正是这个项目最忌讳的失败模式：一份看着很合理的空）。
+
+   `/api/attain` 的约定（M4 按这个实现，前端已按它渲染）：
+     {
+       exists: true,
+       period: "2026-W38", start: "2026-09-14", end: "2026-09-20",
+       data_until: "2026-09-17",       // 库里销售最新到哪天（周中会早于 end）
+       columns: ["Mate70 Air", …],     // 产品列名
+       weights: [0.15, 0.15, 0.1, …],  // 占比
+       rows: [{store, targets: [...], actuals: [...], rates: [...], total}],
+       missing_columns: ["…"],         // 映射没到位的列（留空 + 提示）
+       error: "读不到目标：…"           // 读不到时**必须**给，不许给空 rows
+     } */
+
+function renderAttainPlaceholder() {
+  const cards = $('#attain-cards');
+  const table = $('#attain-table');
+  if (!cards || !table) return;
+  cards.innerHTML = '';
+  $('#attain-meta').textContent = '';
+  table.innerHTML = '<div class="empty">销售达成还没接上数据（3.0.0 的 M4）。<br>'
+    + '这一页的版式已经按新界面落好了，接口一上就会亮。</div>';
+}
+
+async function loadAttain(hitApi) {
+  if (!hitApi) { renderAttainPlaceholder(); return; }
+  let d;
+  try {
+    d = await api('/api/attain');
+  } catch (e) {
+    renderAttainPlaceholder();
+    toast('销售达成接口还没上（3.0.0 的 M4）：' + e.message, 'bad');
+    return;
+  }
+  renderAttain(d);
+}
+
+function renderAttain(d) {
+  const meta = $('#attain-meta');
+  if (!d || !d.exists) {
+    meta.textContent = '';
+    $('#attain-cards').innerHTML = '';
+    $('#attain-table').innerHTML =
+      '<div class="empty">' + esc((d && (d.error || d.hint)) || '还没有数据') + '</div>';
+    return;
+  }
+  const until = d.data_until && d.data_until !== d.end
+    ? `　⚠ 数据截至 ${d.data_until}（周中累计，不是最终达成）` : '';
+  meta.textContent = `${d.period || ''}　${d.start || ''} ~ ${d.end || ''}${until}`;
+
+  const gap = (d.missing_columns || []).length;
+  $('#attain-cards').innerHTML =
+    `<div class="kpi"><div class="k">门店数</div><div class="v">${(d.rows || []).length}</div></div>`
+    + `<div class="kpi"><div class="k">产品列</div><div class="v">${(d.columns || []).length}`
+    + (gap ? ` <span class="hint">（${gap} 列没映射）</span>` : '') + '</div></div>';
+
+  const header = ['门店', ...(d.columns || []).map((c, i) =>
+    `${c}
+${((d.weights || [])[i] * 100).toFixed(0)}%`), '总达成率'];
+  const rows = (d.rows || []).map((r) => {
+    const cells = (r.rates || []).map((rate, i) =>
+      rate == null ? '—' : `${(rate * 100).toFixed(1)}%　${r.actuals[i]}/${r.targets[i]}`);
+    return [r.store, ...cells, r.total == null ? '—' : `${(r.total * 100).toFixed(1)}%`];
+  });
+  $('#attain-table').innerHTML = table(header, rows)
+    + (gap ? `<div class="banner warn" style="margin-top:10px">`
+             + `这几列还没配编码，没计入总达成率：${esc((d.missing_columns || []).join('、'))}</div>`
+           : '');
+}
+
+$('#btn-refresh-attain')?.addEventListener('click', () => loadAttain(true));
 
 /* ───────────────────────────── POS 合规 ───────────────────────────── */
 
@@ -289,9 +495,10 @@ function setRunButtons(running) {
   $$('#panel-run [data-what]').forEach((b) => { b.disabled = running; });
 }
 
+// ⚠ 2026-09-18：这里原来是把「运行」页签点亮 —— 「运行」已经不是页签了，
+//   改成**先把抽屉拉开**（日志就在里面），再开跑。
 $('#btn-quick-run').addEventListener('click', () => {
-  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === 'run'));
-  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-run'));
+  setRunDrawer(true);
   startRun('all');
 });
 
@@ -1417,8 +1624,12 @@ function inlineMd(s) {
 
 /* 跳到某个标签页 —— 弹窗里「去设置 / 去运行」那些按钮用 */
 function goto(tab) {
-  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
-  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + tab));
+  // ⚠ 「运行」**不是页签**（2026-09-18 起它进了常驻抽屉）——
+  //   而 whatsnew 里好几条待办是 `go: "run"`（去跑一次 / 看日志）。
+  //   不特判的话 `panel-run` 会被当成面板显示，但抽屉本身还是 hidden，
+  //   门店点完**什么都看不见**（这正是 2.x 踩过的"点了没反应"）。
+  if (tab === 'run') { setRunDrawer(true); return; }
+  switchTab(tab);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -1837,7 +2048,13 @@ $('#btn-sched-install').addEventListener('click', async () => {
 
 /* ───────────────────────────── 启动 ───────────────────────────── */
 
-loadOverview();
+// ⚠ **首屏要按"当前亮着的那个页签"加载** —— 2026-09-18 改版前这里写死的是
+//   `loadOverview()`（那时默认页是四池比对）。默认页换成「销售」之后，
+//   那样写的结果是：四池的数据白拉一遍、**销售页却一片空白**
+//   （连空状态都没渲染出来，看着像页面坏了）。实测截图抓到过。
+const bootTab = (document.querySelector('.tab.active') || {}).dataset;
+switchTab((bootTab && bootTab.tab) || 'sales');
+
 loadBrowserInfo();
 loadHwLogin();
 // 刷新页面时如果抓取还在跑，接着显示进度（别让用户以为丢了）

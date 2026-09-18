@@ -26,96 +26,138 @@
   </div>
 </header>
 
+<!-- ⚠ 2026-09-18（用户定）：一级页签按**业务**分家 ——
+     销售 / 合规 / 会话 / 通用设置。
+     原来是「一个功能一个页签」（四池比对 / POS 合规 / 运行 / 会话 / 设置），
+     3.0.0 再加「销售达成」就 6 个，门店面对的是一排平铺的功能名，没有层级。
+     * **会话保持一级** —— 抓会话是门店唯一要人工介入的地方，不能藏深。
+     * **运行不再是页签** —— 进了右下角那个常驻抽屉（`#run-drawer`），
+       任何页面都能拉开看日志、「跑一次」。
+     * **四池比对和 POS 合规不混在一张表** —— 合规页下两个并列的二级标签。
+     见 `.dsh/docs/2026-09-18-3.0.0-开发目标.md` 四·五。 -->
 <nav class="tabs">
-  <button class="tab active" data-tab="reports">四池比对</button>
-  <button class="tab" data-tab="pos">POS 合规</button>
-  <button class="tab" data-tab="run">运行</button>
+  <!-- ⚠ 2026-09-18（用户定，参考苹果官网那种）：**悬停只展开菜单，点击才跳**；
+       二级标签**只在下拉里**，页内不再占一行。
+       没有二级的（会话 / 通用设置）就是普通按钮，不挂菜单。 -->
+  <div class="nav-item" data-tab="sales">
+    <button class="tab active" data-tab="sales" aria-haspopup="true" aria-expanded="false">销售</button>
+    <div class="nav-menu" hidden>
+      <button class="subtab" data-subtab="attain">达成</button>
+      <button class="subtab" data-subtab="sales-settings">设置</button>
+    </div>
+  </div>
+  <div class="nav-item" data-tab="compliance">
+    <button class="tab" data-tab="compliance" aria-haspopup="true" aria-expanded="false">合规</button>
+    <div class="nav-menu" hidden>
+      <button class="subtab" data-subtab="pos">POS 合规</button>
+      <button class="subtab" data-subtab="pools">四池比对</button>
+      <button class="subtab" data-subtab="compliance-settings">设置</button>
+    </div>
+  </div>
   <button class="tab" data-tab="session">会话</button>
-  <button class="tab" data-tab="settings">设置</button>
+  <button class="tab" data-tab="settings">通用设置</button>
 </nav>
 
 <main>
 
-<!-- ─────────────────────────── 报量排查 ─────────────────────────── -->
-<section class="panel active" id="panel-reports">
-  <div class="cards" id="report-cards"></div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2>四池比对记录 <span class="hint" id="report-count"></span></h2>
-      <button class="btn ghost small" id="btn-refresh-reports">刷新</button>
-    </div>
-    <div id="report-list"></div>
-  </div>
-
-  <div class="card" id="report-detail-card" hidden>
-    <div class="card-head">
-      <h2 id="report-detail-title">四池比对明细</h2>
-      <div>
-        <a class="btn ghost small" id="btn-download" href="#" download>下载 xlsx</a>
-        <button class="btn ghost small" id="btn-close-detail">关闭</button>
+<!-- ───────────────────────────── 销售 ───────────────────────────── -->
+<section class="panel active" id="panel-sales">
+  <div class="subpanel active" id="subpanel-attain">
+    <div class="cards" id="attain-cards"></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>门店销售达成 <span class="hint" id="attain-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-attain">刷新</button>
+      </div>
+      <div id="attain-table"></div>
+      <div class="hint" style="margin-top:10px;line-height:1.7">
+        <b>目标</b>来自腾讯文档「任务目标分配」的<b>周度重点产品</b>表（按台量），
+        <b>实际</b>来自云商销售报表，两边用<b>商品编码</b>对上。<br>
+        <b>达成率</b>：目标为 0 记 100%；单项封顶 120%；总达成率 = 各单项按占比加权平均。<br>
+        <b>剔除</b>：演示机 / 体验机、串号标识含「外调」的行；退货按负数冲减。<br>
+        ⚠ <b>数据截至</b>以表头为准 —— 周中打开时是「至今累计」，不是最终达成。
       </div>
     </div>
-    <div class="subtabs" id="sheet-tabs"></div>
-    <div id="sheet-body"></div>
   </div>
-</section>
 
-<!-- ───────────────────────────── POS 合规 ───────────────────────────── -->
-<section class="panel" id="panel-pos">
-  <div class="cards" id="pos-cards"></div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2>月度 POS 合规率 <span class="hint" id="pos-meta"></span></h2>
-      <button class="btn ghost small" id="btn-refresh-pos">刷新</button>
-    </div>
-    <div id="pos-table"></div>
-    <div class="hint" style="margin-top:10px;line-height:1.7">
-      <b>口径</b>：分母 = 非国补、非即时零售、非 Care+ 的订单金额
-      （<b>团单保留</b>，它走单独申诉）；
-      分子 = 其中的<b>非现金</b>支付金额（微信/支付宝/花呗/刷卡…只要是现金以外都算）。<br>
-      <b>退货</b>：在<b>退货发生当月</b>扣减原单的金额与非现金部分。<br>
-      <b>两个口径并排</b>：「按标签」认 <code>orderLabelList</code>、「按备注」认 <code>remark == '国补'</code>
-      —— 实测两者会不一致，所以两个数都要看。<br>
-      ⚠ <b>暂定</b>：退货在退货当月扣减 ⇒ <b>上一个月的分数还会被这个月的退货改</b>，
-      所以最近两个月标暂定，等它过完才定稿。
+  <div class="subpanel" id="subpanel-sales-settings">
+    <div class="card">
+      <div class="card-head"><h2>销售达成推送</h2></div>
+      <p class="hint">
+        ⚠ <b>还没做</b>（3.0.0 的 M5）。<br>
+        推送的<b>通道参数</b>（SMTP / 企微 webhook）在「通用设置」里配，
+        这里只放<b>本业务推不推</b>的开关。
+      </p>
     </div>
   </div>
 </section>
 
-<!-- ───────────────────────────── 运行 ───────────────────────────── -->
-<section class="panel" id="panel-run">
-  <div class="card">
-    <div class="card-head"><h2>跑一次</h2>
-      <span class="hint">跟每天定时跑的是同一条路，只是手动跑一遍</span></div>
-    <!-- ⚠ 2026-09-17（用户定）：**「目标日」和「高级（时间窗容差）」整块拿掉了**。
-         报量排查并进四池对账之后，三步里没有任何一步会读它们 ——
-         留着比删掉更糟：门店会以为"选今天就是只算今天"。
-         后端一并拿掉了（`/api/run` 不再收 mode/date/lookback/lookahead，
-         `runner.start` 也不再往命令后面拼它们）。
-         ⚠ 但 `daily` **命令行上**那四个参数必须留着：run.bat / 计划任务里
-         写死的 `--days-ago N` 删掉会以 `unrecognized arguments` 收场。 -->
-    <div class="form-row">
-      <!-- ⚠ 按钮只剩一个，但仍然走 `data-what` —— 有哪几个预设由后端那张表
-           （src/run_daily.py 的 BUTTON_STEPS）说了算，前端不另写一份，
-           以后要加按钮只改这行 HTML。走 `daily` 这一个入口是为了让
-           「第 1 步失败就不发报告」「库里没有就抓全量」「会话失效先静默续期」
-           这些行为和定时任务完全一致（各走各的命令迟早就分叉）。 -->
-      <button class="btn primary" data-what="all">整个项目</button>
-      <button class="btn ghost" id="btn-stop" disabled>停止</button>
-      <span class="hint" id="run-status"></span>
-    </div>
-    <p class="hint" style="margin:8px 0 0 0">
-      <b>整个项目</b> = 抓四池数据 → POS 合规 → <b>四池对账</b>，跟每天定时跑的一模一样。<br>
-      抓数据要一两分钟起；<b>第一次跑</b>会把今年至今的全量补上，更久，跑完下面有完整日志。<br>
-      只想看四池结果、不想再抓一遍：命令行 <code>python -m src.cli pools</code> 单独跑。
-    </p>
-  </div>
+<!-- ───────────────────────────── 合规 ─────────────────────────────
+     ⚠ POS 和四池**各是各的表**，不许混（用户 2026-09-18 明说）。 -->
+<section class="panel" id="panel-compliance">
+    <!-- ───────────────────────────── POS 合规 ───────────────────────────── -->
+    <div class="subpanel" id="subpanel-pos">
+      <div class="cards" id="pos-cards"></div>
 
-  <div class="card">
-    <div class="card-head"><h2>运行日志</h2></div>
-    <pre class="log" id="run-log">（还没有运行记录）</pre>
+      <div class="card">
+        <div class="card-head">
+          <h2>月度 POS 合规率 <span class="hint" id="pos-meta"></span></h2>
+          <button class="btn ghost small" id="btn-refresh-pos">刷新</button>
+        </div>
+        <div id="pos-table"></div>
+        <div class="hint" style="margin-top:10px;line-height:1.7">
+          <b>口径</b>：分母 = 非国补、非即时零售、非 Care+ 的订单金额
+          （<b>团单保留</b>，它走单独申诉）；
+          分子 = 其中的<b>非现金</b>支付金额（微信/支付宝/花呗/刷卡…只要是现金以外都算）。<br>
+          <b>退货</b>：在<b>退货发生当月</b>扣减原单的金额与非现金部分。<br>
+          <b>两个口径并排</b>：「按标签」认 <code>orderLabelList</code>、「按备注」认 <code>remark == '国补'</code>
+          —— 实测两者会不一致，所以两个数都要看。<br>
+          ⚠ <b>暂定</b>：退货在退货当月扣减 ⇒ <b>上一个月的分数还会被这个月的退货改</b>，
+          所以最近两个月标暂定，等它过完才定稿。
+        </div>
+      </div>
+    </div>
+
+    <!-- ─────────────────────────── 报量排查 ─────────────────────────── -->
+    <div class="subpanel active" id="subpanel-pools">
+      <div class="cards" id="report-cards"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>四池比对记录 <span class="hint" id="report-count"></span></h2>
+          <button class="btn ghost small" id="btn-refresh-reports">刷新</button>
+        </div>
+        <div id="report-list"></div>
+      </div>
+
+      <div class="card" id="report-detail-card" hidden>
+        <div class="card-head">
+          <h2 id="report-detail-title">四池比对明细</h2>
+          <div>
+            <a class="btn ghost small" id="btn-download" href="#" download>下载 xlsx</a>
+            <button class="btn ghost small" id="btn-close-detail">关闭</button>
+          </div>
+        </div>
+        <div class="subtabs" id="sheet-tabs"></div>
+        <div id="sheet-body"></div>
+      </div>
+    </div>
+
+  <div class="subpanel" id="subpanel-compliance-settings">
+    <div class="card">
+      <div class="card-head"><h2>合规推送</h2></div>
+      <p class="hint">
+        POS 合规和四池对账<b>各推各的</b>（两条推送、两套文案），
+        哪条跑不跑由「通用设置 → 定时执行 → 自动化跑什么」决定。<br>
+        ⚠ <b>推送开关挪到这里的活儿还没做</b>（3.0.0 的 M6）；
+        目前开关仍在「通用设置」的邮件 / 企微卡片里。
+      </p>
+      <div class="form-row">
+        <button class="btn" id="btn-clear-pools-notify-2">清除推送记忆</button>
+        <span class="hint">四池推送的「★ 新」记忆 —— 说明见「通用设置 → 出问题了？」</span>
+        <span class="hint" id="clear-pools-notify-msg-2"></span>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -475,6 +517,55 @@
 </section>
 
 </main>
+
+
+<!-- ─────────────────── 运行抽屉（常驻，任何页都能拉开）───────────────────
+     用户 2026-09-18：「运行日志要一直在、且好找」。
+     它**不是一个页签** —— 右下角一个把手，点开从右侧滑出，日志和「跑一次」都在里面。 -->
+<button class="drawer-fab" id="btn-drawer" aria-controls="run-drawer" aria-expanded="false">
+  运行日志</button>
+<aside class="drawer" id="run-drawer" hidden aria-label="运行">
+  <div class="drawer-head">
+    <h2>运行</h2>
+    <button class="btn ghost small" id="btn-drawer-close">收起</button>
+  </div>
+  <div class="drawer-body">
+    <!-- 原来的一级「运行」页 —— 2026-09-18 搬进常驻抽屉。 -->
+    <div id="panel-run">
+      <div class="card">
+        <div class="card-head"><h2>跑一次</h2>
+          <span class="hint">跟每天定时跑的是同一条路，只是手动跑一遍</span></div>
+        <!-- ⚠ 2026-09-17（用户定）：**「目标日」和「高级（时间窗容差）」整块拿掉了**。
+             报量排查并进四池对账之后，三步里没有任何一步会读它们 ——
+             留着比删掉更糟：门店会以为"选今天就是只算今天"。
+             后端一并拿掉了（`/api/run` 不再收 mode/date/lookback/lookahead，
+             `runner.start` 也不再往命令后面拼它们）。
+             ⚠ 但 `daily` **命令行上**那四个参数必须留着：run.bat / 计划任务里
+             写死的 `--days-ago N` 删掉会以 `unrecognized arguments` 收场。 -->
+        <div class="form-row">
+          <!-- ⚠ 按钮只剩一个，但仍然走 `data-what` —— 有哪几个预设由后端那张表
+               （src/run_daily.py 的 BUTTON_STEPS）说了算，前端不另写一份，
+               以后要加按钮只改这行 HTML。走 `daily` 这一个入口是为了让
+               「第 1 步失败就不发报告」「库里没有就抓全量」「会话失效先静默续期」
+               这些行为和定时任务完全一致（各走各的命令迟早就分叉）。 -->
+          <button class="btn primary" data-what="all">整个项目</button>
+          <button class="btn ghost" id="btn-stop" disabled>停止</button>
+          <span class="hint" id="run-status"></span>
+        </div>
+        <p class="hint" style="margin:8px 0 0 0">
+          <b>整个项目</b> = 抓四池数据 → POS 合规 → <b>四池对账</b>，跟每天定时跑的一模一样。<br>
+          抓数据要一两分钟起；<b>第一次跑</b>会把今年至今的全量补上，更久，跑完下面有完整日志。<br>
+          只想看四池结果、不想再抓一遍：命令行 <code>python -m src.cli pools</code> 单独跑。
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>运行日志</h2></div>
+        <pre class="log" id="run-log">（还没有运行记录）</pre>
+      </div>
+    </div>
+  </div>
+</aside>
 
 <div class="toast" id="toast" hidden></div>
 

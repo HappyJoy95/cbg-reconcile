@@ -74,11 +74,11 @@ class TestFrontendWiring(unittest.TestCase):
     """这一页现在叫什么、渲染哪来的 —— 钉住，别再被人改回「报量排查」。"""
 
     def test_tab_is_renamed(self):
-        self.assertIn('data-tab="reports">四池比对', INDEX_HTML)
-        # ⚠ 只钉 **tab**。运行页那个按钮也叫「报量排查」，那是对的 ——
-        #   第 2 步 reconcile 还在跑（等四池这页稳定了才会把它拿掉）。
-        self.assertNotIn('data-tab="reports">报量排查', INDEX_HTML,
-                         "tab 改回「报量排查」了？那页现在是四池比对的历史")
+        # ⚠ 2026-09-18 前端融合改版：四池比对从**一级页签**降成
+        #   「合规」页里的**二级标签**（用户定：POS 和四池各是各的表，不许混）。
+        self.assertIn('data-subtab="pools">四池比对', INDEX_HTML)
+        self.assertNotIn('data-subtab="pools">报量排查', INDEX_HTML,
+                         "标签改回「报量排查」了？那页现在是四池比对的历史")
 
     def test_renders_pools_history(self):
         self.assertIn("renderPoolsHistory", APP_JS)

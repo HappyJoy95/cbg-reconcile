@@ -225,3 +225,68 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
 .todo-text { flex: 1; font-size: 13.5px; line-height: 1.75; color: #78350f; }
 .todo-text b { color: #7c2d12; }
 .todo-go { flex: 0 0 auto; }
+
+/* ─────────────────── 二级标签（业务页内部）───────────────────
+   2026-09-18 前端融合改版：一级页签按**业务**分家
+   （销售 / 合规 / 会话 / 通用设置），业务页内部再用二级标签切「功能 / 设置」。
+   ⚠ `.subtabs` / `.subtab` 这两个类**早就有了** —— 四池明细的 sheet 分页在用，
+   这里只补子面板的显隐，**别再定义一遍那两个类**（会连带改到那边）。 */
+.subpanel { display: none; }
+.subpanel.active { display: block; }
+
+/* ──────────────────── 运行抽屉（常驻，任何页可开）────────────────────
+   用户 2026-09-18：「运行日志要一直在、且好找」。
+   ⚠ 它**不是页签** —— 右下角一个把手，点开从右侧滑出，日志和「跑一次」都在里面。 */
+.drawer-fab {
+  position: fixed; right: 18px; bottom: 18px; z-index: 40;
+  border: 0; border-radius: 999px; padding: 11px 18px; cursor: pointer;
+  background: var(--brand); color: #fff; font-size: 13.5px; font-weight: 600;
+  box-shadow: 0 6px 20px rgba(37, 99, 235, .35);
+}
+.drawer-fab:hover { background: var(--brand-dark); }
+.drawer-fab[hidden] { display: none; }
+
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(600px, 94vw); z-index: 50;
+  background: var(--card); border-left: 1px solid var(--line);
+  box-shadow: -10px 0 30px rgba(0, 0, 0, .13);
+  display: flex; flex-direction: column;
+}
+.drawer[hidden] { display: none; }
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.drawer-head h2 { font-size: 14.5px; margin: 0; font-weight: 650; }
+.drawer-body { flex: 1 1 auto; overflow: auto; padding: 16px 18px 24px; }
+.drawer-body .card:last-child { margin-bottom: 0; }
+/* 抽屉里的日志**占满剩余高度** —— 常驻就是为了"一直在、且好找"，
+   再给它一个 460px 的封顶就白搬了。 */
+.drawer .log { max-height: none; }
+
+/* 窄屏（门店有 1366×768 的老机器）：抽屉铺满，别只露一条 */
+@media (max-width: 720px) {
+  .drawer { width: 100vw; }
+}
+
+/* ─────────── 顶部导航的悬停二级菜单（苹果官网那种）───────────
+   用户 2026-09-18：「参考苹果这个，最上面几个，鼠标移动过去自动显示对应的二级标签」。
+   ⚠ **悬停只展开菜单，点击才跳** —— 不是"悬停即切换"（扫过去就切页，误触率太高）。
+   ⚠ 二级标签**只有这一份**（页内那行去掉了）—— 两处各一份迟早不同步。 */
+.nav-item { position: relative; display: flex; }
+.nav-menu {
+  position: absolute; top: calc(100% - 2px); left: 0; z-index: 30;
+  min-width: 190px; padding: 6px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nav-menu[hidden] { display: none; }
+/* 菜单里的项是**整行**的（不是页内那种胶囊）—— 挨着点更好点 */
+.nav-menu .subtab {
+  width: 100%; text-align: left; border: 0; background: none;
+  border-radius: 8px; padding: 9px 12px; font-size: 13.5px; color: var(--text);
+}
+.nav-menu .subtab:hover { background: #f1f5f9; }
+/* 当前正停在这一页 —— 展开菜单时能对上是哪个 */
+.nav-menu .subtab.current { color: var(--brand); font-weight: 650; background: #eff6ff; }

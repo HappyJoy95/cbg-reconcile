@@ -26,15 +26,32 @@ import json
 import time
 from pathlib import Path
 
-#: 标签页的 id（要跟 `web/index.html` 里的 `data-tab` 对得上，
-#: 有测试盯着）—— `go` 只能取这几个值之一。
-TABS = ("reports", "pos", "run", "session", "settings")
+#: 「去处理」能跳到的目标 —— `go` 只能取这几个值之一。
+#:
+#: ⚠ **2026-09-18 前端融合改版后，前四个跟 `data-tab` 一一对应**
+#: （一级页签改成按业务分家：销售 / 合规 / 会话 / 通用设置）。
+#: ⚠ **`run` 是例外**：它**不再是页签**，而是右下角那个**常驻抽屉** ——
+#: 前端 `goto()` 里对它特判（开抽屉），不特判的话门店点完什么都看不见。
+#: 测试按这两条分别断言。
+TABS = ("sales", "compliance", "run", "session", "settings")
 TAB_LABELS = {
-    "reports": "报量排查",
-    "pos": "POS 合规",
+    "sales": "销售",
+    "compliance": "合规",
     "run": "运行",
     "session": "会话",
-    "settings": "设置",
+    "settings": "通用设置",
+}
+
+#: 老更新日志里的 `go` 还是改版前的页签 id —— **按新结构翻译一遍**。
+#:
+#: ⚠ 为什么不直接把老 NOTES 里的 go 改掉：那些条目是**当时那版**的说明，
+#: 文字里也写着「到设置 → 定时执行」这种话。文字留着（那是历史），
+#: 但**按钮得跳到今天真的在的地方** —— 否则门店点「去设置」没反应。
+#: 「reports（四池比对）」和「pos（POS 合规）」现在都在**合规**页下当二级标签，
+#: 所以统一跳 `compliance`（切过去落在第一个二级标签上）。
+LEGACY_GO = {
+    "reports": "compliance",
+    "pos": "compliance",
 }
 
 #: 版本 → 更新日志。**新的写在最前面**（按版本号倒序看着方便）。
@@ -286,7 +303,7 @@ def digest(root, version: str, since=None):
     # 待办：把 seen 之后所有版本的待办都带上（含当前版本），按顺序编号
     for v in versions_after(seen, version):
         for item in NOTES[v].get("todo") or ():
-            go = item.get("go") or ""
+            go = LEGACY_GO.get(item.get("go"), item.get("go")) or ""
             out["todo"].append({
                 "text": item.get("text", ""),
                 "go": go,

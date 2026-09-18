@@ -35,13 +35,16 @@ class TestPosTabWiring(unittest.TestCase):
         cls.js = (_repo_root() / "web" / "app.js").read_text(encoding="utf-8")
 
     def test_nav_里有_pos_按钮(self):
-        self.assertIn('data-tab="pos"', self.html)
+        # ⚠ 2026-09-18 前端融合改版：POS 从**一级页签**降到
+        #   「合规」页下的**二级标签**（和四池比对并列，但各是各的表）。
+        self.assertIn('data-subtab="pos">POS 合规', self.html)
 
     def test_panel_id_和_data_tab_对得上(self):
-        self.assertIn('id="panel-pos"', self.html)
+        self.assertIn('id="subpanel-pos"', self.html)
 
     def test_appjs_里有分发行和两个函数(self):
-        self.assertIn("b.dataset.tab === 'pos'", self.js)
+        # 分发表在 `SUBTAB_LOADERS` 里（二级标签 → 拉什么数据）
+        self.assertIn("pos: () => loadPos()", self.js)
         self.assertIn("async function loadPos", self.js)
         self.assertIn("function renderPos", self.js)
 
