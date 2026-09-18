@@ -323,6 +323,53 @@ def push(wc: WecomConfig, ctx: dict, missing: list, unshipped: list,
     return "、".join(sent)
 
 
+#: 企微 markdown **只认这三种颜色**（官方限制，没有纯红）。
+#: `warning` 是橙红，最接近"红色提醒"。
+#: ⚠ 邮件那边上不了色（正文是纯文本），只能靠 `★` 和空行 —— 见 `pools.notify_lines`。
+_WARN_OPEN = '<font color="warning">'
+_WARN_CLOSE = "</font>"
+
+
+def build_pools_markdown(ctx: dict, lines, headline: str) -> str:
+    """企微那条。**`★` 开头的整行染橙红**（"新出现"的才要醒目）。
+
+    企微没有纯红色，`warning` 是能用的最醒目的那个。
+    """
+    store = ctx.get("门店", "?")
+    body = []
+    for ln in lines:
+        if ln.startswith("★"):
+            body.append("%s%s%s" % (_WARN_OPEN, ln, _WARN_CLOSE))
+        else:
+            body.append(ln)
+    return ("## %s 四池对账\n**%s**\n\n%s\n"
+            "<font color=\"comment\">AD=玲珑报了、云商没报 ｜ BC=云商报了、玲珑没报"
+            "</font>" % (store, headline, "\n".join(body)))
+
+
+def push_pools(wc: WecomConfig, ctx: dict, lines, headline: str,
+               xlsx=None) -> str:
+    """推四池对账这一条（摘要 + 可选清单附件）。
+
+    ⚠ **和 POS 不同，这条是"有活要干"** —— 门店要拿 BC 去补报量、催云商出 AD。
+    所以它跟报量排查同一性质，不是月度指标。
+
+    ⚠ 但**不受「只有差异才推」约束**：没有差异时也要推一条"本次无差异"，
+    否则门店分不清"今天没差异"和"今天压根没跑"。
+
+    ⚠ **附件很要紧**：正文只列前 20 台，超出的只在 xlsx 里。
+    企微走的是"先上传换 media_id 再发"（`send_file`），
+    受 `wc.send_file` 那个开关控制（跟报量排查共用一个）。
+    """
+    sent = []
+    send_markdown(wc, build_pools_markdown(ctx, lines, headline))
+    sent.append("已发摘要")
+    if wc.send_file and xlsx:
+        send_file(wc, xlsx)
+        sent.append("已发清单附件")
+    return "、".join(sent)
+
+
 def push_pos(wc: WecomConfig, ctx: dict, lines, headline: str) -> str:
     """推 POS 合规这一条。**和报量排查完全分开**（用户 2026-09-16 定的）。
 

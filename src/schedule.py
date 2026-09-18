@@ -94,29 +94,37 @@ def _pythonw() -> str:
     return _python()
 
 
-#: 自动化勾选 → 步骤。**和界面上的复选框一一对应**（界面给三项，`dump` 默认勾上）。
-#: ⚠ 真值在 `run_daily` —— 这里只是给不 import run_daily 的调用方一个方便入口，
-#: 有测试盯着两边一致。
-AUTOMATION_CHOICES = ("dump", "reconcile", "pos")
+#: 自动化勾选 → 步骤。**和界面上的复选框一一对应**。
+#: ⚠ **不含 `dump`** —— 用户 2026-09-17 把那个复选框拿掉了
+#: （「默认执行这个。不可选」），它由 `run_daily.ALWAYS_STEPS` 无条件补上。
+#: 真值在 `run_daily`，这里只是给不 import run_daily 的调用方一个方便入口，
+#: 有测试盯着两边对得上。
+AUTOMATION_CHOICES = ("pos", "pools")
 
 
 def steps_from_choices(picked):
-    """勾了哪几项 → 步骤元组。校验交给 `run_daily._check_steps`，只此一处。
+    """勾了哪几项 → 步骤元组（**含必做的**）。校验交给 `run_daily`，只此一处。
 
-    ⚠ **一件都没勾是错的**，抛 `ValueError`。静默当成"都跑"的话，
-    用户在界面上取消勾选、结果每天照样推送，而日志里一个字都不会说。
+    ⚠ **两个都不勾是合法的**（用户 2026-09-17 定）：含义是「每天只抓数据，
+    不算也不推」。原来那条"至少勾一项"防的是"取消了勾选、结果照样推"，
+    而现在的行为严格照着勾选走（空 + 必做），**不会静默扩大**。
     """
     from . import run_daily
-    return run_daily._check_steps(picked)
+    return run_daily.with_always(picked)
 
 
 def choices_from_steps(steps) -> list:
-    """步骤 → 勾选框该点亮哪几个。"""
+    """步骤 → 勾选框该点亮哪几个。
+
+    ⚠ **必做的项不参与**（`ALWAYS_STEPS`）—— 界面上没有它的框，
+    混进去的话前端会去点一个不存在的复选框。
+    """
     from . import run_daily
     try:
-        return list(run_daily._check_steps(steps))
+        got = run_daily.with_always(steps)
     except ValueError:
         return list(AUTOMATION_CHOICES)
+    return [s for s in got if s not in run_daily.ALWAYS_STEPS]
 
 
 def existing_steps(root) -> tuple:
@@ -124,6 +132,9 @@ def existing_steps(root) -> tuple:
 
     重建时保住用户的勾选，跟 `existing_days_ago` 一个道理。
     读不出来就当默认（三件都做）—— 老脚本没有跳过开关，确实是这样。
+
+    ⚠ 出口统一走 `with_always`：老 run.bat 里带着 `--skip-dump` 的
+    （那时候"抓数据"还能取消）要**补回来**，否则升级后库永远不更新。
     """
     from . import run_daily
     for p in (script_path(root), manual_script_path(root)):
@@ -136,8 +147,8 @@ def existing_steps(root) -> tuple:
         skipped = {s for s, flag in run_daily.STEP_FLAGS.items() if flag in text}
         kept = tuple(s for s in run_daily.STEPS if s not in skipped)
         if kept:
-            return kept
-    return tuple(run_daily.AUTOMATION_DEFAULT_STEPS)
+            return run_daily.with_always(kept)
+    return run_daily.with_always(run_daily.AUTOMATION_DEFAULT_STEPS)
 
 
 def automation_steps(root) -> tuple:
@@ -145,6 +156,9 @@ def automation_steps(root) -> tuple:
 
     记录优先的原因和任务详情一样：提权注册的任务普通权限读不到，
     但我们自己记了一份（`.secrets/schedule.json`）。
+
+    ⚠ 三条出口**都要过 `with_always`** —— 老记录里可能没有 `dump`
+    （那时它还是可选项），不补的话那份记录会一直生效，库永远不更新。
     """
     from . import run_daily
     for rec in (_recall(root) or {}).values():
@@ -153,14 +167,14 @@ def automation_steps(root) -> tuple:
         steps = rec.get("steps")
         if steps:
             try:
-                return run_daily._check_steps(steps)
+                return run_daily.with_always(steps)
             except ValueError:
                 pass
         what = rec.get("what")            # 老格式：单个字符串
         if what:
             try:
-                return tuple(run_daily.BUTTON_STEPS[what])
-            except KeyError:
+                return run_daily.with_always(run_daily.BUTTON_STEPS[what])
+            except (KeyError, ValueError):
                 pass
     return existing_steps(root)
 
@@ -173,7 +187,7 @@ def set_automation_steps(root, config: str, picked, run_daily_fn=None) -> dict:
     账户被 UAC 过滤），为了改个勾选弹框不值得，而且弹了还未必成。
     """
     from . import run_daily                        # 延迟 import：避免和 cli 绕圈
-    steps = run_daily._check_steps(picked)
+    steps = run_daily.with_always(picked)
     root = Path(root)
     days = existing_days_ago(root)
     if days is None:
@@ -205,16 +219,19 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     # ⚠ **不要在 bat 里写 `>> out\run.log`**：那样屏幕上什么都没有，
     #   双击的人看到的是黑窗口 + 一分多钟 + 自己关掉，完全判断不了跑没跑。
     #   日志交给 Python 分流（--log-file），屏幕和文件两边都有。
-    # 勾了「只报量排查 / 只算 POS」就带上对应的跳过开关 —— 映射表在 run_daily，
+    # 勾了「只算 POS / 只做四池对账」就带上对应的跳过开关 —— 映射表在 run_daily，
     # **这里不另写一份**（各写一份必然有一天对不上）。
     #
-    # ⚠ 用的是 `automation_flags_for`，**不是界面按钮那张 `flags_for`**：
-    #   定时任务没人盯着，抓数据必须留着 —— 用按钮那张的话，
-    #   勾"只报量排查"会生成 `--skip-dump`，库再也不更新，
-    #   然后报量排查每天以「库不新鲜」失败，而日志只会说失败。
+    # ⚠ 过一道 `with_always`：**定时任务永远要抓数据**（用户 2026-09-17 定的，
+    #   界面上那个复选框都拿掉了）。不过这道的话，一份老记录里的
+    #   `--skip-dump` 会一直生成下去，库再也不更新，
+    #   而日志里只会说"跑完了"。
+    #   ⚠ 命令行 `daily --skip-dump` 仍然可以（调试用），**管的只是这里** ——
+    #   走 `flags_for`/`flags_for_steps` 那条路不经过 `with_always`。
     from . import run_daily
     if steps is None:
         steps = run_daily.AUTOMATION_DEFAULT_STEPS
+    steps = run_daily.with_always(steps)
     extra = "".join(" " + f for f in run_daily.flags_for_steps(steps))
     base = (f'"{_pythonw()}" -m src.cli -c "{config}" daily{extra}'
             f' --days-ago {int(days_ago)}')
@@ -894,3 +911,132 @@ def remove(name: str | None = None, root=None) -> dict:
     if res.get("ok") and root is not None:
         _forget(root, name or TASK_NAME)
     return res
+
+
+# --------------------------------------------------- 老任务：认出来 + 换掉
+#: 「表里还有老名字的任务」那个弹窗记这儿 —— **每版只弹一次**。
+#: 放 `.secrets/`（自更新的 NEVER_TOUCH），跟 `whatsnew.json` 一个路子。
+LEGACY_PROMPT_REL = ".secrets/legacy-prompt.json"
+
+
+def is_legacy_name(name: str) -> bool:
+    """这条任务名是不是**改名之前**那套（`CBG报量对账…`）。
+
+    ⚠ 判据必须跟界面**一致**（`web/app.js` 那边也是按前缀比）——
+    不一致的话会出现"界面说有、后端说没有"，而用户看到的就是按钮点了没反应。
+    """
+    leaf = _leaf(name or "")
+    return any(leaf.startswith(n) for n in LEGACY_TASK_NAMES)
+
+
+def legacy_task_names(root) -> list:
+    """现在系统里还挂着的**老名字任务**的完整名（可能不止一条）。
+
+    ⚠ 读不到任务列表时返回空 —— 于是"没有老任务"，弹窗不弹。
+    **这个方向的错法是对的**：宁可漏弹一次，也不要瞎报"你有老任务要删"。
+    """
+    try:
+        tasks = status(Path(root)).get("tasks") or []
+    except Exception:                        # noqa: BLE001
+        return []
+    out = []
+    for t in tasks:
+        full = str(t.get("full_name") or t.get("name") or "")
+        if full and is_legacy_name(full):
+            out.append(full)
+    return out
+
+
+def replace_legacy(root, time_str: str = DEFAULT_TIME, days_ago: int = DEFAULT_DAYS_AGO,
+                   config: str = "", name: str | None = None) -> dict:
+    """把**老名字的任务**换成新的 —— ⚠⚠ **先建后删，顺序是这条需求的全部要害**。
+
+    1. 先把新的建出来（`install`；`/create` 自带 `/f`，同名的一并覆盖）
+    2. **确认建成了**才去删老的
+    3. 建失败 ⇒ **一个老的都不许动**
+
+    反过来的话（先删后建），中间任何一步失败都会落到
+    **"门店再也不会自动跑"** —— 那是这条需求最坏的失败模式，
+    而且**当天不会有人发现**（要等第二天到点没出报告才知道）。
+
+    返回 `{ok, installed, legacy_before, removed, failed, message}`。
+    """
+    root = Path(root)
+    old = legacy_task_names(root)
+
+    res = install(root, time_str, days_ago, config, name=name)
+    out = {"ok": bool(res.get("ok")), "installed": bool(res.get("ok")),
+           "legacy_before": old, "removed": [], "failed": [],
+           "install_message": res.get("message", "")}
+    if not res.get("ok"):
+        # ⚠⚠ **这条分支就是整条需求的护栏。** 新的没建成，老的一个都不许动 ——
+        #   门店原来怎么跑现在还怎么跑，最坏也只是"老任务还在"，不会变成"啥都没有"。
+        out["message"] = ("新任务**没建成**（%s）—— **老任务一条都没动**，"
+                          "门店原来怎么跑现在还怎么跑。"
+                          % (res.get("message") or "原因不明"))
+        return out
+
+    for full in old:
+        r = _win_remove(full) if kind() == "windows" else _unix_remove(full)
+        leaf = _leaf(full)
+        if r.get("ok"):
+            out["removed"].append(leaf)
+            # 记录里那份也抹掉 —— 不然界面上"删了还显示时间"
+            _forget(root, leaf)
+        else:
+            out["failed"].append(leaf)
+    invalidate_cache()
+
+    out["ok"] = not out["failed"]
+    parts = ["新任务已建成"]
+    if out["removed"]:
+        parts.append("删掉老的 %d 条：%s" % (len(out["removed"]), "、".join(out["removed"])))
+    if out["failed"]:
+        parts.append("⚠ 有 %d 条老任务**删不掉**：%s —— 新的不受影响，"
+                     "但这两条会一天跑两遍，得手动去任务计划程序里删"
+                     % (len(out["failed"]), "、".join(out["failed"])))
+    if not old:
+        parts.append("表里本来就没有老任务")
+    out["message"] = "；".join(parts) + "。"
+    return out
+
+
+def _prompt_path(root) -> Path:
+    return Path(root) / LEGACY_PROMPT_REL
+
+
+def legacy_prompt_pending(root) -> dict:
+    """要不要弹「老任务要处理」那个框。
+
+    两个条件**都**满足才弹：① 系统里真还挂着老名字的任务；② 这一版还没弹过。
+    ⚠ 判据全在后端 —— 前端不自己记"弹过没"，那种状态放前端一定会漂。
+    """
+    names = legacy_task_names(root)
+    if not names:
+        return {"show": False, "names": [], "task_name": TASK_NAME}
+    seen = ""
+    try:
+        seen = str(json.loads(_prompt_path(root).read_text(encoding="utf-8"))
+                   .get("version") or "")
+    except (OSError, ValueError, AttributeError):
+        seen = ""
+    from . import version                         # 延迟 import：避免和 cli 绕圈
+    return {"show": seen != version.VERSION, "names": names,
+            "version": version.VERSION, "task_name": TASK_NAME}
+
+
+def mark_legacy_prompted(root) -> bool:
+    """记下"这一版弹过了"，以后不再主动弹（设置页那个横幅照旧在）。"""
+    from . import version
+    p = _prompt_path(root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"version": version.VERSION,
+                                   "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                  ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)                            # 原子替换：写一半断电不留坏文件
+        return True
+    except OSError:
+        # ⚠ 记不上不算失败 —— 大不了下次再弹一次，别为了记状态把界面卡住
+        return False

@@ -98,7 +98,7 @@ class TestShouldPush(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         why = upgrade.should_push(root, "2.0.0",
                                   {"from": "1.6.1", "to": "2.0.0", "major": True})
-        self.assertTrue(why)
+        self.assertTrue(why, "大版本升级必须推")
         self.assertIn("大版本", why)
 
     def test_小版本没待办就不推(self):
@@ -110,8 +110,14 @@ class TestShouldPush(unittest.TestCase):
             self.assertIsNone(upgrade.should_push(
                 root, "2.0.1", {"from": "2.0.0", "to": "2.0.1", "major": False}))
 
-    def test_小版本但有待办也推(self):
-        """⚠ 待办**不推出去等于没有**。"""
+    def test_小版本不推(self):
+        """⚠ **升级提醒只在大版本推** —— 用户 2026-09-17 实测后定的。
+
+        原先这里还有一条"小版本只要带了待办也推"（理由是"待办不推出去等于没有"），
+        结果 2.0.1 → 2.1.0 这种普通升级也发一封邮件出来，用户当场指出
+        「升级提醒不用推送吧」。
+        要做的事**控制台弹窗照旧会讲** —— 那是每次更新都弹的，不用再占一次推送。
+        """
         tmp, root = _root(running="2.0.1")
         self.addCleanup(tmp.cleanup)
         fake = {"2.0.0": whatsnew.NOTES["2.0.0"],
@@ -121,7 +127,7 @@ class TestShouldPush(unittest.TestCase):
         with mock.patch.object(whatsnew, "NOTES", fake):
             why = upgrade.should_push(
                 root, "2.0.1", {"from": "2.0.0", "to": "2.0.1", "major": False})
-        self.assertTrue(why)
+        self.assertIsNone(why, "小版本不该推，哪怕它带了待办")
 
     def test_同一版只推一次(self):
         tmp, root = _root(running="2.0.0", pushed="2.0.0")

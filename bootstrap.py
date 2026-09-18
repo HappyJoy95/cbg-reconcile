@@ -47,7 +47,7 @@ sys.path.insert(0, str(ROOT))
 
 REQUIRED = ("requests", "yaml", "openpyxl")       # 模块名（yaml 是 PyYAML）
 STDLIB_ONLY = ("install", "install-deps", "autostart", "uninstall",
-               "schedule-install", "schedule-remove")   # 不碰第三方包
+               "schedule-install", "schedule-remove", "schedule-replace")   # 不碰第三方包
 
 # 开机自启那条计划任务的名字。**引一次就够** —— `print_leftover_task_help()` 要
 # 在管理员命令行里拼出删除命令，硬写两处迟早对不上（改了一处、另一处就成了
@@ -350,6 +350,37 @@ def do_schedule_install(argv: list, result_file: str = "") -> int:
         print()
         print("  也可以拿管理员权限手动跑这一条：")
         print(f"    {res['manual']}")
+    _write_result(result_file, res)
+    return 0 if res.get("ok") else 2
+
+
+def do_schedule_replace(argv: list, result_file: str = "") -> int:
+    """把**老名字**的定时任务换成新的 —— ⚠⚠ **先建后删**。
+
+    ## 为什么单独一个子命令
+
+    要提权才能做：老任务可能是**管理员身份**建的，而普通权限**连读都读不到**
+    （更别说删）。做成一个子命令 ⇒ **只弹一次 UAC** 就把"建新的 + 删老的"
+    一起做完，而不是弹两次（中间那次失败还会留下"删了没建"的烂摊子）。
+
+    ## 顺序
+
+    顺序由 `schedule.replace_legacy` 守着（在那边的注释里写了为什么）——
+    这里只是把它**提权跑一遍**，不另外实现一套。**别在这层再写一遍判断逻辑**：
+    两处各写一份，迟早有一处落后，而落后的那处正是"先删后建"。
+    """
+    def opt(name, default=""):
+        return argv[argv.index(name) + 1] if name in argv and \
+            argv.index(name) + 1 < len(argv) else default
+
+    from src import schedule
+    try:
+        res = schedule.replace_legacy(
+            ROOT, opt("--time", "21:00"), int(opt("--days-ago", "1")),
+            opt("--config", ""), name=opt("--name") or None)
+    except Exception as e:                   # noqa: BLE001
+        res = {"ok": False, "message": f"替换失败：{e}"}
+    print("  " + ("✓ " if res.get("ok") else "✗ ") + str(res.get("message", "")))
     _write_result(result_file, res)
     return 0 if res.get("ok") else 2
 
@@ -776,6 +807,9 @@ def main() -> int:
             #   权限，而且会让自动抓会话失败 —— 所以必须显式要，不能猜）。
             return do_autostart(elevated="--elevated" in argv,
                                 result_file=result_file)
+
+        if cmd == "schedule-replace":
+            return do_schedule_replace(argv, result_file=result_file)
 
         if cmd == "schedule-remove":
             # ⚠ 只做"删"这一件事 —— 提权删掉管理员建的旧任务，

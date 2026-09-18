@@ -21,7 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (autostart, browser, config_io, elevate, mailer, run_daily, schedule,
+from . import (autostart, browser, config_io, elevate, mailer,
+               pools_history, pools_notify,
+               run_daily, schedule,
                selfupdate, service, upgrade, version, wecom, whatsnew)
 from .cbg import CbgClient, CbgError
 from .erp import (DEFAULT_ENV_FILE, ErpCaptchaRequired, ErpClient, ErpError,
@@ -429,17 +431,24 @@ class App:
             "config": {"path": self.config, "values": config_io.pick(cfg)},
             "session": self.session_info(),
             "schedule": schedule.status(self.root),
+            # 老定时任务要不要**主动弹一次**（用户 2026-09-17 选的方案 C）。
+            # ⚠ 判据全在后端：① 系统里真挂着老名字的任务 ② 这一版还没弹过。
+            #   前端不自己记"弹过没" —— 那种状态放前端一定会漂。
+            "legacy_prompt": schedule.legacy_prompt_pending(self.root),
             # 「自动化跑什么」——界面渲染复选框要用，所以连**可选值**一起给，
             # 免得前端自己写一份标签表（那就是"两处各写一遍"的开始）。
             "automation": {
                 "steps": list(schedule.automation_steps(self.root)),
-                # ⚠ 三项都给，`dump` 也在里面（默认勾上）—— 用户 2026-09-16 定的。
-                #   复选框列表和旁边那列「跑什么」必须对得上，
-                #   否则用户看到"只勾了两项"、而实际跑了三件，会以为程序乱来。
+                # ⚠ **只给可选的那两项**（用户 2026-09-17 把「抓四池数据」
+                #   的复选框拿掉了）。复选框列表和旁边那列「跑什么」必须对得上 ——
+                #   否则用户看到"只勾了两项"、实际跑了三件，会以为程序乱来。
                 "choices": [{"value": k, "label": run_daily.STEP_LABELS[k]}
-                            for k in run_daily.AUTOMATION_DEFAULT_STEPS],
+                            for k in schedule.AUTOMATION_CHOICES],
+                # 取消不掉的项单独给 —— 前端**只写一句说明，不画复选框**
+                #   （画成灰掉的勾选框反而像"能改但改不动"）。
+                "always_on": [{"value": k, "label": run_daily.STEP_LABELS[k]}
+                              for k in run_daily.ALWAYS_STEPS],
                 "label": run_daily.steps_label(schedule.automation_steps(self.root)),
-                "always_on": [],          # 预留：将来若有"不许取消"的项
             },
             # "启动脚本这次被重建过" —— 界面可以据此提一句，
             # 免得门店发现定时任务的命令悄悄变了会懵
@@ -849,6 +858,49 @@ class Handler(BaseHTTPRequestHandler):
         #
         # 返回：`{"ok":..., "message":...}`。拿不到提权子进程的结果（用户点了"否"、
         # 超时）→ `elevated: None`，让界面告诉用户"要么没点「是」，要么超时了"。
+        if path == "/api/schedule/legacy-prompt/seen" and method == "POST":
+            # 「知道了 / 稍后再说」—— 记下这一版弹过了，以后不再主动弹。
+            # ⚠ 记不上也返回 ok（只是下次再弹一次），为了记状态把界面卡住不值得。
+            return self._json({"ok": True,
+                               "saved": schedule.mark_legacy_prompted(app.root)})
+
+        if path == "/api/schedule/replace" and method == "POST":
+            # 「一键处理老任务」：建新的 → 建成了再删老的。
+            #
+            # ⚠⚠ **顺序由 `schedule.replace_legacy` 守着**，这里只管
+            #   "先用普通权限试、不行才提权"（跟 `/api/schedule` 那条一个路子：
+            #   首选普通权限 —— 建出来的任务归当前用户，以后读改删都不用管理员，
+            #   绝大多数机器到这就成了，**一次 UAC 都不弹**）。
+            body = self._read_json()
+            st = schedule.status(app.root)
+            time_str = str(body.get("time") or st.get("time") or schedule.DEFAULT_TIME)
+            days_ago = schedule.existing_days_ago(app.root)
+            if days_ago is None:
+                days_ago = schedule.DEFAULT_DAYS_AGO
+
+            res = schedule.replace_legacy(app.root, time_str, days_ago, str(app.config))
+            res["elevated"] = False
+            if not res.get("ok") and not elevate.is_admin():
+                # 普通权限没成 ⇒ 才轮到提权。**一次 UAC 里把"建新的 + 删老的"做完**
+                # （所以是 `schedule-replace` 一个子命令，不是 install 后再 remove）。
+                got = elevate.run_elevated(
+                    app.root / "bootstrap.py",
+                    ["schedule-replace", "--time", time_str,
+                     "--days-ago", str(days_ago), "--config", str(app.config)],
+                    timeout=90)
+                if got is not None:
+                    got["elevated"] = True
+                    got["status"] = schedule.status(app.root)
+                    return self._json(got)
+                # 提权也没拿到结果（点了"否" / 超时）：把**普通权限那次**的
+                # 失败原因如实给出去，别让用户只看到"没反应"。
+                res["elevated"] = None
+                res["message"] = ("%s 提权重试也没拿到结果 —— 要么你点了 UAC 的「否」，"
+                                  "要么那个窗口还在等你按回车。"
+                                  % res.get("message", ""))
+            res["status"] = schedule.status(app.root)
+            return self._json(res)
+
         if path == "/api/elevate" and method == "POST":
             body = self._read_json()
             what = (body.get("what") or "").strip()
@@ -996,12 +1048,48 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(st)
 
         if path == "/api/whatsnew/seen" and method == "POST":
-            # 「知道了」—— 记下这一版看过了，以后不再弹。
+            # 「知道了」/ 弹窗一显示 —— 记下这一版看过了，以后不再弹。
             # ⚠ 记不上也返回 ok（`mark_seen` 写不成只是下次再弹一次），
             #   为了记状态把界面卡住不值得。
             body = self._read_json()
             v = str(body.get("version") or version.VERSION)
-            return self._json({"ok": True, "saved": whatsnew.mark_seen(app.root, v)})
+            # ⚠⚠ **顺序不能反**：先把"现在该弹的这一份"算出来存下，**再**记 seen。
+            #   反过来的话 `seen` 已经是 v 了，`versions_after` 算出**空的待办**
+            #   —— 坑 13 那条「看过 ≠ 做完了」，差点又踩一次。
+            snap = whatsnew.digest(app.root, v)
+            return self._json({"ok": True,
+                               "saved": whatsnew.mark_seen(app.root, v, body=snap)})
+
+        if path == "/api/whatsnew" and method == "GET":
+            # 「看这一版的更新说明」—— 从「设置 → 检查更新」随时翻回来。
+            # ⚠ **不重新算**：算出来的是"现在还没做的"，而门店要的是
+            #   "升级那天弹给我的那份"。所以优先取存档（见 `last_digest`）。
+            #   取不到（刚装上、还没弹过）才现算一份。
+            return self._json({"body": whatsnew.last_digest(app.root)
+                                       or whatsnew.digest(app.root, version.VERSION)})
+
+        if path == "/api/pools/history":
+            # 「四池比对」页的历史。
+            #   ?date=YYYY-MM-DD  → 那一天的 AD/BC 明细
+            #   不带                → 有哪些年、那一年的逐日条数
+            # ⚠ 明细行是 `pools.details()` 的原样 dict，键就是中文
+            #   （串号/机型/门店/单号）—— 前端直接照着渲染，别在这儿翻译一遍。
+            year = (query.get("year") or [""])[0]
+            day = (query.get("date") or [""])[0].strip()
+            y = int(year) if str(year).isdigit() else None
+            if day:
+                return self._json(pools_history.detail(app.root, day, y))
+            return self._json({"years": pools_history.years(app.root),
+                               "days": pools_history.days(app.root, y)})
+
+        if path == "/api/pools-notify/clear" and method == "POST":
+            # 「清除推送记忆」—— 清完下次推送会把所有串号重新当"新出现"强调。
+            # ⚠ **只删那个记忆文件**，不动库、不动清单、不影响定时任务。
+            #   如实回报"之前到底有没有"，不然界面永远说"已清除"，用户分不清
+            #   是清成功了还是按钮没生效。
+            had = pools_notify.clear(app.root)
+            return self._json({"ok": True, "had": had,
+                               "message": "已清除推送记忆" if had else "本来就没有推送记忆"})
 
         if path == "/api/report-bug" and method == "POST":
             # ⚠ 同步跑（跟 `/api/mail/test`、`/api/wecom/test` 一个路子）——
@@ -1027,11 +1115,15 @@ class Handler(BaseHTTPRequestHandler):
             picked = body.get("steps")
             if picked is None:
                 picked = body.get("what")
-            if not isinstance(picked, list) or not picked:
+            # ⚠ **空数组是合法的**（用户 2026-09-17 定）：含义是「每天只抓数据，
+            #   不算也不推」。要挡的只是"传了个不是数组的东西"（老前端传字符串）。
+            if not isinstance(picked, list):
                 return self._json(
-                    {"error": "至少勾一项（%s）"
-                              % " / ".join(run_daily.STEP_LABELS[k]
-                                           for k in run_daily.AUTOMATION_DEFAULT_STEPS)}, 400)
+                    {"error": "steps 要是个数组（可选项：%s；「%s」是必做的，不用传）"
+                              % (" / ".join(run_daily.STEP_LABELS[k]
+                                            for k in schedule.AUTOMATION_CHOICES),
+                                 " / ".join(run_daily.STEP_LABELS[k]
+                                            for k in run_daily.ALWAYS_STEPS))}, 400)
             try:
                 res = schedule.set_automation_steps(app.root, app.config, picked)
             except ValueError as e:
@@ -1131,7 +1223,6 @@ class Handler(BaseHTTPRequestHandler):
         # ---- 运行
         if path == "/api/run" and method == "POST":
             body = self._read_json()
-            mode = body.get("mode") or "days_ago"
             # ⚠ `what` 认不出来要**在起进程之前**返回 400（`runner.start` 会抛 ValueError）。
             #   不拦的话界面上会留一个半死的 job，一直显示"在跑"。
             what = body.get("what") or run_daily.DEFAULT_WHAT
@@ -1139,15 +1230,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(
                     {"error": "不认识的 what：%s（认得的是 %s）"
                               % (what, "、".join(sorted(run_daily.BUTTON_STEPS)))}, 400)
-            kw = {"what": what,
-                  "lookback": body.get("lookback"), "lookahead": body.get("lookahead")}
-            if mode == "date":
-                kw.update(date=body.get("date"), days_ago=None)
-            elif mode == "today":
-                kw.update(days_ago=0)
-            else:
-                kw.update(days_ago=int(body.get("days_ago", 1)))
-            job = manager.start(app.root, app.config, **kw)
+            # ⚠ 2026-09-17：`mode` / `date` / `days_ago` / `lookback` / `lookahead`
+            #   **不再收**，也不再往命令行拼 —— 报量排查整步拿掉之后它们一个都
+            #   不影响结果，界面上那两块（目标日 / 高级）也删了。
+            #   老前端/老脚本多传字段**不报错、直接忽略**（刷新前的那一版
+            #   还在跑旧 JS，报 400 会让按钮点了没反应）。
+            job = manager.start(app.root, app.config, what=what)
             return self._json(job.snapshot(0))
 
         if path == "/api/run" and method == "GET":

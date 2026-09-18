@@ -145,14 +145,11 @@ def should_push(root, current: str, change: dict) -> "str | None":
         return None                     # 这一版推过了
     if change.get("major"):
         return "大版本升级（%s → %s）" % (change["from"], change["to"])
-    # 小版本：只有当**这一次升级**带来了要做的事时才推 —— 待办不推等于没有。
-    #
-    # ⚠ 用 `since=升级前的版本`，**不是**"看过没"：判据要跟**真正会推出去的内容**
-    #   一致（`check` 里也是这个 `since`）。用"看过没"的话会出现
-    #   "判据说该推、推出来却没有待办"这种自相矛盾。
-    got = whatsnew.digest(root, current, since=change.get("from"))
-    if got and got.get("todo"):
-        return "这一版有要做的事"
+    # ⚠ **小版本不推。** 用户 2026-09-17 实测后定的：
+    #   「升级提醒不用推送吧」—— 他当初的要求就是**只在大版本（1.x → 2.x）推**。
+    #   之前这里还有一条"小版本只要这次带了『要做的事』也推"，
+    #   结果 2.0.1 → 2.1.0 这种普通升级也会发一封邮件出来。
+    #   要做的事**控制台弹窗照旧会讲**（那是每次更新都弹的），不用再占一次推送。
     return None
 
 

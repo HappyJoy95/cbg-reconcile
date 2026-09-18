@@ -6,11 +6,14 @@
 
 ## 跑「什么」由 `what` 决定（2026-09-16 起）
 
-原来这里只有一件事：跑对账。现在「运行」页有四个按钮 ——
+原来这里只有一件事：跑对账。后来「运行」页拆成四个按钮 ——
 抓数据 / 报量排查 / POS 合规 / 整个项目 —— 对应的就是 `what`。
 
-⚠ **四个按钮都走 `daily` 这一个入口**，只是加不同的跳过开关。
-走四条不同命令的话，`daily` 那些行为（第 1 步失败就不发报告、
+⚠ **2026-09-17 起界面上只剩「整个项目」一个按钮**（用户定），但 `what`
+这套名字留着：`/api/run` 和命令行都还认，`daily --skip-dump` 那套一步没动。
+
+⚠ **所有按钮都走 `daily` 这一个入口**，只是加不同的跳过开关。
+走几条不同命令的话，`daily` 那些行为（第 1 步失败就不发报告、
 库里没有就抓全量、会话失效先静默续期）在界面上就全都享受不到，
 而且"界面跑的和定时任务跑的"迟早分叉。
 """
@@ -89,25 +92,20 @@ class RunManager:
         return j if (j and j.running) else None
 
     # ---------------------------------------------------------------- 启动
-    def start(self, root: Path, config: str, *, what: str = run_daily.DEFAULT_WHAT,
-              days_ago: int | None = 1, date: str | None = None,
-              lookback: int | None = None, lookahead: int | None = None) -> RunJob:
+    def start(self, root: Path, config: str, *,
+              what: str = run_daily.DEFAULT_WHAT) -> RunJob:
         # ⚠ 先算 flags —— `what` 认不出来要**在起进程之前**就炸（`flags_for` 会抛）。
         #   起完再炸的话会留一个半死的 job，界面上一直显示"在跑"。
         flags = run_daily.flags_for(what)
         with self._lock:
             if self.current():
                 raise RuntimeError("已经有一个任务在跑了，等它结束")
+            # ⚠ 2026-09-17：`--days-ago` / `--date` / `--lookback` / `--lookahead`
+            #   **不再往命令后面拼**。`daily` 的命令行还认这四个参数（老 run.bat /
+            #   计划任务里写死着，删了会 unrecognized arguments），但它们现在
+            #   一个都不影响结果 —— 拼上去只会让日志里的命令看着像"有个目标日"。
             argv = [sys.executable or "python", "-u", "-m", "src.cli", "-c", config,
                     "daily", *flags]
-            if date:
-                argv += ["--date", date]
-            elif days_ago is not None:
-                argv += ["--days-ago", str(int(days_ago))]
-            if lookback is not None:
-                argv += ["--lookback", str(int(lookback))]
-            if lookahead is not None:
-                argv += ["--lookahead", str(int(lookahead))]
 
             job = RunJob(uuid.uuid4().hex[:12], argv, str(root))
             job.what = what

@@ -12,6 +12,7 @@
 4. 对账的 `EXIT_DIFF`(3) 算**跑通**（有差异是正常结果，不是故障）
 """
 
+import datetime
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -59,7 +60,7 @@ def run(argv=None, **codes):
 class TestHappyPath(unittest.TestCase):
     def test_三步都跑_按顺序(self):
         rc, calls, _ = run()
-        self.assertEqual(calls, ["dump", "check", "pos"])
+        self.assertEqual(calls, ["dump", "pos"])
         self.assertEqual(rc, cli.EXIT_OK)
 
     def test_第一步抓的是当月不是全量(self):
@@ -74,15 +75,6 @@ class TestHappyPath(unittest.TestCase):
             _, _, ns = run()
         self.assertEqual(ns["dump"].month, "")
         self.assertFalse(ns["dump"].all)
-
-    def test_第二步不碰华为(self):
-        """⚠ 华为会话续期那套在 check 里已经拆掉了 —— 别哪天又被加回来。
-
-        （顺带：华为不能并发登录，而第 2、3 步都不登录华为，
-        所以这条流程不会和"手动抓会话"打架。）
-        """
-        _, _, ns = run()
-        self.assertTrue(ns["check"].no_refresh)
 
     def test_第三步只读库(self):
         _, _, ns = run()
@@ -132,33 +124,22 @@ class TestStep1FailureAbortsEverything(unittest.TestCase):
         self.assertEqual(calls, ["dump"])
 
 
-class TestStep2FailureStillRunsPos(unittest.TestCase):
-    """第 2 步失败 ⇒ **第 3 步照跑**（POS 只读库，跟云商没关系）。"""
+class TestOnlyStep1CanAbort(unittest.TestCase):
+    """⚠ 第 2 步（报量排查）拿掉之后，**只有第 1 步失败会中止整条流程**。
 
-    def test_云商失败也照算POS(self):
-        rc, calls, _ = run(check_rc=cli.EXIT_FETCH)
-        self.assertEqual(calls, ["dump", "check", "pos"])
+    原来是"第 2 步失败也照跑第 3 步"（POS 只读库，跟云商没关系）——
+    那个场景随第 2 步一起没了。留下这条是为了钉住"中止规则现在只剩一条"。
+    """
+
+    def test_第1步失败就什么都不发(self):
+        rc, calls, _ = run(dump_rc=cli.EXIT_FETCH)
+        self.assertEqual(calls, ["dump"])
         self.assertEqual(rc, cli.EXIT_FETCH)
 
-    def test_会话问题也照算POS(self):
-        rc, calls, _ = run(check_rc=cli.EXIT_AUTH)
-        self.assertEqual(calls, ["dump", "check", "pos"])
-        self.assertEqual(rc, cli.EXIT_AUTH)
-
-    def test_内部错误也照算POS(self):
-        rc, calls, _ = run(check_rc=cli.EXIT_INTERNAL)
-        self.assertEqual(calls, ["dump", "check", "pos"])
-        self.assertEqual(rc, cli.EXIT_INTERNAL)
-
-    def test_第二步失败的理由要写出来(self):
-        import io
-        import contextlib
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            run(check_rc=cli.EXIT_FETCH)
-        msg = err.getvalue()
-        self.assertIn("第 2 步（报量排查）没跑通", msg)
-        self.assertIn("但第 3 步照跑", msg)
+    def test_第1步成功就一路跑完(self):
+        rc, calls, _ = run()
+        self.assertEqual(calls, ["dump", "pos"])
+        self.assertEqual(rc, cli.EXIT_OK)
 
 
 class TestDiffIsNotFailure(unittest.TestCase):
@@ -166,15 +147,7 @@ class TestDiffIsNotFailure(unittest.TestCase):
 
     def test_有差异时第三步照跑(self):
         rc, calls, _ = run(check_rc=cli.EXIT_DIFF)
-        self.assertEqual(calls, ["dump", "check", "pos"])
-
-    def test_有差异时最终退出码还是3(self):
-        """⚠ 3 必须**传出去** —— 计划任务/界面靠它知道"今天有差异要处理"。
-
-        不能因为"三步都跑完了"就吞成 0。
-        """
-        rc, _, _ = run(check_rc=cli.EXIT_DIFF)
-        self.assertEqual(rc, cli.EXIT_DIFF)
+        self.assertEqual(calls, ["dump", "pos"])
 
     def test_有差异但POS挂了_退POS的码(self):
         rc, _, _ = run(check_rc=cli.EXIT_DIFF, pos_rc=cli.EXIT_FETCH)
@@ -188,94 +161,52 @@ class TestExitCodeIsFirstNonSuccess(unittest.TestCase):
     def test_只有第三步坏(self):
         self.assertEqual(run(pos_rc=cli.EXIT_FETCH)[0], cli.EXIT_FETCH)
 
-    def test_第二步的码优先于第三步(self):
-        """取**第一个**不成功的 —— 前一步的因果更靠上。"""
-        rc, _, _ = run(check_rc=cli.EXIT_FETCH, pos_rc=cli.EXIT_INTERNAL)
-        self.assertEqual(rc, cli.EXIT_FETCH)
-
-
-class TestSkipFlags(unittest.TestCase):
     def test_跳过抓取(self):
         rc, calls, _ = run(["--skip-dump"])
-        self.assertEqual(calls, ["check", "pos"])
+        self.assertEqual(calls, ["pos"])
         self.assertEqual(rc, cli.EXIT_OK)
 
     def test_跳过POS(self):
         rc, calls, _ = run(["--skip-pos"])
-        self.assertEqual(calls, ["dump", "check"])
+        self.assertEqual(calls, ["dump"])
 
     def test_两个skip合起来只剩对账(self):
         """⚠ `--skip-dump`/`--skip-pos` 只关**第 1、3 步** —— 对账是这条流程的本体，
         没有开关能关掉它（想只对账就直接跑 `python -m src.cli check`）。"""
         rc, calls, _ = run(["--skip-dump", "--skip-pos"])
-        self.assertEqual(calls, ["check"])
+        self.assertEqual(calls, [])
         self.assertEqual(rc, cli.EXIT_OK)
 
     def test_跳过抓取时不校验第一步的成败(self):
         """`--skip-dump` 是**调试模式**（人在旁边看着），不是"库坏了也放行"。"""
         rc, calls, _ = run(["--skip-dump"], dump_rc=99)
-        self.assertEqual(calls, ["check", "pos"])
+        self.assertEqual(calls, ["pos"])
 
 
-class TestArgumentPassThrough(unittest.TestCase):
-    def test_days_ago_传下去(self):
-        _, _, ns = run(["--days-ago", "3"])
-        self.assertEqual(ns["check"].days_ago, 3)
-        self.assertIsNone(ns["check"].date)
+class TestDeprecatedFlags(unittest.TestCase):
+    """⚠ 报量排查拿掉后，`--date` / `--days-ago` / `--lookback` / `--lookahead`
+    **都不生效了** —— 它们原来只喂 `cmd_check`。
 
-    def test_显式日期时days_ago置空(self):
-        """⚠ 两个都给的话 argparse 和配置谁赢不确定 —— 显式日期优先。"""
-        _, _, ns = run(["--date", "2026-09-10"])
-        self.assertEqual(ns["check"].date, "2026-09-10")
-        self.assertIsNone(ns["check"].days_ago)
+    这些参数**故意保留**（老门店的 run.bat / 计划任务里可能还带着），
+    但绝不能变成"死参数"：传了要能跑通、不报错，**而且不能静默当没看见**。
+    """
 
-    def test_默认对账昨天(self):
-        _, _, ns = run()
-        self.assertEqual(ns["check"].days_ago, 1)
+    def test_传了也不报错(self):
+        rc, calls, _ = run(["--date", "2026-09-10", "--days-ago", "3",
+                            "--lookback", "2", "--lookahead", "1"])
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertEqual(calls, ["dump", "pos"])
 
-    def test_no_mail_no_push_传下去(self):
-        _, _, ns = run(["--no-mail", "--no-push"])
-        self.assertTrue(ns["check"].no_mail)
-        self.assertTrue(ns["check"].no_push)
-
-    def test_日志文件传下去(self):
-        _, _, ns = run(["--log-file", "out/x.log"])
-        self.assertEqual(ns["check"].log_file, "out/x.log")
-
-    def test_不给日志文件就是None(self):
-        """⚠ 空字符串会让 `cmd_check` 以为"要写日志"，然后去写一个叫 "" 的文件。"""
-        _, _, ns = run()
-        self.assertIsNone(ns["check"].log_file)
-
-    def test_不给输出目录就是None(self):
-        _, _, ns = run()
-        self.assertIsNone(ns["check"].out_dir)
-
-    def test_配置路径传下去(self):
-        _, _, ns = run(["-c", "config/store-X.yaml"])
-        self.assertEqual(ns["dump"].config, "config/store-X.yaml")
-        self.assertEqual(ns["check"].config, "config/store-X.yaml")
-
-    def test_不给配置时用cli的默认值(self):
-        """⚠ `run_daily` 用的是 `cli.DEFAULT_CONFIG` —— 这个常量必须**真的被 argparse 用上**。
-
-        之前两处各写一份字面量（argparse 里一份、`run_daily` 里一份），
-        改了一处另一处会静默用旧的。
-        （第一版这条测试写成遍历 `cli.build_parser()` —— 那个函数**不存在**，
-        循环体一次都不进，空转通过。已改成走真入口。）
-        """
-        with mock.patch.object(cli, "cmd_daily", return_value=0) as m:
-            cli.main(["daily"])
-        self.assertEqual(m.call_args[0][0].config, cli.DEFAULT_CONFIG)
-
-    def test_默认配置指向的文件真的在仓库里(self):
-        # ⚠ `config/store-*.yaml` **不进包**（`install.bat` 按模板现生成）——
-        #   所以这条在解压出来的包里跑时必然找不到。跳过，不是失败。
-        import os
-        if not os.path.isfile(cli.DEFAULT_CONFIG):
-            self.skipTest("不在仓库里（包内不含门店配置，安装时现生成）")
-        self.assertTrue(os.path.isfile(cli.DEFAULT_CONFIG),
-                        "默认配置 %s 不存在 —— 门店上会直接起不来" % cli.DEFAULT_CONFIG)
+    def test_skip_check_还在但没用(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc, calls, _ = run(["--skip-check"])
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertEqual(calls, ["dump", "pos"])
+        self.assertIn("没用了", buf.getvalue(),
+                      "老脚本还在传 --skip-check，得让人知道它不再起作用了")
 
 
 class TestCliWiring(unittest.TestCase):
@@ -470,12 +401,19 @@ class TestFirstRunGrabsFullHistory(unittest.TestCase):
         #   不钉的话这条测的是"开发机有没有库"，不是"没库时会怎样"。
         with mock.patch.object(cli, "_find_pos_db", return_value=None):
             _, _, ns = run()
-        self.assertTrue(ns["dump"].all, "第一次跑没抓全量 —— 历史月份会是空的")
+        # ⚠ 是"**今年**至今"不是"全部历史"（用户 2026-09-17 定：
+        #   「跨年不重要，就拉当年的全量就行」）。
+        #   原来传 `--all`，而 `dump.py` 拿到跨年数据会**直接报错**要求按年分次抓 ——
+        #   老店第一次跑正好卡在这儿。
+        self.assertEqual(ns["dump"].year, datetime.date.today().year,
+                         "第一次跑没抓今年全量 —— 历史月份会是空的")
+        self.assertFalse(ns["dump"].all, "别再用 --all：跨年会被 dump.py 顶回来")
 
     def test_有库时只抓当月(self):
         with mock.patch.object(cli, "_find_pos_db", return_value=Path("/tmp/cbg-2026.db")):
             _, _, ns = run()
         self.assertFalse(ns["dump"].all)
+        self.assertFalse(ns["dump"].year, "有库了就别再抓整年")
         self.assertEqual(ns["dump"].month, "")
 
     def test_抓全量时也要说一句(self):
@@ -488,7 +426,7 @@ class TestFirstRunGrabsFullHistory(unittest.TestCase):
                 run()
         out = buf.getvalue()
         self.assertIn("第一次跑", out)
-        self.assertIn("全部历史", out)
+        self.assertIn("今年", out)
 
     def test_有库时不说第一次(self):
         import contextlib
@@ -503,5 +441,5 @@ class TestFirstRunGrabsFullHistory(unittest.TestCase):
         """`--skip-dump` 是调试模式，不该因为探测库而改变行为。"""
         with mock.patch.object(cli, "_find_pos_db",
                                side_effect=AssertionError("不该探测")):
-            rc, calls, _ = run(["--skip-dump"])
-        self.assertEqual(calls, ["check", "pos"])
+            rc, calls, _ = run(["--skip-dump", "--skip-pools"])
+        self.assertEqual(calls, ["pos"])

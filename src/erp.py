@@ -65,6 +65,40 @@ SALES_COLUMNS = [
 # 关键列（对账用；其余列照样导出，方便人工复核）
 KEY_COLS = ("单号", "单据类型", "商品名称", "串号", "串号标识", "支付时间", "金额", "门店", "店员")
 
+#: 库存串号导出的**列规格**（`column[i][xxx]`）。
+#:
+#: ⚠⚠ **必须发完整的 10 个属性。** 只发精简的（Id/Title/Key）会一律返回
+#: `ResponseID=-1「操作失败，请稍后重试」` —— 2026-09-14 就是这样把它
+#: **误判成"没有导出接口"**的。照抄自 erp-api skill（那边实测收录）。
+#:
+#: 每项：`(Id, Weight, Align, CanHidden, CanSort, DataType, Key, Show, Title, Width)`
+INVENTORY_IMEI_EXCEL_COLUMNS = [
+    (220, 9, "Left", 1, 0, "", "RowId", "1", "序号", 50),
+    (98, 10, "Left", 1, 1, "", "Imei", "1", "IMEI1", 180),
+    (517, 11, "Left", 1, 1, "", "SubImei", "1", "IMEI2", 180),
+    (518, 12, "Left", 1, 0, "", "SubImei1", "1", "IMEI3", 180),
+    (94, 20, "Center", 1, 0, "", "ProId", "1", "编码", 100),
+    (1656, 30, "Center", 1, 0, "", "Config", "1", "配置", 100),
+    (303, 30, "Center", 1, 0, "", "SNCode", "1", "69码", 100),
+    (95, 40, "Left", 1, 1, "", "ProName", "1", "名称", 200),
+    (96, 50, "Left", 1, 1, "", "Brand", "1", "品牌", 100),
+    (523, 51, "Left", 1, 1, "", "Model", "1", "机型", 100),
+    (97, 60, "Left", 1, 1, "", "Color", "1", "颜色", 100),
+    (99, 70, "Left", 1, 1, "", "StoreName", "1", "分仓", 100),
+    (102, 80, "Center", 1, 1, "DateTime", "ReceivingDate", "1", "入库时间", 150),
+    (0, 85, "Center", 1, 0, "", "old_flag", "1", "串号标识", 90),
+    (315, 90, "Right", 1, 1, "Int", "Ages", "1", "库龄", 80),
+    (521, 95, "Right", 1, 1, "Int", "AgeBranch", "1", "店龄", 50),
+    (100, 100, "Right", 1, 1, "Money", "ReceivingPrice", "1", "入库价格（在库成本）", 100),
+    (1621, 101, "Center", 1, 1, "Money", "TaxAmount", "1", "税额", 150),
+    (1622, 102, "Center", 1, 1, "Money", "SubNetCost", "1", "不含税成本", 150),
+    (101, 110, "Left", 1, 1, "", "ReceivingSupplierName", "1", "供应商", 200),
+    (513, 120, "Left", 1, 1, "", "Unit", "1", "产品单位", 180),
+    (512, 120, "Left", 1, 1, "", "ProCount", "1", "产品数量", 180),
+    (0, 0, "Left", 1, 0, "", "Status", "1", "状态", 80),
+    (0, 0, "Left", 1, 0, "", "Description", "1", "备注", 100),
+]
+
 LEGACY_ENV_PATHS = [
     Path.cwd() / ".secrets" / "erp.env",
     _ROOT / ".secrets" / "erp.env",                                    # 项目根，与 cwd 无关
@@ -101,12 +135,29 @@ def _parse_env_file(path: Path) -> dict:
 
 
 def load_credentials(extra_env_file: str | None = None) -> dict:
-    """优先级：环境变量 > 指定文件 > 项目内 .secrets/erp.env > ~/.dsh/secrets/erp.env"""
+    """优先级：环境变量 > 指定文件 > 项目内 .secrets/erp.env > ~/.dsh/secrets/erp.env
+
+    ⚠ **整份都是空值的文件直接跳过**（安装时生成的空模板）。项目里的
+    `.secrets/erp.env` 就是这样一个模板：四个键都在、值全是空串。
+    不跳过的话它会把 `~/.dsh/secrets/erp.env` 里的真账密**整份盖成空** ——
+    表现为"token 过期后重登失败：缺少云商账号密码"，而两个文件明明都有内容
+    （开发机 2026-09-17 实测踩到）。
+
+    ⚠ 但**不能改成"逐键跳过空值"** —— 那样 `save_credentials(clear_token=True)`
+    就失效了：它靠"把 token 写成空"来作废旧 token，逐键跳过会让它回落到
+    上一个文件里的旧 token。`tests/test_erp_creds.py::test_clear_token` 盯着这条。
+    所以粒度是**整个文件**，不是单个键。
+    """
     merged: dict = {}
     for p in reversed(LEGACY_ENV_PATHS):
-        merged.update(_parse_env_file(p))
+        d = _parse_env_file(p)
+        if not any(str(v).strip() for v in d.values()):
+            continue                      # 空模板：不参与覆盖
+        merged.update(d)
     if extra_env_file:
-        merged.update(_parse_env_file(resolve_env_path(extra_env_file)))
+        d = _parse_env_file(resolve_env_path(extra_env_file))
+        if any(str(v).strip() for v in d.values()):
+            merged.update(d)
     for k in ("ERP_TOKEN", "ERP_USERNAME", "ERP_PASSWORD", "ERP_COMPANY_CODE"):
         if os.environ.get(k):
             merged[k] = os.environ[k]
@@ -308,7 +359,89 @@ class ErpClient:
         j = self.call(f"{API_BASE}/Api/User/UserIndex", {"token": self.creds.get("token", "")})
         return j.get("Data") or {}
 
+    # ------------------------------------------------------------- 库存串号
+    def inventory_imei(self, snapshot: datetime.date | None = None, *,
+                       inventory_type: str = "", dest=None,
+                       timeout: int = 600) -> list[dict]:
+        """**云商库存串号**（数据池 D）—— 一次拿全库，返回**英文 key** 的行。
+
+        2026-09-17 复核（skill 契约 + 本机实测 23635 行 / 11 秒）：
+
+        * 接口 `POST {API_BASE}/Api/Report/InventoryImei_Excel`，**表单式**
+        * `InventoryType`：`"0"`=在库 / `"1"`=在途 / `""`=全部
+        * ⚠ **`DateOfSnapshot` 可回看约一年，但导出接口传历史日期一律 504**
+          —— 而且历史日期上 `InventoryType` 会被**静默忽略**
+          ⇒ **库存快照必须当天跑，事后补不回来**
+        * ⚠ **返回里含 1 行 `RowId='合计'`**（`Imei` 为空、`ProCount` 是全库台数）
+          —— 这里**从源头剔掉**，调用方拿到的 `len(rows)` 天然就是真机器数
+        * ⚠ **必须带完整 `column[]` 规格**（见 `INVENTORY_IMEI_EXCEL_COLUMNS`）
+
+        返回行的键是英文（`Imei` / `StoreName` / `Status` …）。
+        ⚠ `Imei` 列**混装 sn 和 imei**（实测：纯数字 IMEI 4959 个，其余是
+        `6KHTQ…` / `2SBYD…` 这类 SN）—— 所以拿玲珑的 `sn` 直接比就对了，
+        比不中就是**真的不在云商库存里**。
+        """
+        snap = snapshot or datetime.date.today()
+        body = {"token": self.creds.get("token", ""), "ageStart": "", "ageEnd": "",
+                "DateOfSnapshot": snap.isoformat(), "ProName": "", "BranchId": "",
+                "BranchName": "", "StoreId": "", "StoreName": "", "WarningFlag": "",
+                "Category": "", "IsBorrowed": "", "old": "", "Imei": "",
+                "InventoryType": inventory_type, "ReceivingCode": "",
+                "PageIndex": "1", "PageSize": "25", "Brand": "", "ModelId": "", "Model": ""}
+        for i, spec in enumerate(INVENTORY_IMEI_EXCEL_COLUMNS):
+            cid, w, al, ch, cs, dt, key, sh, title, wd = spec
+            body.update({
+                "column[%d][Id]" % i: cid, "column[%d][Weight]" % i: w,
+                "column[%d][__Align]" % i: al, "column[%d][__CanHidden]" % i: ch,
+                "column[%d][__CanSort]" % i: cs, "column[%d][__DataType]" % i: dt,
+                "column[%d][__Key]" % i: key, "column[%d][__Show]" % i: sh,
+                "column[%d][__Title]" % i: title, "column[%d][__Width]" % i: wd,
+            })
+        body["column[%d][__Tipis]" % (len(INVENTORY_IMEI_EXCEL_COLUMNS) - 1)] = 1
+
+        j = self.call(f"{API_BASE}/Api/Report/InventoryImei_Excel", body, timeout=timeout)
+        path = j.get("Data")
+        if not isinstance(path, str) or not path:
+            raise ErpError(f"库存导出没返回文件路径：{str(j)[:200]}")
+        url = path if path.startswith("http") else f"{API_BASE}{path}"
+        r = self.s.get(url, timeout=timeout)
+        r.raise_for_status()
+        if r.content[:2] != b"PK":
+            raise ErpError(f"下载到的不是 xlsx（前 80 字节：{r.content[:80]!r}）")
+
+        # ⚠ 落盘到**项目根**的 out/，不是 cwd（计划任务/自启起来时 cwd 未必是项目目录）
+        tmp = _ROOT / "out" / f".inventory_imei_{snap:%Y%m%d}.xlsx"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(r.content)
+        if dest:
+            Path(dest).write_bytes(r.content)
+        return _inventory_rows(tmp)
+
     # ------------------------------------------------------------- 销售明细
+    def sales_range(self, start: datetime.date, end: datetime.date, *,
+                    on_progress=None) -> list[dict]:
+        """拉一个**任意长**区间的销售明细 —— 自动按 `SALES_MAX_DAYS` 切段。
+
+        服务端单次上限 10 天，超了直接拒。用户 2026-09-17 定了"池C 初次建库拉本年度"
+        —— 260 天 = 26 段，实测跑通（约 14.4 万行 / 几万张单据）。
+
+        ⚠ **必须切段，不能把 26 段合并成一次大请求** —— 那正是最容易被限流的姿势
+        （erp-api skill 坑 0：同一账号短时间大量请求会四域同时报「登录超时」，
+        换 token 也没用，要等几分钟）。
+
+        `on_progress(段起, 段止, 本段行数)` 可选，用来打进度。
+        """
+        out: list[dict] = []
+        cur = start
+        while cur <= end:
+            stop = min(cur + datetime.timedelta(days=SALES_MAX_DAYS - 1), end)
+            batch = self.sales_rows(cur, stop)
+            out.extend(batch)
+            if on_progress:
+                on_progress(cur, stop, len(batch))
+            cur = stop + datetime.timedelta(days=1)
+        return out
+
     def sales_rows(self, start: datetime.date, end: datetime.date) -> list[dict]:
         """导出销售明细，返回 [{中文表头: 值}]。区间上限 10 天。"""
         days = (end - start).days + 1
@@ -357,3 +490,53 @@ class ErpClient:
                     d[h] = r[i] if i < len(r) else None
             out.append(d)
         return out
+
+
+def _inventory_rows(path) -> list[dict]:
+    """把库存导出的 xlsx 读成**英文 key** 的行，并剔掉「合计」行。
+
+    ⚠ 表头是**中文**（`序号`/`IMEI1`/`分仓`…），按
+    `INVENTORY_IMEI_EXCEL_COLUMNS` 的 Title→Key 映射回英文 ——
+    直接拿中文当键的话，下游建表会得到一堆中文列名，SQL 里处处要引号。
+
+    ⚠ 剔「合计」行**必须从源头做**：它是 `Imei` 为空、`ProCount` 等于全库台数的
+    汇总行。留着的话"库里有多少行"虚高 1，而且每个调用方都得自己记着剔一次 ——
+    迟早有一处忘（skill 里记着：CLI 曾因此报 23601，真实是 23600）。
+    """
+    rows = read_rows(path)
+    if len(rows) < 2:
+        raise ErpError(f"库存导出是空的（{path} 只有 {len(rows)} 行）"
+                       "—— 别把空数据当成『店里没货』")
+    title2key = {t: k for _, _, _, _, _, _, k, _, t, _ in INVENTORY_IMEI_EXCEL_COLUMNS}
+
+    # ⚠ **表头在第几行不固定，得自己找。**
+    #   销售明细是「第 0 行大标题、第 1 行才表头」，库存导出**第 0 行就是表头**；
+    #   而接口直出的文件和 skill CLI 用 `write_xlsx` 重写过的文件又不一样
+    #   （2026-09-17 实测：同一批数据，两个文件差一行）。
+    #   照抄另一个函数的假设就会把数据行当表头 —— 表现是"表头不对"，很好认。
+    head_at = None
+    for i in range(min(3, len(rows))):
+        cells = [str(c).strip() if c is not None else "" for c in (rows[i] or [])]
+        if sum(1 for c in cells if c in title2key) >= 3:
+            head_at = i
+            break
+    if head_at is None:
+        raise ErpError(
+            "库存导出里找不到表头行（前 3 行没有一行的单元格能对上列规格）：%s…"
+            % [str(x)[:16] for x in (rows[0] or [])[:8]])
+
+    header = [str(h).strip() if h is not None else "" for h in rows[head_at]]
+    keys = [title2key.get(h, h) for h in header]
+    if "Imei" not in keys:
+        raise ErpError(f"库存导出表头不对，第 {head_at + 1} 行是：{header[:12]}…")
+    out = []
+    for r in rows[head_at + 1:]:
+        if not r or all(v in (None, "") for v in r):
+            continue
+        d = {}
+        for i, k in enumerate(keys):
+            if k:
+                d[k] = r[i] if i < len(r) else None
+        if str(d.get("Imei") or "").strip():
+            out.append(d)
+    return out

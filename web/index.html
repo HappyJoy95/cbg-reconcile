@@ -27,7 +27,7 @@
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="reports">报量排查</button>
+  <button class="tab active" data-tab="reports">四池比对</button>
   <button class="tab" data-tab="pos">POS 合规</button>
   <button class="tab" data-tab="run">运行</button>
   <button class="tab" data-tab="session">会话</button>
@@ -42,7 +42,7 @@
 
   <div class="card">
     <div class="card-head">
-      <h2>历史报告 <span class="hint" id="report-count"></span></h2>
+      <h2>四池比对记录 <span class="hint" id="report-count"></span></h2>
       <button class="btn ghost small" id="btn-refresh-reports">刷新</button>
     </div>
     <div id="report-list"></div>
@@ -50,7 +50,7 @@
 
   <div class="card" id="report-detail-card" hidden>
     <div class="card-head">
-      <h2 id="report-detail-title">报告明细</h2>
+      <h2 id="report-detail-title">四池比对明细</h2>
       <div>
         <a class="btn ghost small" id="btn-download" href="#" download>下载 xlsx</a>
         <button class="btn ghost small" id="btn-close-detail">关闭</button>
@@ -88,51 +88,28 @@
 <section class="panel" id="panel-run">
   <div class="card">
     <div class="card-head"><h2>跑一次</h2>
-      <span class="hint">跑哪几件事由按钮决定</span></div>
+      <span class="hint">跟每天定时跑的是同一条路，只是手动跑一遍</span></div>
+    <!-- ⚠ 2026-09-17（用户定）：**「目标日」和「高级（时间窗容差）」整块拿掉了**。
+         报量排查并进四池对账之后，三步里没有任何一步会读它们 ——
+         留着比删掉更糟：门店会以为"选今天就是只算今天"。
+         后端一并拿掉了（`/api/run` 不再收 mode/date/lookback/lookahead，
+         `runner.start` 也不再往命令后面拼它们）。
+         ⚠ 但 `daily` **命令行上**那四个参数必须留着：run.bat / 计划任务里
+         写死的 `--days-ago N` 删掉会以 `unrecognized arguments` 收场。 -->
     <div class="form-row">
-      <label>目标日</label>
-      <select id="run-mode">
-        <option value="days_ago" selected>昨天（推荐 —— 那天的销售已结束）</option>
-        <option value="today">今天（当晚就能发现漏报，但跑完到打烊之间不算）</option>
-        <option value="date">指定日期…</option>
-      </select>
-      <input type="date" id="run-date" hidden>
-    </div>
-    <!-- ⚠ 这句放在**「目标日」正下方**，不是塞在卡片标题里 ——
-         用户盯着这个下拉框的时候，视线不会跑到标题上去。
-         下面的「高级（时间窗容差）」同理，也只有报量排查吃。 -->
-    <p class="hint" style="margin:-4px 0 10px 0">
-      ⚠ <b>这个「目标日」只影响「报量排查」</b>：
-      <b>抓华为数据</b>固定抓<b>当月</b>（没有本地库时补全部历史），
-      <b>POS 合规</b>按<b>整月</b>算 —— 都不看这个日期。
-    </p>
-    <details class="adv">
-      <summary>高级（时间窗容差）</summary>
-      <div class="form-row">
-        <label>销售窗口往前看</label><input type="number" id="run-lookback" min="0" max="30" placeholder="用配置">
-        <label>华为窗口往后看</label><input type="number" id="run-lookahead" min="0" max="7" placeholder="用配置">
-      </div>
-      <p class="hint">「华为窗口往后看」大于 0 时，会把目标日之后补报的也算进来
-        （容忍 23:50 卖的货次日才报量）。默认 0，只看当天。<br>
-        ⚠ 这两项<b>同样只影响「报量排查」</b>。</p>
-    </details>
-    <div class="form-row">
-      <!-- ⚠ 四个按钮都走 `daily` 这一个入口，只是加不同的跳过开关 ——
-           见 src/run_daily.py 的 WHAT_FLAGS。各走各的命令的话，
+      <!-- ⚠ 按钮只剩一个，但仍然走 `data-what` —— 有哪几个预设由后端那张表
+           （src/run_daily.py 的 BUTTON_STEPS）说了算，前端不另写一份，
+           以后要加按钮只改这行 HTML。走 `daily` 这一个入口是为了让
            「第 1 步失败就不发报告」「库里没有就抓全量」「会话失效先静默续期」
-           这些行为在界面上就全都享受不到了，而且界面跑的跟定时任务跑的迟早分叉。 -->
+           这些行为和定时任务完全一致（各走各的命令迟早就分叉）。 -->
       <button class="btn primary" data-what="all">整个项目</button>
-      <button class="btn" data-what="dump">抓华为数据</button>
-      <button class="btn" data-what="reconcile">报量排查</button>
-      <button class="btn" data-what="pos">POS 合规</button>
       <button class="btn ghost" id="btn-stop" disabled>停止</button>
       <span class="hint" id="run-status"></span>
     </div>
     <p class="hint" style="margin:8px 0 0 0">
-      <b>整个项目</b> = 抓华为数据 → 报量排查 → POS 合规。<br>
-      单独执行的按钮<b>不会顺手抓数据</b> —— 抓数据要一两分钟起（首次补历史更久），
-      想快就分开点。<b>抓华为数据</b>没有本地库时会自动补全部历史。<br>
-      <b>只有「报量排查」（和「整个项目」里的那一步）吃上面的「目标日」</b>。
+      <b>整个项目</b> = 抓四池数据 → POS 合规 → <b>四池对账</b>，跟每天定时跑的一模一样。<br>
+      抓数据要一两分钟起；<b>第一次跑</b>会把今年至今的全量补上，更久，跑完下面有完整日志。<br>
+      只想看四池结果、不想再抓一遍：命令行 <code>python -m src.cli pools</code> 单独跑。
     </p>
   </div>
 
@@ -386,24 +363,6 @@
   </div>
 
   <div class="card">
-    <div class="card-head"><h2>对账参数</h2></div>
-    <div class="form-row"><label>销售窗口往前看（天）</label>
-      <input type="number" id="cfg-lookback_days" min="0" max="30">
-      <span class="hint">默认 0：只查目标日</span></div>
-    <div class="form-row"><label>华为窗口往后看（天）</label>
-      <input type="number" id="cfg-report_lookahead_days" min="0" max="7">
-      <span class="hint">默认 0：只看目标日当天。调 1 可容忍跨零点报量</span></div>
-    <div class="form-row"><label>分页大小</label><input type="number" id="cfg-page_size" min="10" max="5000"></div>
-    <div class="form-row"><label>华为订单付款状态</label><input type="number" id="cfg-pay_status">
-      <span class="hint">2 = 已付款（实测 0/1/3 都是 0 单）</span></div>
-    <div class="form-row"><label>华为退货状态</label><input type="number" id="cfg-return_status">
-      <span class="hint">0 = 排除退货</span></div>
-    <div class="form-row"><button class="btn primary" id="btn-save-config">保存配置</button>
-      <span class="hint" id="config-msg"></span></div>
-    <p class="hint">保存是<b>逐行定点替换</b>，配置文件里的注释不会被冲掉。</p>
-  </div>
-
-  <div class="card">
     <div class="card-head">
       <h2>检查更新</h2>
       <span class="hint" id="update-status"></span>
@@ -411,6 +370,13 @@
     <div id="update-box"></div>
     <!-- 升级记录 —— 由 app.js 的 renderUpgrades 填。没有升级记录时是空的。 -->
     <div id="upgrade-history" style="margin:8px 0"></div>
+    <!-- ⚠ 这个按钮是 2026-09-18 加的：弹窗改成"弹出来就算看过"之后，
+         没细看就关掉的话就再也见不着了 —— 所以得留个能翻回来的口子。
+         取的是**升级那天弹的那一份存档**，不是现算的（见 web/app.js 的注释）。 -->
+    <div class="form-row">
+      <button class="btn ghost small" id="btn-whatsnew-show">看这一版的更新说明</button>
+      <span class="hint">就是升级后弹出来的那一份 —— 随时能翻回来看</span>
+    </div>
     <div class="form-row">
       <button class="btn" id="btn-update-check">检查更新</button>
       <button class="btn primary" id="btn-update-apply" hidden>立即更新</button>
@@ -436,6 +402,41 @@
     </details>
   </div>
 
+  <!-- ⚠ 2026-09-17（用户定）：这两件事原来挂在「定时执行」下面，
+       「出问题了？」和"每天几点跑"完全没关系。挪到「检查更新」旁边 ——
+       它们都是**出问题时才点**的维护动作。 -->
+  <div class="card">
+    <div class="card-head"><h2>出问题了？</h2></div>
+    <div class="form-row">
+      <button class="btn" id="btn-report-bug">上报 bug</button>
+      <button class="btn" id="btn-clear-pools-notify">清除推送记忆</button>
+      <span class="hint" id="report-bug-msg"></span>
+      <span class="hint" id="clear-pools-notify-msg"></span>
+    </div>
+    <div id="report-bug-result"></div>
+    <!-- ⚠ 说明的顺序**跟着按钮走**（上报 bug 在前）—— 原来两段是反的，
+         而「点一下会把现场日志打包」这句没有主语，紧跟在按钮后面才读得通。 -->
+    <p class="hint" style="margin:10px 0 0 0">
+      <b>上报 bug</b>：点一下会把<b>现场日志</b>打包（执行日志 / 定时任务 / 配置 / 环境），
+      然后<b>试着</b>发到邮箱和企业微信。<br>
+      ⚠ <b>包里没有任何能拿去登录的凭据</b>（<code>.secrets\</code> 整个不进包），
+      但有业务数据（门店名 / 串号 / 金额），发之前确认收件人是自己人。<br>
+      ⚠ 发不出去也<b>不影响</b> —— 包会留在 <code>out\report-bug-时间.zip</code>，
+      界面上会把路径写出来，直接把这个文件发出去就行。
+      <b>「推送失败」本身就是最常见的 bug，用它来上报它自己当然也不行。</b>
+    </p>
+    <p class="hint" style="margin:10px 0 0 0">
+      <b>清除推送记忆</b>：四池对账推送会记住"这个串号推过没有" ——
+      第一次出现标 <b>★ 新</b>，之后再出现就弱化并写上"已推 N 次、<b>首次</b>几号"。<br>
+      原因是批发单那种情况（云商先报、玲珑过后才报）会<b>连着推好几天</b>，
+      全是重复的，门店看两天就麻木了。<br>
+      ⚠ 清空之后，<b>下次推送会把当时清单里的每一条都重新当"新的"强调一遍</b>。
+      串号从清单里消失（报量了 / 出库了）时会自动忘掉，一般用不着手动清。<br>
+      <b>所以它是"反过来"用的</b>：想让清单里每一条都<b>重新醒目一次</b>时才点 ——
+      它<b>不会</b>让任何一条少被提醒。
+    </p>
+  </div>
+
   <div class="card">
     <div class="card-head"><h2>定时执行</h2></div>
     <div id="schedule-box"></div>
@@ -447,45 +448,25 @@
       <span class="hint" id="automation-msg"></span>
     </div>
     <p class="hint" style="margin:6px 0 0 0">
-      <b>默认三件都勾</b>。⚠ 一件都不勾是<b>不允许</b>的（会当场报错）——
-      静默当成"都跑"的话，你取消了勾选、结果每天照样推送，日志里还一个字都不说。<br>
-      ⚠ <b>「抓华为数据」建议一直勾着</b>：不勾的话本地数据不会更新，
-      报量排查会以「库不新鲜」失败，POS 也只是拿旧数据在算。<br>
+      <b>「抓四池数据」每次都会跑</b>，不用选、也取消不掉 ——
+      不抓的话本地库永远是旧的，POS 和四池对账都只是拿旧数据在算，
+      而界面上只会显示"跑完了"。<br>
+      <b>「四池对账」</b>要勾着才会算 AD/BC 并推送 —— 它读的是云商和玲珑两边的快照，
+      不勾的话那两份清单永远不会出来。<br>
+      <b>「POS 合规」</b>不勾就不算当月的合规率，「POS 合规」页会停在上次算出来的数。<br>
+      两个都<b>不勾也允许</b>：那就是「每天只抓数据，不算也不推」。<br>
       改这里<b>不用重新注册任务</b>，也不用弹 UAC：计划任务跑的是 <code>run.bat</code>，
       改的是它的内容，任务本身没变。
     </p>
 
-    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0 12px 0">
-
-    <div class="form-row">
-      <label style="min-width:auto"><b>出问题了？</b></label>
-      <button class="btn" id="btn-report-bug">上报 bug</button>
-      <span class="hint" id="report-bug-msg"></span>
-    </div>
-    <div id="report-bug-result"></div>
-    <p class="hint" style="margin:6px 0 0 0">
-      点一下会把<b>现场日志</b>打包（执行日志 / 定时任务 / 配置 / 环境），
-      然后<b>试着</b>发到邮箱和企业微信。<br>
-      ⚠ <b>包里没有任何能拿去登录的凭据</b>（<code>.secrets\</code> 整个不进包），
-      但有业务数据（门店名 / 串号 / 金额），发之前确认收件人是自己人。<br>
-      ⚠ 发不出去也<b>不影响</b> —— 包会留在 <code>out\report-bug-时间.zip</code>，
-      界面上会把路径写出来，直接把这个文件发出去就行。
-      <b>「推送失败」本身就是最常见的 bug，用它来上报它自己当然也不行。</b>
-    </p>
     <div class="form-row">
       <label>每天</label><input type="time" id="sched-time" value="21:00">
-      <label>跑</label>
-      <select id="sched-days-ago">
-        <option value="1" selected>昨天</option>
-        <option value="0">今天</option>
-      </select>
       <label>任务名</label>
       <input type="text" id="sched-name" placeholder="留空 = CBG报量对账-21点00" size="30">
       <button class="btn primary" id="btn-sched-install">添加定时任务</button>
     </div>
     <p class="hint">建议设在店里<b>肯定开着机</b>的时候（比如关门前）——
       Windows 计划任务错过时间<b>不会补跑</b>。<br>
-      选「昨天」零遗漏；选「今天」当晚就能发现漏报，但跑完到打烊之间的销售不在这份报告里。<br>
       每行右边的「执行」会<b>立刻按这条任务跑一次</b>（跟到点自动跑走的是同一条路，
       所以顺手能验证任务配得对不对）；「删除」只删那一行。<br>
       开机自启那个任务不在这张表里，在「后台服务」卡片管。</p>
@@ -501,6 +482,30 @@
      更新后第一次打开控制台弹出来。内容来自 `src/whatsnew.py` ——
      ⚠ 不能读 `发布说明.md`：那个文件不在 git 里，走自更新的门店
      拿到的永远是当初拷包那一版，弹出来会是"上一版的更新日志"。 -->
+<!-- ───────────── 老定时任务（更新后第一次打开主动弹一次）─────────────
+     背景：任务**改过名**（`CBG报量对账` → `门店数据拉取与计算`），而 Windows 上
+     **不同名就是并存、不是覆盖** —— 升级后的门店会有**两条**任务，
+     **两条都每天跑一遍**。
+     光在设置页列出来没用（门店不会主动去点），所以主动弹一次 + 一键处理。
+     ⚠ 顺序是「**先建新的、建成了再删老的**」（`src/schedule.replace_legacy`）——
+     反过来的话中间失败会落到"门店再也不会自动跑"，而**当天没人会发现**。 -->
+<div class="modal-mask" id="legacy-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="lg-head">
+    <div class="modal-head">
+      <h2 id="lg-head">有一件事要处理一下</h2>
+      <span class="hint" id="lg-sub"></span>
+    </div>
+    <div class="modal-body">
+      <div class="banner warn" id="lg-why"></div>
+      <div id="lg-result"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary" id="btn-legacy-fix">一键处理</button>
+      <button class="btn ghost" id="btn-legacy-later">稍后再说</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask" id="whatsnew-mask" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="wn-head">
     <div class="modal-head">

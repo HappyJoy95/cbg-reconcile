@@ -323,7 +323,8 @@ def year_db(out_dir, year: int) -> Path:
 def put(conn, table: str, row: dict) -> None:
     """写一行。**表里没有的列先自动补上**（见 `ensure_columns`）。"""
     ensure_columns(conn, table, row)
-    cols = ", ".join(row)
+    # ⚠ 列名加引号 —— 同 `ensure_columns`：云商表头里有 `69码` 这类非法标识符。
+    cols = ", ".join('"%s"' % c for c in row)
     marks = ", ".join("?" for _ in row)
     conn.execute("INSERT OR REPLACE INTO %s (%s) VALUES (%s)" % (table, cols, marks),
                  list(row.values()))
@@ -372,6 +373,21 @@ def row_from(obj, *, skip=NESTED_SKIP, extras=None) -> dict:
 _COLS_CACHE = {}
 
 
+def clear_col_cache() -> None:
+    """清掉"这条连接上这张表有哪些列"的缓存。
+
+    ⚠ **新开一个连接就必须清。** 缓存键是 `(id(conn), 表名)`，而
+    `sqlite3.Connection` 既不支持弱引用、也不能挂属性（实测过），
+    只能拿 `id()` 当键 —— 于是连接释放后 `id()` 被复用，
+    "缓存里说这张表有这个列，新库其实没有" → `ALTER` 被跳过 →
+    写入直接 `OperationalError: table X has no column named Y`。
+
+    `connect()` 会自己调；**自己 `sqlite3.connect()` 的人（测试、`pools.ensure`）
+    也必须调一次**，否则会串到上一个连接的列集合上。
+    """
+    _COLS_CACHE.clear()
+
+
 def ensure_columns(conn, table: str, row: dict) -> None:
     """表里没有的列，**当场补上**。
 
@@ -392,7 +408,9 @@ def ensure_columns(conn, table: str, row: dict) -> None:
             continue
         typ = ("INTEGER" if isinstance(val, int) and not isinstance(val, bool)
                else "REAL" if isinstance(val, float) else "TEXT")
-        conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, typ))
+        # ⚠ 列名**必须加引号**：云商导出的表头里有 `69码` 这种数字开头的，
+        #   裸写就是 `unrecognized token`。加引号对已有的英文列名零影响。
+        conn.execute('ALTER TABLE %s ADD COLUMN "%s" %s' % (table, name, typ))
         have.add(name)
 
 
@@ -499,7 +517,7 @@ def connect(path, *, named: bool = False) -> sqlite3.Connection:
     Web 是长驻进程，跨年那天它要建 `cbg-2027.db`，而缓存里还留着
     2026 那个库的列 —— 一年只错一次，最难查的那种。
     """
-    _COLS_CACHE.clear()
+    clear_col_cache()
     conn = sqlite3.connect(str(path))
     if named:
         conn.row_factory = sqlite3.Row

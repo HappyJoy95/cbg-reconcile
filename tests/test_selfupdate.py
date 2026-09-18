@@ -389,6 +389,46 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual(bad, [], "发布说明里有无效转义（反斜杠要写成两个）：\n"
                                   + "\n".join(bad))
 
+    def test_beta_包名带编号且指纹里留着_beta(self):
+        """⚠ 用户 2026-09-17 定的：beta 包要编号（`beta0` / `beta1`…），
+        别再同一天打第二个就把第一个盖掉。
+
+        三件事一起钉：
+
+        1. **包名带编号** —— `-beta<N>-` 进 ZIPNAME；
+        2. **从 beta0 开始** —— `_max` 初值必须是 **-1**：一个都没有时下一个是
+           `beta0`。写成 0 的话第一包会变成 `beta1`，序列里就没有 beta0 了
+           （用户原话：「上来是 beta0，beta1 一直往后」）；
+        3. **指纹里必须留着 "beta" 这几个字母** —— `dbmigrate` 那道
+           「beta 包不许动门店的库」的门槛靠的就是这个子串。
+           哪天有人把标记改成纯数字（`1 · 2026-09-17 18:49`），
+           门槛会**静默失效**：拿 beta 包去门店测一下，
+           **门店那个 77MB 的库就被改名归档了**（这事真发生过一次，
+           见 `dbmigrate.only_in_release` 的注释）。
+        """
+        tools = Path(__file__).resolve().parent.parent / "tools"
+        if not tools.is_dir():
+            self.skipTest("装出来的包里没有 tools/（打包脚本不进包）—— 这条只在仓库里跑")
+        script = (tools / "build_package.sh").read_text(encoding="utf-8")
+
+        self.assertIn('BETA_LABEL="beta${BETA_N}"', script,
+                      "beta 标记不再以 'beta' 开头了 —— dbmigrate 的门槛会失效")
+        self.assertIn('SUFFIX="-${BETA_LABEL}"', script,
+                      "包名里没接上编号")
+        # 指纹必须用带编号的那个标签，不能退回去写死 'beta'
+        self.assertIn('printf \'%s · %s\\n\' "${BETA_LABEL}" "${BUILD_STAMP}"', script,
+                      "BUILD.txt 没写带编号的标记")
+        self.assertNotIn("'beta · %s\\n'", script,
+                         "BUILD.txt 又写回不带编号的 'beta' 了")
+        # 自动编号 + 手写编号两条路都要通
+        self.assertIn('1|true|yes|beta|BETA) BETA_N="auto"', script)
+        self.assertIn('beta[0-9]|beta[0-9][0-9]', script)
+        # ⚠ 从 beta0 起：初值 -1（见上面第 2 条）
+        self.assertIn("_max=-1", script,
+                      "自动编号的初值不是 -1 了 —— 第一包会从 beta1 起，没有 beta0")
+        self.assertNotIn("_max=0", script,
+                         "又把初值写回 0 了 —— 序列会跳过 beta0")
+
     def test_stores_yaml_is_updated_but_its_neighbour_is_not(self):
         """⚠ `config/` 里住着两种东西，必须分开对待：
 

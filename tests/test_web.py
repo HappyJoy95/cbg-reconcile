@@ -26,6 +26,21 @@ APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 
+def _strip_js_comments(s: str) -> str:
+    """剥掉 JS 注释，供"代码里不该再有 X"这类断言用。
+
+    ⚠ **必须有这一步**：这个项目的注释是"记录踩过的坑"风格，删掉一段代码时
+    往往把"以前这里是什么、为什么要删"写进注释 —— 而注释里就会带上那个
+    刚被删掉的名字。直接 `assertNotIn("daysAgo", APP_JS)` 会被**自己的注释**顶掉。
+    （2026-09-17 这一轮踩了两次：`至少勾一项` 和 `daysAgo`。）
+
+    ⚠ 只剥**整行**注释（`^\\s*//`）和块注释，不做行尾 `//` 的剥离 ——
+    那样会把 `https://…` 这类字符串里的斜杠也吃掉。
+    """
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", s)
+
+
 class TestFrontendWiring(unittest.TestCase):
     def test_every_referenced_id_exists_in_html(self):
         """`$('#foo')` 里的 foo 必须在 index.html 里有 id="foo"。
@@ -1320,7 +1335,11 @@ class TestRunnerScriptSelfHeal(unittest.TestCase):
 
 
 class TestRunWhatApi(unittest.TestCase):
-    """`/api/run` 的 `what` —— 界面四个按钮靠它。"""
+    """`/api/run` 的 `what` —— 界面按钮靠它。
+
+    ⚠ 2026-09-17：界面上只剩「整个项目」一个按钮，但三个预设**后端都还认**
+    （`daily --skip-dump` 那套没动，老页面也不会因为多传字段就点不动）。
+    """
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1348,13 +1367,35 @@ class TestRunWhatApi(unittest.TestCase):
             self.srv.request("POST", "/api/run", {"what": "pos"})
         self.assertEqual(m.call_args.kwargs.get("what"), "pos")
 
-    def test_四个_what_后端都认(self):
+    def test_每个_what_后端都认(self):
         for what in run_daily.BUTTON_STEPS:
             with self.subTest(what=what):
                 with mock.patch.object(runner.RunManager, "start") as m:
                     m.return_value = mock.Mock(snapshot=lambda n: {})
                     code, _ = self.srv.request("POST", "/api/run", {"what": what})
                 self.assertEqual(code, 200)
+
+    def test_老页面多传的日期字段被忽略而不是_400(self):
+        """⚠ 门店刷新页面之前那一版 JS 还在往这儿塞 mode/date/lookback，
+        报 400 的话按钮点了没反应，而界面上一个字都不会说。"""
+        with mock.patch.object(runner.RunManager, "start") as m:
+            m.return_value = mock.Mock(snapshot=lambda n: {})
+            code, _ = self.srv.request("POST", "/api/run", {
+                "what": "all", "mode": "date", "date": "2026-09-10",
+                "days_ago": 0, "lookback": 3, "lookahead": 1})
+        self.assertEqual(code, 200)
+        # 只把 what 递给 runner —— 那五个字段一个都不许再往下走
+        self.assertEqual(set(m.call_args.kwargs), {"what"})
+
+    def test_不再往命令里拼日期开关(self):
+        """⚠ `/api/run` 和 `runner` 都不碰这四个参数了：`daily` 命令行上还认
+        （老 run.bat / 计划任务里写死着），但它们不影响任何一步 ——
+        拼上去只会让运行日志里那条命令看着像"界面上有个目标日"。"""
+        m = runner.RunManager()
+        j = m.start(Path("/tmp/x"), "c.yaml", what="all")
+        self.assertEqual(" ".join(j.argv[j.argv.index("daily") + 1:]), "")
+        j.kill()
+        j.running = False
 
 
 class TestAutomationApi(unittest.TestCase):
@@ -1371,10 +1412,13 @@ class TestAutomationApi(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_一个都不勾返回_400(self):
-        code, body = self.srv.request("POST", "/api/schedule/automation", {"steps": []})
-        self.assertEqual(code, 400)
-        self.assertIn("至少勾", body["error"])
+    def test_空数组现在合法了(self):
+        """⚠ 用户 2026-09-17 定的：两个都不勾 = 「只抓数据」，**允许**。
+        以前这条是 `test_一个都不勾返回_400` —— 那条规矩作废了。"""
+        code, body = self.srv.request("POST", "/api/schedule/automation",
+                                      {"steps": []})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["steps"], ["dump"])
 
     def test_勾了会重写_run_bat(self):
         code, body = self.srv.request("POST", "/api/schedule/automation",
@@ -1382,20 +1426,21 @@ class TestAutomationApi(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(body["ok"])
         run = schedule.script_path(self.root).read_text(encoding="utf-8")
-        # ⚠ 勾「只 POS」生成的是 `--skip-check`（**不**带 `--skip-dump`）：
-        #   定时任务没人盯着，抓数据是必做的前置，不是选项。
-        self.assertIn("--skip-check", run)
+        # ⚠ 勾「dump + POS」生成的是 `--skip-pools`（**不**带 `--skip-dump`）：
+        #   定时任务没人盯着，抓数据是必做的，不是选项。
+        #   （`--skip-check` 已经废弃 —— 报量排查整步拿掉了。）
+        self.assertIn("--skip-pools", run)
         self.assertNotIn("--skip-dump", run)
 
     def test_概览里能读到当前的勾选和可选项(self):
         self.srv.request("POST", "/api/schedule/automation",
-                         {"steps": ["dump", "reconcile"]})
+                         {"steps": ["dump", "pos"]})
         _, ov = self.srv.request("GET", "/api/overview")
         auto = ov["automation"]
-        self.assertEqual(auto["steps"], ["dump", "reconcile"])
-        # 三项都给，`dump` 也在（默认勾上，用户定的）
-        self.assertEqual([c["value"] for c in auto["choices"]],
-                         ["dump", "reconcile", "pos"])
+        self.assertEqual(auto["steps"], ["dump", "pos"])
+        # ⚠ 可选项**不含 dump**（那个复选框 2026-09-17 拿掉了），
+        #   它是必做的，走 `always_on`。
+        self.assertEqual([c["value"] for c in auto["choices"]], ["pos", "pools"])
 
     def test_可选项由后端给_前端不自己维护一份(self):
         _, ov = self.srv.request("GET", "/api/overview")
@@ -1404,26 +1449,30 @@ class TestAutomationApi(unittest.TestCase):
 
 
 class TestRunPageWiring(unittest.TestCase):
-    """前端接线 —— 「运行」页四个按钮 + 自动化勾选。
+    """前端接线 —— 「运行」页的按钮 + 自动化勾选。
 
     ⚠ 前端**没有构建步骤、没有 lint**，引用了一个不存在的 id 只会在浏览器
     控制台里报一行，跑测试和跑服务都看不见。所以这里按源码钉。
+
+    ⚠ 2026-09-17：界面上只剩「整个项目」一个按钮（用户定），
+    `dump` / `pos` 两个预设后端还认，只是**不许再有按钮**。
     """
 
-    def test_四个按钮都在_带对的_data_what(self):
-        for what in run_daily.BUTTON_STEPS:
+    def test_只剩下整个项目一个按钮(self):
+        self.assertIn('data-what="all"', INDEX_HTML)
+        for what in set(run_daily.BUTTON_STEPS) - {"all"}:
             with self.subTest(what=what):
-                self.assertIn('data-what="%s"' % what, INDEX_HTML)
+                self.assertNotIn('data-what="%s"' % what, INDEX_HTML)
 
     def test_老的单按钮已经彻底拿掉(self):
-        """⚠ 拆成四个之后 `#btn-run` 就不存在了 —— app.js 里那句
+        """⚠ 拆成 data-what 之后 `#btn-run` 就不存在了 —— app.js 里那句
         `$('#btn-run').addEventListener` 会在**加载时**抛 TypeError，
         后面的绑定全部不执行（整个界面变哑巴）。"""
         self.assertNotIn('id="btn-run"', INDEX_HTML)
         self.assertNotIn("$('#btn-run')", APP_JS)
 
     def test_按_what_解释退出码(self):
-        """⚠ 只有报量排查才有"有差异"(3) 这一说；POS 的 2 是"没找到订单库"。
+        """⚠ 只有四池对账才有"有差异"(3) 这一说；POS 的 2 是"没找到订单库"。
         混着说会让人以为 POS 也"有差异"。"""
         self.assertIn("EXIT_LABELS", APP_JS)
         for what in run_daily.BUTTON_STEPS:
@@ -1439,20 +1488,44 @@ class TestRunPageWiring(unittest.TestCase):
         self.assertIn("renderAutomation", APP_JS)
         self.assertIn("state.overview.automation", APP_JS)
 
-    def test_一个都不勾前端先拦一道(self):
-        self.assertIn("至少勾一项", APP_JS)
+    def test_两个都不勾前端不再拦(self):
+        """⚠ 用户 2026-09-17 定的：两个都不勾是合法的（「只抓数据」）。
+        前端那道"至少勾一项"的拦截必须撤掉，否则点了保存什么都不发生。
+
+        ⚠ 断言前先**剥掉 JS 注释** —— 注释里正好写着"以前这里有一道拦截"，
+        不剥的话 `assertNotIn` 会被自己的注释顶掉（这一轮踩了两次）。
+        """
+        code = _strip_js_comments(APP_JS)
+        self.assertNotIn("if (!what.length)", code)
+        self.assertNotIn("至少勾一项", code)
+
+    def test_没有指向已删下拉框的残留变量(self):
+        """⚠ `daysAgo` 是「昨天/今天」那个下拉框的变量，框 2026-09-17 删了 ——
+        而「以管理员身份重试」那条路上还写着 `days_ago: daysAgo` ⇒
+        点下去直接 `ReferenceError`，**UAC 一次都不会弹**。
+        而那正是"普通权限建不了定时任务"时唯一的退路（门店真实场景）。
+
+        前端没有 lint，这种错只在浏览器控制台里露一行。所以按源码钉，
+        并且**剥掉注释**再查（`node --check` 只查语法，查不出未定义变量）。
+        """
+        code = _strip_js_comments(APP_JS)
+        self.assertNotIn("daysAgo", code,
+                         "还有指向已删下拉框的残留变量 —— 点下去会 ReferenceError")
 
     def test_报量排查_tab_改好名了(self):
-        self.assertIn(">报量排查<", INDEX_HTML)
+        # ⚠ 2026-09-17 改成「四池比对」（报量排查的判据被证伪，那页换成四池记录）
+        self.assertIn(">四池比对<", INDEX_HTML)
         self.assertNotIn(">报告<", INDEX_HTML)
 
 
-class TestAutomationHasThreeChoices(unittest.TestCase):
-    """用户 2026-09-16：「定时任务自动化跑什么默认执行抓数据」。
+class TestAutomationChoicesAndAlwaysOn(unittest.TestCase):
+    """「自动化跑什么」的两个概念（2026-09-17 用户定的）：
 
-    ⚠ 之前复选框只有两项（报量排查 / POS 合规），而旁边那列「跑什么」写的却是
-    「抓华为数据 + 报量排查 + POS 合规」—— **两处对不上**，
-    用户看到"只勾了两项、却跑了三件"，会以为程序乱来。
+    * **可选项**（`choices`）—— 有复选框，能勾能取消：POS 合规 / 四池对账；
+    * **必做项**（`always_on`）—— **取消不掉，界面上没有框**：抓四池数据。
+
+    来历：2026-09-16 用户说"默认执行抓数据"（那时还能取消）；
+    2026-09-17 看到那个复选框，说「把抓数据这个复选框去掉吧，默认执行这个。不可选」。
     """
 
     def setUp(self):
@@ -1466,44 +1539,165 @@ class TestAutomationHasThreeChoices(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_三项可选_抓数据排第一(self):
+    def test_可选项里没有抓数据(self):
         _, ov = self.srv.request("GET", "/api/overview")
         self.assertEqual([c["value"] for c in ov["automation"]["choices"]],
-                         ["dump", "reconcile", "pos"])
+                         ["pos", "pools"])
 
-    def test_默认三项都勾(self):
+    def test_抓数据作为必做项单独给前端(self):
+        """⚠ 前端**不写死名字** —— 必做项要从 `always_on` 拿。
+        `always_on` 原本就是个空占位（`src/web.py` 里的注释写着"预留"），
+        现在真用上了。"""
         _, ov = self.srv.request("GET", "/api/overview")
-        self.assertEqual(ov["automation"]["steps"], ["dump", "reconcile", "pos"])
+        self.assertEqual([c["value"] for c in ov["automation"]["always_on"]],
+                         ["dump"])
+        self.assertEqual([c["label"] for c in ov["automation"]["always_on"]],
+                         [run_daily.STEP_LABELS["dump"]])
 
-    def test_勾选和那列跑什么对得上(self):
-        """⚠ 这条是**这次改动的全部意义**：复选框列表必须和「跑什么」一致。"""
+    def test_默认三项都跑(self):
         _, ov = self.srv.request("GET", "/api/overview")
-        labels = [c["label"] for c in ov["automation"]["choices"]]
+        self.assertEqual(ov["automation"]["steps"],
+                         ["dump", "pos", "pools"])
+
+    def test_跑什么那列和勾选加必做对得上(self):
+        """⚠ 这是这条线的**全部意义**：复选框列表 + 必做项
+        必须和旁边那列「跑什么」一致 —— 否则用户看到"只勾了两项"、
+        实际跑了三件，会以为程序乱来。"""
+        _, ov = self.srv.request("GET", "/api/overview")
+        labels = [c["label"] for c in ov["automation"]["always_on"]] + \
+                 [c["label"] for c in ov["automation"]["choices"]]
         self.assertEqual(ov["automation"]["label"], " + ".join(labels))
 
-    def test_能取消抓数据(self):
-        """用户说"默认执行抓数据" —— 默认在，但**能取消**（他的选择）。
-        取消之后库不更新，报量排查会**明确失败**，不会静默算错。"""
+    def test_取消勾选也取消不掉抓数据(self):
+        """⚠ 用户 2026-09-17 定的。取消之后库不更新，
+        POS 和四池对账都只是拿旧数据在算 —— 而界面上只会显示"跑完了"。"""
         code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": ["reconcile", "pos"]})
+                                      {"steps": ["pos", "pools"]})
         self.assertEqual(code, 200)
-        self.assertEqual(body["steps"], ["reconcile", "pos"])
+        self.assertEqual(body["steps"], ["dump", "pos", "pools"])
         run = schedule.script_path(self.root).read_text(encoding="utf-8")
-        self.assertIn("--skip-dump", run)
+        self.assertNotIn("--skip-dump", run)
 
-    def test_只勾抓数据也行(self):
+    def test_两个都不勾就是只抓数据(self):
         code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": ["dump"]})
+                                      {"steps": []})
         self.assertEqual(code, 200)
-        self.assertIn("抓华为数据", body["label"])
+        self.assertEqual(body["steps"], ["dump"])
+        self.assertEqual(body["label"], run_daily.STEP_LABELS["dump"])
+
+    def test_传个不是数组的还是要_400(self):
+        """空数组现在合法了，但"传了个字符串"还是错的 ——
+        老前端/手搓请求会这么干，放过去会变成逐字符拆开的步骤名。"""
+        code, body = self.srv.request("POST", "/api/schedule/automation",
+                                      {"steps": "pos"})
+        self.assertEqual(code, 400)
+        self.assertIn("数组", body["error"])
 
     def test_前端不自己写死选项表(self):
         self.assertIn("a.choices", APP_JS)
+        self.assertIn("a.always_on", APP_JS)
         self.assertNotIn("['reconcile', 'pos']", APP_JS)
         self.assertNotIn('["reconcile", "pos"]', APP_JS)
 
-    def test_界面提醒了取消抓数据的后果(self):
-        self.assertIn("建议一直勾着", INDEX_HTML)
+    def test_说明写清了抓数据不用选(self):
+        """⚠ 用户 2026-09-17 把那个复选框拿掉了 ——
+        说明里要写清"每次都跑、取消不掉"，否则用户会满界面找那个不存在的框。"""
+        self.assertIn("每次都会跑", INDEX_HTML)
+        self.assertIn("取消不掉", INDEX_HTML)
+
+
+class TestWhatsNewPopup(unittest.TestCase):
+    """更新弹窗「只弹一次」—— 以及「看这一版的更新说明」那个翻回来的入口。
+
+    ⚠ 用户 2026-09-18 实测报的：**升级到 2.1.0 之后那个窗不止弹一次**。
+    根因在前端：`seen` 只在点正中那个「知道了」时记，另外三条关掉的路
+    （点灰底 / 点待办里的「去运行」/ 弹窗开着直接刷新）**都不记**。
+    ⚠ 第二条最容易被踩 —— 门店看到的第一条待办旁边就挂着「去运行」。
+
+    修法两步：**弹出来就记** + **补一个能翻回来的入口**（不然没细看就关掉
+    就再也见不着了）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_概览里给的就是要弹的那一份(self):
+        _, ov = self.srv.request("GET", "/api/overview")
+        wn = ov["whatsnew"]
+        self.assertIsNotNone(wn, "升级后第一次打开控制台该弹")
+        self.assertTrue(wn["todo"], "待办不能是空的")
+
+    def test_记过之后概览里就没有了(self):
+        self.srv.request("POST", "/api/whatsnew/seen", {"version": web.version.VERSION})
+        _, ov = self.srv.request("GET", "/api/overview")
+        self.assertIsNone(ov["whatsnew"], "看过了还弹")
+
+    def test_记的时候把待办一起存下来(self):
+        """⚠⚠ **顺序不能反**：先算 digest、**再**记 `seen`。
+
+        反过来的话 `seen` 已经是当前版本，算出来的 `todo` 是**空的** ——
+        正是 AGENTS.md 坑 13「看过 ≠ 做完了」（那条升级推送踩过一次，
+        这里差点又踩）。
+        """
+        self.srv.request("POST", "/api/whatsnew/seen", {"version": web.version.VERSION})
+        code, r = self.srv.request("GET", "/api/whatsnew")
+        self.assertEqual(code, 200)
+        self.assertTrue(r["body"]["todo"], "存档里的待办是空的 —— 顺序反了？")
+
+    def test_随时能翻回来重看(self):
+        self.srv.request("POST", "/api/whatsnew/seen", {"version": web.version.VERSION})
+        _, r = self.srv.request("GET", "/api/whatsnew")
+        self.assertEqual(r["body"]["version"], web.version.VERSION)
+        self.assertTrue(r["body"]["highlights"])
+
+    def test_前端是弹出来就记_不是点了才记(self):
+        """⚠ **这条是本轮修复的核心**：记 `seen` 的动作挂在"显示"上，
+        不是挂在「知道了」的点击上。前端没有 lint、跑起来也看不见，
+        所以按源码钉。
+        """
+        i = APP_JS.index("function renderWhatsNew")
+        j = APP_JS.index("function closeWhatsNew", i)
+        self.assertIn("if (!force) markWhatsNewSeen(wn.version)", APP_JS[i:j],
+                      "弹出时没记 seen —— 就是这个 bug")
+
+    def test_重看不重复记(self):
+        """从设置翻回来看的那一次**不再记一次**（`seen` 早就是这一版了），
+        而且要能绕过 `wnShowing` —— 它就是用来"关掉之后还想再看一眼"的。"""
+        i = APP_JS.index("function renderWhatsNew")
+        j = APP_JS.index("function closeWhatsNew", i)
+        seg = APP_JS[i:j]
+        self.assertIn("force", seg)
+        self.assertIn("(!force && wnShowing === wn.version)", seg,
+                      "force 没能绕过「已经弹过」那道闸")
+
+    def test_入口按钮在设置里(self):
+        self.assertIn('id="btn-whatsnew-show"', INDEX_HTML)
+        self.assertIn("$('#btn-whatsnew-show')", APP_JS)
+
+    def test_两个弹窗不会同时弹(self):
+        """⚠ 「已更新」和「老任务要处理」这两个框的**触发时机完全一样**
+        （都是"升级后第一次打开控制台"），而 `.modal-mask` 两个都是
+        `position: fixed; inset: 0; z-index: 200` ——
+
+        同时显示 = **两层遮罩叠在一起**（背景发黑），而且 DOM 靠后的
+        「已更新」压在上面，用户**根本不知道底下还压着一个**。
+
+        所以只能一个先弹、另一个排队。事件触发的东西浏览器里才看得见，
+        按源码钉。
+        """
+        i = APP_JS.index("function renderLegacyPrompt")
+        j = APP_JS.index("function closeLegacyPrompt", i)
+        self.assertIn("$('#whatsnew-mask').hidden", APP_JS[i:j],
+                      "老任务弹窗没给「已更新」让路 —— 两个会叠在一起")
+        k = APP_JS.index("function closeWhatsNew")
+        m = APP_JS.index("async function ackWhatsNew", k)
+        self.assertIn("lgWaiting", APP_JS[k:m],
+                      "关掉「已更新」之后没把排队的老任务提示放出来")
 
 
 class TestReportBugApi(unittest.TestCase):
@@ -1564,14 +1758,28 @@ class TestReportBugApi(unittest.TestCase):
 
 
 class TestReportBugButtonWiring(unittest.TestCase):
-    def test_按钮在定时执行那张卡片里(self):
-        # ⚠ 锚 `<h2>定时执行</h2>` —— 光找"定时执行"会匹到顶部那个小药丸的
-        #   title（第一版就是这么错的，取到的区间是空的）。
-        #   尾巴用「设置那张面板的 </section>」—— 定时执行是设置里最后一张卡片。
+    def test_按钮挪到了检查更新旁边(self):
+        """⚠ 2026-09-17 用户定的：这两个按钮和相关说明原来挂在「定时执行」下面 ——
+        「出问题了？」跟"每天几点跑"完全没关系。现在跟「检查更新」放一起。
+
+        ⚠ 锚 `<h2>定时执行</h2>` —— 光找"定时执行"会匹到顶部那个小药丸的
+        title（第一版就是这么错的，取到的区间是空的）。
+        """
         i = INDEX_HTML.index("<h2>定时执行</h2>")
         j = INDEX_HTML.index("</section>", i)
-        self.assertIn("btn-report-bug", INDEX_HTML[i:j],
-                      "「上报 bug」按钮该放在「定时执行」下面")
+        for gone in ("btn-report-bug", "btn-clear-pools-notify"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, INDEX_HTML[i:j],
+                                 "「%s」不该再挂在「定时执行」下面了" % gone)
+
+        # 区间取「检查更新」标题到面板结束 —— 不写死是哪一张卡片，
+        # 合成一张卡还是紧挨着开一张新卡都算通过。
+        k = INDEX_HTML.index("<h2>检查更新</h2>")
+        m = INDEX_HTML.index("</section>", k)
+        for want in ("btn-report-bug", "btn-clear-pools-notify"):
+            with self.subTest(want=want):
+                self.assertIn(want, INDEX_HTML[k:m],
+                              "「%s」该跟「检查更新」放在一起" % want)
 
     def test_结果区几个_id_都在(self):
         for i in ("btn-report-bug", "report-bug-msg", "report-bug-result"):

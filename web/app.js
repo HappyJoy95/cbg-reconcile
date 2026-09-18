@@ -10,12 +10,10 @@ const CONFIG_FIELDS = [
   ['store_code', 'cfg-store_code'],
   ['marker', 'cfg-marker'],
   ['erp_store_name', 'cfg-erp_store_name'],
-  ['check.lookback_days', 'cfg-lookback_days'],
-  ['check.report_lookahead_days', 'cfg-report_lookahead_days'],
-  ['check.page_size', 'cfg-page_size'],
-  ['check.pay_status', 'cfg-pay_status'],
-  ['check.return_status', 'cfg-return_status'],
-];
+];   // ⚠ 「对账参数」那几项 2026-09-17 拿掉了（报量排查整步没了）：
+//   lookback_days / report_lookahead_days 只剩 `cmd_check` 手动跑时读，前端不暴露；
+//   page_size / pay_status / return_status 是**死配置** —— 从来没人把它们传进接口
+//   （`dump.py` 用自己的 `--page-size`，而且明确不许传 payStatus/returnStatus）。
 
 const state = { overview: null, report: null, sheet: null, since: 0, jobId: null,
                 timer: null, autoTimer: null };
@@ -171,42 +169,72 @@ async function loadOverview() {
     scp.textContent = sch.time ? `每天 ${sch.time}${n > 1 ? ` 等 ${n} 个` : ''}` : `定时 ${n} 个`;
   } else { scp.className = 'pill'; scp.textContent = '未设定时'; }
 
-  renderReports(o.reports || []);
+  // ⚠ 这一页原来是「四池对账」（云商串号标识判据）—— 那个判据**已被证伪**，
+  //   2026-09-17 用户选的是「形态留着、内容换成四池比对的历史记录」。
+  renderPoolsHistory();
   renderSession();
   renderSchedule(sch);
 }
 
-function renderReports(list) {
+async function renderPoolsHistory() {
+  // 历史在 out/pools-<年>.json（`src/pools_history.py` 落盘），单独取一次。
+  let data = { days: [], years: [] };
+  try {
+    data = await api('/api/pools/history');
+  } catch (e) {
+    // 读不到就当没有 —— 历史看不了不该把整个控制台弄挂
+  }
+  const list = data.days || [];
   const latest = list[0];
   $('#report-cards').innerHTML = latest ? `
-    <div class="kpi bad"><div class="k">最新报量排查 · 玲珑无但云商有</div><div class="v">${latest.missing ?? '—'}</div></div>
-    <div class="kpi ok"><div class="k">已报量</div><div class="v">${latest.matched ?? '—'}</div></div>
-    <div class="kpi ${latest.reverse ? 'warn' : ''}"><div class="k">反向差异</div><div class="v">${latest.reverse ?? '—'}</div></div>
-    <div class="kpi ${latest.reverse_unshipped ? 'bad' : ''}">
-      <div class="k">玲珑有但云商无</div><div class="v">${latest.reverse_unshipped ?? '—'}</div></div>
-    <div class="kpi"><div class="k">报告日期</div><div class="v" style="font-size:17px">${esc(latest.date || latest.name.replace(/\D+/g, '').slice(0, 8) || '—')}</div></div>
-  ` : '<div class="kpi"><div class="k">还没有排查报告</div><div class="v" style="font-size:15px">去「运行」页跑一次</div></div>';
+    <div class="kpi bad"><div class="k">最新 · AD 玲珑报了、云商没报</div><div class="v">${latest.AD ?? '—'}</div></div>
+    <div class="kpi bad"><div class="k">最新 · BC 云商报了、玲珑没报</div><div class="v">${latest.BC ?? '—'}</div></div>
+    <div class="kpi ok"><div class="k">AC 都卖了</div><div class="v">${latest.AC ?? '—'}</div></div>
+    <div class="kpi ok"><div class="k">BD 都没卖</div><div class="v">${latest.BD ?? '—'}</div></div>
+    <div class="kpi"><div class="k">记录日期</div><div class="v" style="font-size:17px">${esc(latest.date || '—')}</div></div>
+  ` : '<div class="kpi"><div class="k">还没有四池比对记录</div><div class="v" style="font-size:15px">去「运行」页跑一次「整个项目」</div></div>';
 
-  $('#report-count').textContent = list.length ? `共 ${list.length} 份（每次跑都存一份，不覆盖）` : '';
+  $('#report-count').textContent = list.length ? `共 ${list.length} 天` : '';
   if (!list.length) {
-    $('#report-list').innerHTML = '<div class="empty">out/ 目录下还没有排查报告</div>';
+    $('#report-list').innerHTML = '<div class="empty">还没有记录 —— 跑一次「整个项目」就会有了</div>';
     return;
   }
+  const hot = (n) => (n ? { html: `<b style="color:#d4380d">${n}</b>` } : 0);
   const rows = list.map((r) => [
-    r.date || r.name,
-    r.missing, r.matched, r.reverse, r.reverse_transfer, r.reverse_unshipped,
-    fmtTs(r.mtime),
-    { html: `<button class="btn small" data-open="${esc(r.name)}">查看</button>
-             <button class="btn small ghost" data-del="${esc(r.name)}">删除</button>` },
+    r.date, hot(r.AD), hot(r.BC), r.AC, r.BD,
+    { html: `<button class="btn small" data-day="${esc(r.date)}">查看</button>` },
   ]);
   $('#report-list').innerHTML = table(
-    ['目标日', '玲珑无但云商有', '已报量', '反向差异', '↳调拨进来', '↳玲珑有但云商无', '生成时间', ''],
-    rows, ['mono', 'num', 'num', 'num', 'num', 'num', 'mono', '']);
-  $$('#report-list [data-open]').forEach((b) =>
-    b.addEventListener('click', () => openReport(b.dataset.open)));
-  $$('#report-list [data-del]').forEach((b) =>
-    b.addEventListener('click', () => removeReport(b.dataset.del)));
+    ['日期', 'AD 玲珑报了云商没报', 'BC 云商报了玲珑没报', 'AC 都卖了', 'BD 都没卖', ''],
+    rows, ['mono', 'num', 'num', 'num', 'num', '']);
+  $$('#report-list [data-day]').forEach((b) =>
+    b.addEventListener('click', () => openPoolsDay(b.dataset.day)));
 }
+
+async function openPoolsDay(day) {
+  const d = await api('/api/pools/history?date=' + encodeURIComponent(day));
+  $('#report-detail-title').textContent = `${day} · 四池比对`;
+  let html = '';
+  for (const [k, label] of [['AD', 'AD · 玲珑报了、云商没报（云商该出库没出）'],
+                            ['BC', 'BC · 云商报了、玲珑没报（门店该报量没报）']]) {
+    const rows = d[k] || [];
+    html += `<h3 style="margin:14px 0 6px">${label} —— ${rows.length} 台</h3>`;
+    if (!rows.length) { html += '<div class="empty">没有</div>'; continue; }
+    html += table(
+      ['串号', '机型', '门店', '单号', '时间', '金额'],
+      rows.map((r) => [
+        r.sn,
+        r['玲珑机型'] || r['云商机型'] || '',
+        r['玲珑门店'] || r['云商门店'] || r['玲珑仓'] || r['云商仓'] || '',
+        r['云商单号'] || r['玲珑单号'] || '',
+        String(r['云商时间'] || r['玲珑时间'] || '').slice(0, 16),
+        r['云商金额'] ?? r['玲珑金额'] ?? '',
+      ]), ['mono', '', '', 'mono', 'mono', 'num']);
+  }
+  $('#sheet-body').innerHTML = html;
+  $('#report-detail-card').hidden = false;
+}
+
 
 async function removeReport(name) {
   if (!confirm(`删除这份报告？\n\n${name}\n\n删了就找不回来了（xlsx 和摘要一起删）。`)) return;
@@ -261,22 +289,24 @@ function setRunButtons(running) {
   $$('#panel-run [data-what]').forEach((b) => { b.disabled = running; });
 }
 
-$('#run-mode').addEventListener('change', (e) => {
-  $('#run-date').hidden = e.target.value !== 'date';
-});
 $('#btn-quick-run').addEventListener('click', () => {
   $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === 'run'));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-run'));
   startRun('all');
 });
 
-// 「运行」页四个按钮 —— 跑哪几件事由 data-what 决定，映射表在后端
-// （src/run_daily.py 的 WHAT_FLAGS），前端**不重复一份**。
+// 「运行」页的按钮 —— 跑哪几件事由 data-what 决定，映射表在后端
+// （src/run_daily.py 的 BUTTON_STEPS），前端**不重复一份**。
+// ⚠ 2026-09-17：按钮只剩「整个项目」一个；「目标日」「高级（时间窗容差）」
+//   和它们对应的 mode/date/lookback/lookahead 一起拿掉了（一个都不生效）。
 $$('#panel-run [data-what]').forEach((b) =>
   b.addEventListener('click', () => startRun(b.dataset.what)));
 
-// 退出码的含义**按跑的东西不同**：只有报量排查才有"有差异"(3) 这一说，
+// 退出码的含义**按跑的东西不同**：只有四池对账才有"有差异"(3) 这一说，
 // POS 那边 2 是"没找到订单库"。混着说会让人以为 POS 也"有差异"。
+// ⚠ `dump` / `pos` / `reconcile` 三档界面上已经没有按钮了，但**留着** ——
+//   `/api/run` 仍然认这几个 what（`daily --skip-dump` 那套没动），
+//   别的地方调进来时还得有话说。
 const EXIT_LABELS = {
   all: { 0: '完成 ✅', 1: '华为会话已过期 ❌', 2: '取数失败 ❌',
          3: '完成，报量有差异 ⚠️', 9: '程序出错（不是会话问题）❌' },
@@ -288,20 +318,13 @@ const EXIT_LABELS = {
 };
 
 async function startRun(what = 'all') {
-  const mode = $('#run-mode').value;
-  const body = { mode, what };
-  if (mode === 'date') {
-    if (!$('#run-date').value) return toast('先选个日期', 'bad');
-    body.date = $('#run-date').value;
-  }
-  const lb = $('#run-lookback').value, la = $('#run-lookahead').value;
-  if (lb !== '') body.lookback = Number(lb);
-  if (la !== '') body.lookahead = Number(la);
-
+  // ⚠ 请求体里**只有 `what`**。以前这里还塞 mode/date/lookback/lookahead，
+  //   后端拿它们拼 `--days-ago` 之类的参数 —— 那些开关现在一个都不影响结果，
+  //   留着就等于"界面上有个能选、选了没用"的旋钮。
   $('#run-log').textContent = '';
   state.since = 0; state.jobId = null;
   try {
-    const job = await api('/api/run', { method: 'POST', body });
+    const job = await api('/api/run', { method: 'POST', body: { what } });
     state.jobId = job.id;
     state.runWhat = what;
     appendLog(job);
@@ -344,7 +367,7 @@ function pollRun() {
   }, 900);
 }
 
-// ⚠ 已经**没有** `#btn-run` 了（一个按钮拆成四个 data-what）——
+// ⚠ 已经**没有** `#btn-run` 了（那个 id 现在是 `data-what="all"`）——
 //   留着这行会在加载时抛 TypeError，整个 app.js 后面的绑定全部不执行。
 //   前端没有构建步骤，也没有 lint，这种错只会在浏览器控制台里露出来。
 $('#btn-stop').addEventListener('click', async () => {
@@ -1139,6 +1162,7 @@ async function loadConfig() {
   if (state.overview) renderSchedule(state.overview.schedule || {});
   if (state.overview) renderAutomation(state.overview.automation);
   if (state.overview) renderWhatsNew(state.overview.whatsnew);
+  if (state.overview) renderLegacyPrompt(state.overview.legacy_prompt);
   if (state.overview) renderUpgrades(state.overview.upgrades);
   loadErp();
   loadMail();
@@ -1163,7 +1187,8 @@ async function saveConfig(msgEl) {
   try {
     const res = await api('/api/config', { method: 'PUT', body: { values } });
     const when = new Date().toLocaleTimeString();
-    $('#config-msg').textContent = '已保存 ' + when;
+    // ⚠ `config-msg` 随「对账参数」版块一起删了（2026-09-17）——
+    //   提示统一走调用方传进来的 `msgEl`（门店卡片那边传的是 `#store-msg`）。
     if (msgEl) msgEl.textContent = '已保存 ' + when;
     toast('配置已保存（注释保留了）', 'ok');
     loadOverview();
@@ -1191,7 +1216,7 @@ $('#btn-save-store') && $('#btn-save-store').addEventListener('click', async () 
   }
 });
 
-$('#btn-save-config').addEventListener('click', () => saveConfig(null));
+// ⚠ `btn-save-config` 随「对账参数」版块一起删了 —— 门店那三项走 `btn-save-store`。
 
 // 每行的操作按钮。⚠ table() 的单元格默认**转义** —— 想放原生 HTML 必须包 {html:}
 function schedRowButtons(t) {
@@ -1202,16 +1227,21 @@ function schedRowButtons(t) {
     + ` <button class="btn ghost small nowrap" data-sched-del="${full}" data-sched-label="${label}">删除</button>` };
 }
 
-/* 「自动化跑什么」—— 三项复选框（抓华为数据 / 报量排查 / POS 合规）。
+/* 「自动化跑什么」—— 四项复选框（抓四池数据 / 四池对账 / POS 合规 / 四池对账）。
    ⚠ 选项表和当前勾选**都由后端给**（overview.automation），前端不自己维护一份。
    `dump` 在里面而且**默认勾上**（用户 2026-09-16 定的）——
    复选框列表必须和旁边那列「跑什么」对得上，否则用户看到"只勾了两项"、
-   实际跑了三件，会以为程序乱来。 */
+   实际跑了四件，会以为程序乱来。 */
 function renderAutomation(a) {
   const box = $('#automation-box');
   if (!box || !a) return;
   const on = new Set(a.steps || []);
-  box.innerHTML = (a.choices || []).map((c) => `
+  // ⚠ 「抓四池数据」**没有复选框**（用户 2026-09-17 定：「默认执行这个。不可选」）——
+  //   它是必做的，画成灰掉的勾选框反而像"能改但改不动"。这里只写一句说明。
+  //   哪几项是必做的由后端 `always_on` 给，**前端不写死名字**。
+  const fixed = (a.always_on || []).map((c) =>
+    `<span class="hint" style="margin-right:14px">${esc(c.label)}（每次必做）</span>`).join('');
+  box.innerHTML = fixed + (a.choices || []).map((c) => `
     <label style="min-width:0;margin-right:14px">
       <input type="checkbox" data-auto="${esc(c.value)}"${on.has(c.value) ? ' checked' : ''}>
       ${esc(c.label)}</label>`).join('');
@@ -1223,13 +1253,12 @@ function pickedAutomation() {
 }
 
 $('#btn-automation-save')?.addEventListener('click', async () => {
+  // ⚠ **两个都不勾是允许的**（用户 2026-09-17 定）：那就是「每天只抓数据，
+  //   不算也不推」。以前这里有一道"至少勾一项"的前端拦截 ——
+  //   那道拦截防的是"取消了勾选、结果照样推"，而现在抓数据是必做的、
+  //   出来什么严格照着勾选走，不会静默扩大，所以拦截没必要了。
   const what = pickedAutomation();
   const msg = $('#automation-msg');
-  if (!what.length) {
-    // 后端也会拒（400），这里先说一声 —— 少一次来回
-    msg.textContent = '至少勾一项';
-    return toast('至少要勾一项：抓华为数据 / 报量排查 / POS 合规', 'bad');
-  }
   try {
     const r = await api('/api/schedule/automation', { method: 'POST', body: { steps: what } });
     if (!r.ok) {
@@ -1248,6 +1277,18 @@ $('#btn-automation-save')?.addEventListener('click', async () => {
 /* 「上报 bug」—— 把现场日志打包发出去。
    ⚠ 界面上必须把**包的路径**显示出来：自动发送失败是常态
    （要报的 bug 很可能就是"推送坏了"），那时候用户得能自己把文件发出去。 */
+$('#btn-clear-pools-notify')?.addEventListener('click', async () => {
+  const msg = $('#clear-pools-notify-msg');
+  try {
+    const r = await api('/api/pools-notify/clear', { method: 'POST', body: {} });
+    // ⚠ 如实显示"本来就没有" —— 永远回"已清除"的话，用户分不清
+    //   是清成功了还是按钮压根没生效。
+    msg.textContent = r.message || (r.had ? '已清除' : '本来就没有');
+  } catch (e) {
+    msg.textContent = '失败：' + e.message;
+  }
+});
+
 $('#btn-report-bug')?.addEventListener('click', async () => {
   const btn = $('#btn-report-bug');
   const msg = $('#report-bug-msg');
@@ -1300,10 +1341,28 @@ $('#btn-report-bug')?.addEventListener('click', async () => {
      前端不自己判断"这个版本看过没"，那种状态放前端一定会漂。 */
 let wnShowing = null;
 
-function renderWhatsNew(wn) {
+/* ⚠ **弹出来就算看过**（用户 2026-09-18 定）。
+   原来只在点正中那个「知道了」时记 `seen`，于是另外三条关掉的路**都不记**：
+
+     ① 点弹窗外面那块灰的   ② 点待办里的「去运行 / 去设置」
+     ③ 弹窗开着直接刷新页面
+
+   于是下次打开控制台**又弹一次**。②最容易被踩 ——
+   门店看到的第一条待办旁边就挂着「去运行」。 */
+async function markWhatsNewSeen(version) {
+  if (!version) return;
+  try {
+    await api('/api/whatsnew/seen', { method: 'POST', body: { version } });
+  } catch (e) { /* 记不上就下次再弹一次，不值得打扰用户 */ }
+}
+
+/* `force=true` = 从「设置 → 检查更新 → 看这一版的更新说明」翻回来重看的。
+   ⚠ 那时候**不再记一次**（`seen` 早就是这一版了），而且**绕过 `wnShowing`** ——
+   它就是用来"我已经关掉但还想再看一眼"的。 */
+function renderWhatsNew(wn, force) {
   const mask = $('#whatsnew-mask');
   if (!mask) return;
-  if (!wn || wnShowing === wn.version) return;   // 没有 / 正在显示同一个，都不重复弹
+  if (!wn || (!force && wnShowing === wn.version)) return;   // 没有 / 已经弹过这一版
   wnShowing = wn.version;
   $('#wn-head').textContent = `已更新到 v${wn.version}`;
   $('#wn-title').textContent = wn.title || '';
@@ -1321,24 +1380,30 @@ function renderWhatsNew(wn) {
                   ${esc(t.go_label || '去看看')}</button>` : ''}
     </div>`).join('');
   $$('#wn-todo [data-go]').forEach((b) => b.addEventListener('click', () => {
-    closeWhatsNew();
+    closeWhatsNew();          // 记 seen 在弹出来那一步已经做过了（见上）
     goto(b.dataset.go);
   }));
   mask.hidden = false;
+  if (!force) markWhatsNewSeen(wn.version);
 }
 
 function closeWhatsNew() {
   const mask = $('#whatsnew-mask');
   if (mask) mask.hidden = true;
+  // ⚠ 关掉「已更新」之后，把被它挡住的**老任务提示**放出来 ——
+  //   两个弹窗的触发时机完全一样，同时弹会叠两层遮罩（见 renderLegacyPrompt）。
+  if (lgWaiting) {
+    const lp = lgWaiting;
+    lgWaiting = null;
+    renderLegacyPrompt(lp);
+  }
 }
 
 async function ackWhatsNew() {
+  // 显示时已经记过一次；这里**再记一次是补记** —— 那一次可能网断了/写失败了。
   const v = wnShowing;
   closeWhatsNew();
-  if (!v) return;
-  try {
-    await api('/api/whatsnew/seen', { method: 'POST', body: { version: v } });
-  } catch (e) { /* 记不上就下次再弹一次，不值得打扰用户 */ }
+  await markWhatsNewSeen(v);
 }
 
 /* 弹窗里的文字允许 **粗体** 和 `代码`（后端写的是 markdown 风格）。
@@ -1359,8 +1424,97 @@ function goto(tab) {
 
 $('#btn-wn-ok')?.addEventListener('click', ackWhatsNew);
 $('#whatsnew-mask')?.addEventListener('click', (e) => {
-  // 点遮罩也算"知道了" —— 但不点按钮就不会记（用户可能是误触）
+  // 点灰底只关窗 —— **不用再记 seen 了**：弹出来那一步已经记过（见 renderWhatsNew）。
+  // （原来这里写着"点遮罩也算知道了，但不点按钮就不会记"，自相矛盾，
+  //   实际效果就是"点遮罩关掉，下次打开又弹"。）
   if (e.target === $('#whatsnew-mask')) closeWhatsNew();
+});
+
+/* 「设置 → 检查更新 → 看这一版的更新说明」——
+   ⚠ 取的是**升级那天弹给门店的那一份存档**，不是现算的（见 `/api/whatsnew`）。
+   现算的话 `seen` 已经是这一版了，「要做什么」那一段会是空的。 */
+$('#btn-whatsnew-show')?.addEventListener('click', async () => {
+  const btn = $('#btn-whatsnew-show');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/whatsnew');
+    if (r && r.body) renderWhatsNew(r.body, true);
+    else toast('这一版没有更新说明', 'bad');
+  } catch (e) {
+    toast('读不到：' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* 老定时任务：**更新后第一次打开控制台主动弹一次**（用户 2026-09-17 选的方案 C）。
+
+   ⚠ 决定弹不弹的是**后端**（`overview.legacy_prompt.show`）——
+     前端不自己记"弹过没"，那种状态放前端一定会漂。
+   ⚠ 只有**用户点按钮**才提权（服务是无人值守的，绝不能自动弹 UAC）。 */
+let lgShowing = false;
+// 「已更新」那个弹窗开着的时候，先把老任务提示**存这儿**（见下）。
+let lgWaiting = null;
+
+function renderLegacyPrompt(lp) {
+  const mask = $('#legacy-mask');
+  if (!mask) return;
+  if (!lp || !lp.show || lgShowing) return;
+  // ⚠ **两个弹窗别同时弹。** 它俩的触发时机**完全一样**（升级后第一次打开控制台），
+  //   而 `.modal-mask` 都是 `position:fixed; inset:0; z-index:200` ——
+  //   同时显示 = **两层遮罩叠在一起**（背景发黑），而且 DOM 靠后的
+  //   「已更新」压在上面，用户根本不知道底下还压着一个。
+  //   所以：先让「已更新」说完，**关掉之后**再弹这个。
+  if (!$('#whatsnew-mask').hidden) { lgWaiting = lp; return; }
+  lgShowing = true;
+  const names = lp.names || [];
+  $('#lg-sub').textContent = `v${lp.version || ''}`;
+  $('#lg-why').innerHTML =
+    `表里有 <b>${names.length}</b> 条<b>老名字</b>的定时任务：`
+    + names.map((n) => `<code>${esc(n)}</code>`).join('、')
+    + `<br>任务改过名（现在叫「${esc(lp.task_name || '')}」），而 Windows 上`
+    + `<b>不同名就是并存、不是覆盖</b> —— 这几条会<b>各自每天跑一遍</b>。`
+    + `<br><span class="hint">点「一键处理」会<b>先把新的建好</b>、`
+    + `确认建成之后<b>才</b>去删老的。需要管理员权限时会弹一次 UAC，`
+    + `你自己点一下就行（不会自动弹）。</span>`;
+  mask.hidden = false;
+}
+
+function closeLegacyPrompt() {
+  const mask = $('#legacy-mask');
+  if (mask) mask.hidden = true;
+}
+
+async function ackLegacyPrompt() {
+  closeLegacyPrompt();
+  try {
+    await api('/api/schedule/legacy-prompt/seen', { method: 'POST', body: {} });
+  } catch (e) { /* 记不上就下次再弹一次，不值得打扰用户 */ }
+}
+
+$('#btn-legacy-later')?.addEventListener('click', ackLegacyPrompt);
+
+$('#btn-legacy-fix')?.addEventListener('click', async () => {
+  const btn = $('#btn-legacy-fix');
+  const box = $('#lg-result');
+  btn.disabled = true;
+  box.innerHTML = '<div class="banner">正在处理…'
+    + '<span class="hint">如果弹出 UAC 授权框，点「是」</span></div>';
+  try {
+    const r = await api('/api/schedule/replace', { method: 'POST', body: {} });
+    // ⚠ 后端已经把话说清楚了（尤其是"新任务没建成、老的一条都没动"），
+    //   **原样显示**，别在这儿另编一句 —— 编错一句就会让人以为"删干净了"。
+    box.innerHTML = `<div class="banner ${r.ok ? 'ok' : 'bad'}">`
+      + `${esc(r.message || '')}</div>`;
+    if (r.ok) {
+      btn.textContent = '已处理';
+      setTimeout(ackLegacyPrompt, 1500);
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="banner bad">失败：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /* 升级记录 —— 「什么时候升的级、从哪一版升上来的」。
@@ -1404,7 +1558,7 @@ function renderSchedule(sch) {
     //   所以：这列改名「路径」，另起一列「跑什么」写**执行项目**。
     { html: `<span class="hint mono">${esc((t.command || '').slice(-70))}</span>` },
     // 「跑什么」—— 把每天实际干的几件事**列出来**，不是给一句概括。
-    // 写「整个项目」门店看不懂那指什么；写「抓华为数据 + 报量排查 + POS 合规」
+    // 写「整个项目」门店看不懂那指什么；写「抓四池数据 + 四池对账 + POS 合规 + 四池对账」
     // 一眼就知道。文案在后端（`run_daily.automation_label`），前端不另写一份。
     { html: `<span class="nowrap">${esc(t.what_label || '—')}</span>` },
     schedRowButtons(t),
@@ -1412,7 +1566,7 @@ function renderSchedule(sch) {
   // ⚠ **改名留下的老任务**。
   //
   // 任务名 2026-09-16 从 `CBG报量对账` 改成了 `门店数据拉取与计算`（名字要跟
-  // "它现在每天干三件事"对上）。但 Windows 那边**不同名就是并存，不是覆盖** ——
+  // "它现在每天干四件事"对上）。但 Windows 那边**不同名就是并存，不是覆盖** ——
   // 老门店升级后表里会有两条：`CBG报量对账-21点00` 和 `门店数据拉取与计算-21点00`，
   // **两条都会每天跑一遍**。所以必须提示，不能装作没看见。
   //
@@ -1449,7 +1603,7 @@ function renderSchedule(sch) {
         现在叫 <code>${esc(sch.task_name)}</code>）—— 而 Windows 那边<b>不同名就是并存，
         不是覆盖</b>，所以这两条都会每天跑一次，等于<b>一天跑两遍</b>。</span>
         <br><span class="hint">留哪条都行，<b>留一条就够</b>。建议把老的那条点「删除」
-        （新名字跟"它现在每天干三件事"对得上，看名字就知道是干什么的）。</span>
+        （新名字跟"它现在每天干四件事"对得上，看名字就知道是干什么的）。</span>
       </div>` : '')
     + table(['任务名', '执行时间', '状态', '路径', '跑什么', ''],
             rows, ['', '', '', '', '', 'right']);
@@ -1478,7 +1632,6 @@ function renderSchedule(sch) {
         const r = await api('/api/elevate', {
           method: 'POST',
           body: { what: 'schedule', time: $('#sched-time').value || '21:00',
-                  days_ago: Number($('#sched-days-ago').value),
                   name: target.name || '' },
         });
         const text = r.ok
@@ -1623,11 +1776,13 @@ syncSchedPlaceholder();
 $('#btn-sched-install').addEventListener('click', async () => {
   const time = $('#sched-time').value || '21:00';
   const name = ($('#sched-name').value || '').trim();
-  const daysAgo = Number($('#sched-days-ago').value);
   try {
     const r = await api('/api/schedule', {
       method: 'POST',
-      body: { time, days_ago: daysAgo, name },
+      // ⚠ 不传 `days_ago` —— 后端有默认（`schedule.DEFAULT_DAYS_AGO = 1`，跑昨天）。
+      //   「昨天/今天」那个下拉 2026-09-17 拿掉了：`--days-ago` 已经废弃
+      //   （报量排查整步没了），留着只会让人以为它还能影响什么。
+      body: { time, name },
     });
     // ⚠ 注册失败多半是**权限**一条：这条定时任务以前可能是管理员身份的
     //   服务建的，普通权限覆盖不了（`schtasks ... /f` 拒绝访问）。
@@ -1653,7 +1808,14 @@ $('#btn-sched-install').addEventListener('click', async () => {
         try {
           const e2 = await api('/api/elevate', {
             method: 'POST',
-            body: { what: 'schedule', time, days_ago: daysAgo, name },
+            // ⚠ **不传 `days_ago`** —— 后端有默认（`schedule.DEFAULT_DAYS_AGO`）。
+            //   这里原来写的是 `days_ago: daysAgo`，而 `daysAgo` 是
+            //   「昨天/今天」那个下拉框的变量，那个框 2026-09-17 拿掉了 ⇒
+            //   **变量根本不存在** ⇒ 点「以管理员身份重试」直接
+            //   `ReferenceError: daysAgo is not defined`，整个 handler 挂掉，
+            //   UAC 一次都不会弹。而这正是"普通权限建不了任务"时唯一的退路。
+            //   前端没有 lint，这种错只能在浏览器控制台里看见。
+            body: { what: 'schedule', time, name },
           });
           $('#sched-result').innerHTML = e2.ok
             ? `<div class="banner ok">✅ 已注册（管理员权限）。

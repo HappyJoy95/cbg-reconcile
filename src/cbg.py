@@ -26,6 +26,8 @@ from .session import CBG_BASE, CbgAuthError, CbgSession
 LIST_PATH = "/isrp/srs/sale-order/paged-list"
 DETAIL_PATH = "/isrp/soms/sale-order"
 STORE_PATH = "/isrp/sms/store-info/store-detail"
+#: **本店名下 SN 清单**（玲珑在库）—— 2026-09-17 探到，是"该谁报量"的判据来源
+INVENTORY_PATH = "/isrp/sws/inventory/query/physical"
 
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -155,6 +157,54 @@ class CbgClient:
               f"如果本店不该有这些，检查「设置 → 门店」的『华为门店编码』是不是填成了"
               f"别的店；⚠ 一个账号能看多个店时，填错**不会报错**、只会静默算错。",
               file=sys.stderr)
+
+    # ------------------------------------------------------- 库存（数据池 B）
+    def inventory(self, page_size: int = 1000) -> tuple:
+        """**本店名下 SN 清单**（玲珑在库）→ `(rows, total)`，rows 是接口原样的 dict。
+
+        2026-09-17 实测契约：
+
+        * **观测单位：一行 = 一台机器** ✅（不是商品汇总 —— 这点是本接口的价值所在）
+        * 串号字段：`sn` / `imei1` / `imei2` / `meid`
+        * 归属：`storeCode` + `warehouseName`（实测三个仓：可售仓 / 礼品仓 / 物料仓）
+        * `stockAge` = 库龄（天）；`updateTime` = 库存变动时间（毫秒）
+        * `pageSize=1000` **一次拉全**（实测 414 行 / 1 页 / `totalRows=414`）
+        * `sn` 是**真筛**（真值 1 行、瞎编值 0 行，A/B 验过）
+
+        ⚠ **没有日期参数** —— 只能看**当前快照**。但这**不影响**漏报排查：
+        没报量的机器会**一直挂在库里**（实测那台挂了 42 天还在），
+        所以每天扫一遍当前快照 = 累积的漏报全覆盖。
+
+        ⚠ 返回的 `sn` 里混着**非串号值**：礼品/物料类商品给的是 `***`（实测 80 行）
+        或空串（18 行）。**调用方必须自己过滤**（长度 ≥ 8 且不是全星号），
+        否则会把 `***` 当成一个串号去对账。
+        """
+        body = {
+            "curPage": 1, "pageSize": page_size, "sort": "-update_time",
+            "storeCode": self.store_code or "",
+            "warehouseId": None, "sku": None, "spu": None, "spuName": None,
+            "spuNameEn": None, "ean": None, "itemName": None, "itemNameEn": None,
+            "bpart": None, "sn": None, "rfid": None, "receiver": None,
+            "stockAgeInterval": [], "itemType": None, "tagCodeList": None,
+            "categoryIds": [], "language": "Cn", "timezone": "Asia/Shanghai",
+        }
+        rows: list[dict] = []
+        page, total = 1, None
+        while True:
+            body["curPage"] = page
+            j = self._request("POST", INVENTORY_PATH, payload=body)
+            batch = (j.get("result") or {}).get("physicalInventory") or []
+            pv = j.get("pageVO") or {}
+            if total is None:
+                total = pv.get("totalRows")
+            rows.extend(batch)
+            total_pages = pv.get("totalPages") or 1
+            if self.verbose:
+                print(f"    库存第 {page}/{total_pages} 页：{len(batch)} 台")
+            if page >= total_pages or not batch:
+                break
+            page += 1
+        return rows, (total if total is not None else len(rows))
 
     def store_detail(self, store_code: str | None = None) -> dict:
         code = store_code or self.store_code

@@ -276,6 +276,30 @@ def send(mc: MailConfig, subject: str, body: str, attachments=(),
 POS_SUBJECT_PREFIX = "[POS 合规]"
 
 
+POOLS_SUBJECT_PREFIX = "[四池对账]"
+
+
+def build_pools_mail(ctx: dict, lines, headline: str, has_attach: bool = False) -> tuple:
+    """四池对账（AD/BC）那封邮件 —— **单独一封**，和报量排查 / POS 分开。
+
+    正文用 `pools.notify_lines` 的输出 —— 和企微**共用同一份格式化**，
+    不在这里另排一遍（排两遍迟早有一处忘了改）。
+    """
+    store = ctx.get("门店", "?")
+    tail = [
+        "",
+        "——",
+        "AD = 玲珑报了、云商没报（云商该出库没出）",
+        "BC = 云商报了、玲珑没报（门店该报量没报）",
+    ]
+    if has_attach:
+        tail.append("完整清单见附件（串号 / 机型 / 门店 / 单号 / 时间 / 金额）。")
+    tail += ["本邮件由 cbg-reconcile 自动发送。",
+             f"配置 {ctx.get('配置文件', '')}"]
+    body = "\n".join([f"门店 {store}", headline, ""] + list(lines) + tail)
+    return f"{store} · {headline}", body
+
+
 def build_pos_mail(ctx: dict, lines, headline: str) -> tuple:
     """POS 合规那封邮件。**和报量排查分开两封**（用户 2026-09-16 定的）。
 

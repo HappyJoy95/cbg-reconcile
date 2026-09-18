@@ -134,6 +134,50 @@ class TestPending(unittest.TestCase):
         from src import selfupdate
         self.assertIn(".secrets", selfupdate.NEVER_TOUCH)
 
+    # ------------------------------------------------ 「看这一版的更新说明」
+    def test_记的时候把当时那份内容存下来(self):
+        """⚠ 2026-09-18：`mark_seen` 要多存一份"当时弹出来的内容"。
+
+        用户发现弹窗**不止弹一次** —— 根因是 `seen` 只在点「知道了」时记
+        （点灰底 / 点待办里的「去运行」/ 直接刷新，三条路都不记）。
+        改成"弹出来就记"之后，**必须留一个能翻回来的口子**，
+        否则没细看就关掉＝再也见不着了。
+        """
+        tmp, root = _root()
+        self.addCleanup(tmp.cleanup)
+        snap = whatsnew.pending(root, version.VERSION)
+        self.assertIsNotNone(snap)
+        whatsnew.mark_seen(root, version.VERSION, body=snap)
+        got = whatsnew.last_digest(root)
+        self.assertEqual(got["version"], version.VERSION)
+        self.assertTrue(got["todo"], "存档里的待办被丢了")
+
+    def test_存档拿不到就返回_None(self):
+        tmp, root = _root()
+        self.addCleanup(tmp.cleanup)
+        self.assertIsNone(whatsnew.last_digest(root))          # 没记过
+        whatsnew.mark_seen(root, "2.1.0")                      # 老格式：没带 body
+        self.assertIsNone(whatsnew.last_digest(root))
+        p = root / whatsnew.STATE_REL
+        p.write_text("{ 这不是 json", encoding="utf-8")
+        self.assertIsNone(whatsnew.last_digest(root))          # 坏了不许抛
+
+    def test_存档的待办不能事后重算(self):
+        """⚠⚠ **这是这条线的全部要害**：记完之后 `seen == 当前版本`，
+        再 `digest(since=None)` 算出来的是**空待办** ——
+        正是 AGENTS.md 坑 13「看过 ≠ 做完了」。
+
+        所以「看这一版的更新说明」必须读**存档**，不能现算。
+        """
+        tmp, root = _root()
+        self.addCleanup(tmp.cleanup)
+        snap = whatsnew.pending(root, version.VERSION)
+        whatsnew.mark_seen(root, version.VERSION, body=snap)
+        recomputed = whatsnew.digest(root, version.VERSION)     # since=None → 用 seen
+        self.assertTrue(snap["todo"], "存档本来就该有待办")
+        self.assertEqual(recomputed["todo"], [],
+                         "现算出来的待办居然是空的？那更说明必须读存档")
+
     def test_按钮文案由后端给(self):
         """前端不自己维护"go → 标签名"的表（各写一份必然有一天对不上）。"""
         tmp, root = _root()

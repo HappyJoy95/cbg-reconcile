@@ -14,8 +14,12 @@ import yaml
 # 前端允许改的字段（白名单）。其余一律不碰。
 EDITABLE = (
     "store_code", "marker", "erp_store_name", "timezone",
-    "check.lookback_days", "check.report_lookahead_days", "check.page_size",
-    "check.pay_status", "check.return_status",
+    # ⚠ 只留 `cmd_check` **真的还在读**的两个（`cli.py:383/385`）。
+    #   `page_size` / `pay_status` / `return_status` 2026-09-17 拿掉了 ——
+    #   它们是**死配置**：`cli.py`/`run_check.py`/`bootstrap.py` 一处都没把它们
+    #   传进接口，`dump.py` 用的是自己的 `--page-size`（默认 200），
+    #   而且明确**不许**传 `payStatus`/`returnStatus`（传了会把已退原单整张滤掉）。
+    "check.lookback_days", "check.report_lookahead_days",
     # 邮件推送（密码不在这里，在 .secrets/mail.env）
     "mail.enabled", "mail.host", "mail.port", "mail.security", "mail.sender",
     "mail.recipients", "mail.subject_prefix", "mail.when", "mail.env_file",
