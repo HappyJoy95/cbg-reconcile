@@ -78,14 +78,16 @@ class TestEveryVersionHasNotes(unittest.TestCase):
                     self.assertIn(go, whatsnew.TABS,
                                   "go 必须是已知的标签页 id")
 
-    def test_标签页_id_和前端对得上(self):
-        """⚠ 后端给的 `go` 要能真的切到那个页 —— 对不上就是"点了没反应"。
+    def test_每个_go_都在前端跳转表里(self):
+        """⚠ 后端给的 `go` 要能真的跳到地方 —— 对不上就是"点了没反应"。
 
-        ⚠ **`run` 是例外**（2026-09-18 前端融合改版）：它不再是页签，
-        而是右下角那个常驻抽屉。前端 `goto()` 里对它特判（开抽屉）——
-        不特判的话 `panel-run` 会被当面板显示，但抽屉还 hidden，
-        门店点完**什么都看不见**。所以它按抽屉那两个 id + 特判那行一起断言。
+        ⚠ **2026-09-18 之后不能再按 `data-tab`/`panel-*` 查了**：
+          * `run` 不是页签，是右下角那个常驻抽屉（`goto()` 里特判开抽屉）；
+          * `linglong` / `erp` / `general` 是**「通用设置」下的二级标签**。
+        所以真正的路由表在前端的 `GO_TARGETS` 里 —— 按它查。
         """
+        i = APP_JS.index("const GO_TARGETS = {")
+        block = APP_JS[i:APP_JS.index("};", i)]
         for tab in whatsnew.TABS:
             with self.subTest(tab=tab):
                 if tab == "run":
@@ -94,8 +96,8 @@ class TestEveryVersionHasNotes(unittest.TestCase):
                     self.assertIn("if (tab === 'run') { setRunDrawer(true); return; }",
                                   APP_JS, "goto() 没特判 run —— 点了会什么都看不见")
                     continue
-                self.assertIn('data-tab="%s"' % tab, INDEX_HTML)
-                self.assertIn('id="panel-%s"' % tab, INDEX_HTML)
+                self.assertIn(tab + ":", block,
+                              "GO_TARGETS 里没有 %s —— 点了没反应" % tab)
 
 
 class TestPending(unittest.TestCase):

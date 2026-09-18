@@ -88,6 +88,9 @@ function table(header, rows, cls = []) {
 const SUBTABS = {
   sales: ['attain', 'sales-settings'],
   compliance: ['pos', 'pools', 'compliance-settings'],
+  // ⚠ 2026-09-18（用户）：「把玲珑授权和云商授权做到设置的二级标签里面」——
+  //   两个授权从一级页签降成「通用设置」的二级标签，一级回到三个。
+  settings: ['general', 'linglong', 'erp'],
 };
 
 //: 二级标签 → 切过去要拉什么。key 必须在 HTML 里有 `data-subtab="key"`。
@@ -98,17 +101,11 @@ const SUBTAB_LOADERS = {
   pools: () => loadOverview(),
   'sales-settings': () => {},
   'compliance-settings': () => {},
-};
-
-//: 一级页签（没有二级的那两个）→ 切过去要拉什么
-const TAB_LOADERS = {
-  // 「玲珑授权」= 原来的「会话」（玲珑是华为那个销售系统的代号）——
-  // 抓登录态那三件事原样搬过来，只换了页签名
+  general: () => loadConfig(),
+  // 玲珑授权 = 原来的「会话」页（抓登录态那三件事）
   linglong: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
-  // 「云商授权」：云商账号那些字段还是 `/api/config` 一起回来的，
-  // 所以跟「通用设置」用同一个加载器（幂等，重复拉没事）
-  erp: () => loadConfig(),
-  settings: () => loadConfig(),
+  // 云商授权：账号字段还是 `/api/config` + `/api/erp` 一起回来的
+  erp: () => loadErpAll(),
 };
 
 //: 每个一级页签**上次停在哪个二级标签** —— 切回来还落在那儿。
@@ -137,7 +134,7 @@ function switchTab(tab, subtab) {
   Array.from($$('.nav-item[data-tab="' + tab + '"] .nav-menu .subtab')).forEach((x) =>
     x.classList.toggle('current', x.dataset.subtab === subtab));
   closeNavMenus();
-  const load = SUBTAB_LOADERS[subtab] || TAB_LOADERS[tab];
+  const load = SUBTAB_LOADERS[subtab];
   if (load) load();
 }
 
@@ -802,14 +799,26 @@ $('#btn-clear-curl').addEventListener('click', () => {
    用户 2026-09-18：「需要存两个云商账号，一个是门店的账号，用来获取门店登录信息，
    一个是我的最高权限账号，用来拉取全公司的数据」。
    两个账号**存两个文件**（`.secrets/erp.env` / `.secrets/erp-store.env`），
-   页面上是两张一模一样的卡 —— 所以下面**全部按角色参数化**，逻辑只写一份。
+   所以下面**全部按角色参数化**，逻辑只写一份。
+
+   ⚠ 但**界面上只有门店账号那一张卡**：用户 2026-09-18 后来定了
+   「公司账号前端不显示吧，后端默认用 sL18917405716」——
+   公司账号改成后端内置，前端不再有它的输入框（见 `ERP_ROLES`）。
 
    ⚠ 公司账号**沿用原来那套 id**（`erp-*` / `btn-erp-*`）：那张卡在门店机器上
    已经跑熟了，重命名等于把接线整段重接一遍，平白多一层风险。
    门店账号用 `erp-store-*` / `btn-erp-store-*`。 */
 
-const ERP_ROLES = ['company', 'store'];
-//: 角色 → 控件 id。字段和按钮分两套前缀，纯粹是因为老 id 就那么写的
+//: 界面上**只画门店账号**。用户 2026-09-18：「公司账号前端不显示吧，
+//: 后端默认用 sL18917405716」—— 公司账号改成后端内置（`erp._BUILTIN_*`），
+//: 前端没有它的输入框，所以**别把这个数组加回 'company'**：
+//: 加了 `loadErp('company')` 会去 `#erp-username` 上取 null 当场报错。
+//: ⚠ 注释里别写出**美元符加括号的那种完整取法** —— `test_every_referenced_id_exists_in_html`
+//:   是按那个字面去扫 app.js 的，扫到就报"引用了不存在的 id"（我在这条注释上连踩两次）。
+const ERP_ROLES = ['store'];
+//: 角色 → 控件 id。`company` 那一行**留着但前端没卡片**（后端 role 还在、
+//: `/api/erp?role=company` 也还能用，将来要放开只要把 id 补进 HTML）。
+//: 字段和按钮分两套前缀，纯粹是因为老 id 就那么写的
 const ERP_F = { company: (n) => '#erp-' + n, store: (n) => '#erp-store-' + n };
 const ERP_B = { company: (n) => '#btn-erp-' + n, store: (n) => '#btn-erp-store-' + n };
 
@@ -1680,13 +1689,26 @@ function inlineMd(s) {
 }
 
 /* 跳到某个标签页 —— 弹窗里「去设置 / 去运行」那些按钮用 */
+//: whatsnew 的 `go` → 到底跳哪儿（一级页签 + 二级标签）。
+//: ⚠ 玲珑/云商授权现在是「通用设置」下的二级标签，**不能再当成一级页签切** ——
+//:   那样 `panel-linglong` 根本不存在，点了没反应。
+const GO_TARGETS = {
+  sales: ['sales'],
+  compliance: ['compliance'],
+  settings: ['settings', 'general'],
+  general: ['settings', 'general'],
+  linglong: ['settings', 'linglong'],
+  erp: ['settings', 'erp'],
+};
+
 function goto(tab) {
   // ⚠ 「运行」**不是页签**（2026-09-18 起它进了常驻抽屉）——
   //   而 whatsnew 里好几条待办是 `go: "run"`（去跑一次 / 看日志）。
   //   不特判的话 `panel-run` 会被当成面板显示，但抽屉本身还是 hidden，
   //   门店点完**什么都看不见**（这正是 2.x 踩过的"点了没反应"）。
   if (tab === 'run') { setRunDrawer(true); return; }
-  switchTab(tab);
+  const target = GO_TARGETS[tab] || [tab];
+  switchTab(target[0], target[1]);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 

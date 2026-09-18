@@ -33,14 +33,15 @@ from pathlib import Path
 #: ⚠ **`run` 是例外**：它**不再是页签**，而是右下角那个**常驻抽屉** ——
 #: 前端 `goto()` 里对它特判（开抽屉），不特判的话门店点完什么都看不见。
 #: 测试按这两条分别断言。
-TABS = ("sales", "compliance", "run", "linglong", "erp", "settings")
+TABS = ("sales", "compliance", "run", "settings", "general", "linglong", "erp")
 TAB_LABELS = {
     "sales": "销售",
     "compliance": "合规",
     "run": "运行",
+    "settings": "通用设置",
+    "general": "通用设置",
     "linglong": "玲珑授权",
     "erp": "云商授权",
-    "settings": "通用设置",
 }
 
 #: 老更新日志里的 `go` 还是改版前的页签 id —— **按新结构翻译一遍**。

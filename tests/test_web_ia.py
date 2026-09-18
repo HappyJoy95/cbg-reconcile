@@ -61,8 +61,10 @@ class Test一级页签(unittest.TestCase):
     """
 
     def test_顺序和名字(self):
-        self.assertEqual(NAV_IDS,
-                         ["sales", "compliance", "linglong", "erp", "settings"])
+        """⚠ 2026-09-18 后半程用户又收了一次：「把玲珑授权和云商授权做到设置的
+        二级标签里面」—— 两个授权从一级页签降成「通用设置」的二级标签，
+        一级回到**三个**。"""
+        self.assertEqual(NAV_IDS, ["sales", "compliance", "settings"])
 
     def test_每个都有对应的_panel(self):
         for tab in NAV_IDS:
@@ -81,26 +83,52 @@ class Test一级页签(unittest.TestCase):
         self.assertIn(">通用设置<", NAV)
 
 
-class Test两个授权都是一级入口(unittest.TestCase):
-    """**授权不能藏太深** —— 抓登录态是门店唯一要人工介入的地方。
+class Test两个授权在通用设置下面(unittest.TestCase):
+    """用户 2026-09-18：「把玲珑授权和云商授权做到设置的二级标签里面」。
 
-    ⚠ 2026-09-18：「会话」改名「玲珑授权」（玲珑 = 华为那个销售系统的代号），
-    并新增「云商授权」（复用原来「通用设置 → 云商账号」那张卡）。"""
+    「会话」也一起改名成了「玲珑授权」（玲珑 = 华为那个销售系统的代号）。
 
-    def test_两个授权都是一级页签(self):
+    ⚠ 它们**不是一级页签**了 —— 但也不能藏得不认识路：
+    `whatsnew` 里那几条「去会话」的待办得能跳对地方（见 `GO_TARGETS`）。"""
+
+    def _settings(self):
+        i = INDEX_HTML.index('id="panel-settings"')
+        return _strip_html_comments(INDEX_HTML[i:INDEX_HTML.index("</section>", i)])
+
+    def test_两个授权是通用设置的二级标签(self):
+        """⚠ 它们是「通用设置」的二级标签 —— 落点在**导航下拉**里，
+        不是页内那排按钮（用户 2026-09-18 选的："跟销售/合规一样，页内那排删掉"）。"""
+        menu = _nav_item("settings")
+        self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu),
+                         ["general", "linglong", "erp"])
+
+    def test_两个授权的子面板都在通用设置里(self):
+        panel = self._settings()
+        for sub in ("linglong", "erp"):
+            with self.subTest(sub=sub):
+                self.assertIn('id="subpanel-%s"' % sub, panel)
+
+    def test_一级页签里没有它们(self):
         for tab in ("linglong", "erp"):
             with self.subTest(tab=tab):
-                self.assertIn(tab, NAV_IDS)
+                self.assertNotIn(tab, NAV_IDS)
 
-    def test_授权不在任何二级标签里(self):
-        for tab in ("linglong", "erp"):
-            with self.subTest(tab=tab):
-                self.assertNotIn('data-subtab="%s"' % tab, BODY)
+    def test_跳转表里有它们(self):
+        """⚠ 少了映射，`whatsnew` 点「去会话」就会去切一个不存在的页签 ——
+        门店看到的是**点了没反应**。"""
+        i = APP_JS.index("const GO_TARGETS = {")
+        block = APP_JS[i:APP_JS.index("};", i)]
+        for key in ("linglong", "erp", "settings", "general"):
+            with self.subTest(key=key):
+                self.assertIn(key + ":", block)
 
-    def test_页签名字对(self):
-        self.assertIn(">玲珑授权<", NAV)
-        self.assertIn(">云商授权<", NAV)
-        self.assertNotIn(">会话<", NAV, "「会话」应该已经改名成「玲珑授权」了")
+    def test_名字对(self):
+        menu = _nav_item("settings")
+        self.assertIn(">玲珑授权<", menu)
+        self.assertIn(">云商授权<", menu)
+        self.assertNotIn(">会话<", menu, "「会话」应该已经改名成「玲珑授权」了")
+        # ⚠ 名字也**不许**在页内再写一份（同一件事两份定义必然有一天不同步）
+        self.assertNotIn("玲珑授权", BODY.replace(_strip_html_comments(NAV), ""))
 
 
 class Test合规页里两块并列不混(unittest.TestCase):
@@ -114,7 +142,7 @@ class Test合规页里两块并列不混(unittest.TestCase):
     def test_两个二级标签并列(self):
         """⚠ 二级标签现在**只在顶部导航的下拉菜单里**（用户 2026-09-18 定：
         「只在下拉菜单里」）—— 所以"并列"看菜单顺序，页内那行已经去掉了。"""
-        menu = _nav_item("compliance", nxt="linglong")
+        menu = _nav_item("compliance", nxt="settings")
         self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu),
                          ["pos", "pools", "compliance-settings"])
 
@@ -240,13 +268,10 @@ class Test二级标签接线(unittest.TestCase):
         block = APP_JS[i:i + 500]
         self.assertIn("switchTab(item.dataset.tab, b.dataset.subtab)", block)
 
-    def test_没有二级的页签不挂菜单(self):
-        """会话 / 通用设置没有二级 —— 给它们空菜单的话，
-        悬停会弹出一个空框，看着像坏了。"""
-        for tab in ("session", "settings"):
-            with self.subTest(tab=tab):
-                # 它们是**光按钮**，不在 .nav-item 里
-                self.assertNotIn('class="nav-item" data-tab="%s"' % tab, BODY)
+    # ⚠ 原来这里还有一条「没有二级的页签不挂菜单」（针对会话 / 通用设置两个光杆按钮）。
+    #   2026-09-18 用户把「通用设置」也改成下拉之后，**三个一级菜单一律挂菜单**，
+    #   那条断言的前提没了 —— 删掉，别让它以"恒真"的形式留着占位。
+    #   「菜单不能是空的」这条挪进了 `test_每个一级菜单都挂了下拉`。
 
     def test_菜单默认是收起的(self):
         """漏了 hidden 的话页面一打开两个菜单全摊着。"""
@@ -271,14 +296,46 @@ class Test二级标签接线(unittest.TestCase):
             with self.subTest(panel=tab):
                 self.assertEqual(n, 1, "panel-%s 里有 %d 个默认亮着的子页" % (tab, n))
 
-    def test_二级标签只有一份(self):
-        """⚠ 用户 2026-09-18 定：「只在下拉菜单里」。
+    def test_二级标签只在导航里有一份(self):
+        """⚠ 用户 2026-09-18 定：二级标签「只在下拉菜单里」，**页内不再占一行**。
 
-        导航里一份 + 页内再一份的话，迟早有一处不同步
-        —— 这个项目为"同一件事两份定义"栽过好几次（步骤定义、按钮预设…）。"""
-        self.assertEqual(len(re.findall(r'data-subtab=', INDEX_HTML)),
-                         len(re.findall(r'data-subtab="[a-z-]+"', NAV)),
-                         "页内还有一份二级标签")
+        一开始「通用设置」那三个破例放在页内的标签条里（`#settings-tabs`），
+        但那排按钮**压根没绑事件** —— 点了没反应，截图实测抓到的。
+        用户随后拍板"跟销售/合规一样，页内那排删掉"，于是**三处形态统一**。
+
+        ⚠ 这里挖 nav 必须**两边都先剥注释**：`NAV` 取自原始 HTML（里面有注释），
+        而 `BODY` 已经剥过，直接 replace 匹不上，等于没挖（第一版就这么假绿了）。"""
+        in_page = re.findall(r'data-subtab="([a-z-]+)"',
+                             BODY.replace(_strip_html_comments(NAV), ""))
+        self.assertEqual(in_page, [], "二级标签只能在下拉菜单里，页内不该再有：%s" % in_page)
+
+    def test_每个一级菜单都挂了下拉(self):
+        """⚠ 「通用设置」以前是个光杆按钮（没有 `nav-menu`）——
+        三个一级菜单形态不一致，用户选了统一成下拉。"""
+        for tab in NAV_IDS:
+            menu = _nav_item(tab, nxt=None) if tab == NAV_IDS[-1] else _nav_item(
+                tab, nxt=NAV_IDS[NAV_IDS.index(tab) + 1])
+            with self.subTest(tab=tab):
+                self.assertIn('class="nav-menu"', menu, "%s 没有下拉菜单" % tab)
+                self.assertTrue(re.findall(r'data-subtab="([a-z-]+)"', menu),
+                                "%s 的下拉是空的" % tab)
+
+    def test_导航里的二级标签要和_SUBTABS_对得上(self):
+        """⚠ `data-subtab` 在 HTML 里、`SUBTABS` 在 JS 里 —— **同一件事两份定义**。
+
+        对不上的后果分两种，都很难查：HTML 多一个 → 那按钮点了没反应；
+        JS 多一个 → 那个二级标签永远切不到（`switchTab` 会把它当"不认识的"弹回第一个）。"""
+        block = APP_JS[APP_JS.index("const SUBTABS = {"):]
+        block = block[:block.index("\n};")]
+        want = {}
+        for tab, subs in re.findall(r"(\w+):\s*\[([^\]]*)\]", block):
+            want[tab] = re.findall(r"'([a-z-]+)'", subs)
+        self.assertEqual(sorted(want), sorted(NAV_IDS), "两边的页签集合不一样")
+        for tab, subs in want.items():
+            menu = _nav_item(tab) if tab == NAV_IDS[-1] else _nav_item(
+                tab, nxt=NAV_IDS[NAV_IDS.index(tab) + 1])
+            with self.subTest(tab=tab):
+                self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu), subs)
 
 
 class Test首屏加载(unittest.TestCase):
@@ -412,13 +469,31 @@ class Test不能有重复_id(unittest.TestCase):
         dup = sorted({i for i in ids if ids.count(i) > 1})
         self.assertFalse(dup, "这些 id 出现了不止一次：%s" % dup)
 
-    def test_云商账号那几个字段只有一份(self):
-        """搬卡片最容易漏删旧的 —— 单独钉一遍，出错时直接说清是哪个字段。"""
-        for ident in ("erp-status", "erp-username", "erp-password", "erp-company",
-                      "btn-erp-save", "btn-erp-login", "erp-captcha", "erp-token"):
+    def test_云商账号字段只有门店那一套(self):
+        """⚠ 用户 2026-09-18：「**公司账号前端不显示**」——
+        公司那套 `erp-*` 控件整张卡删掉了（后端内置兜底），
+        页面上只留门店账号那套 `erp-store-*`。
+
+        搬/删卡片最容易漏 —— 单独钉一遍，出错时直接说清是哪个字段。
+        尤其是**公司那套还在**：留着的话 `$('#erp-username')` 拿得到元素，
+        看着一切正常，实际改的是一个界面上看不见的账号。"""
+        for ident in ("erp-store-status", "erp-store-username", "erp-store-password",
+                      "erp-store-company", "btn-erp-store-save", "btn-erp-store-login",
+                      "erp-store-captcha", "erp-store-token"):
             with self.subTest(ident=ident):
                 self.assertEqual(INDEX_HTML.count('id="%s"' % ident), 1,
                                  "%s 有 %d 份" % (ident, INDEX_HTML.count('id="%s"' % ident)))
+        for gone in ("erp-username", "erp-password", "btn-erp-save", "btn-erp-login"):
+            with self.subTest(gone=gone):
+                self.assertNotIn('id="%s"' % gone, INDEX_HTML,
+                                 "公司账号那套控件还在 —— 用户说前端不显示")
+
+    def test_前端只驱动门店账号(self):
+        """⚠ 公司卡删了、前端却还遍历 `['company','store']`：
+        `$('#erp-username')` 拿到 null，`loadErpAll()` 一抛 ——
+        **它后面的初始化全不执行**（前端没 lint，只在控制台露一行）。"""
+        self.assertIn("const ERP_ROLES = ['store'];", APP_JS)
+        self.assertNotIn("'company'", APP_JS.split("const ERP_ROLES")[1].split(";")[0])
 
 
 class Test前端不做构建步骤(unittest.TestCase):

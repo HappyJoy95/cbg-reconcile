@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -133,6 +135,40 @@ ROLE_ENV_FILES = {
     ROLE_COMPANY: DEFAULT_ENV_FILE,          # .secrets/erp.env（沿用）
     ROLE_STORE: ".secrets/erp-store.env",    # 新增
 }
+# ---------------------------------------------------------------- 内置公司账号
+#: 公司账号的**内置默认值**（用户 2026-09-18：「后端默认用 sL18917405716…」）。
+#:
+#: ⚠⚠ **这是混淆，不是加密。** 密钥就写在这份代码里 ——
+#: **谁拿到仓库谁都能解开**（`_xor_ks` 是个标准流密钥，几行就能逆）。
+#: 之所以还是这么放，是因为用户要"开箱即用、门店不用手填"。
+#: 真当密码保护用**必须**换成"密钥不进仓库"的方案（比如打包时从 `.dsh/` 注入
+#: 到 `.secrets/`，那份文件 `selfupdate` 一根手指都不碰）。
+#: ⚠ 仓库是 **public** —— 这个 blob 一旦 push 出去就等于公开。
+_BUILTIN_KEY = b"cbg-reconcile/company-erp/v1"
+_BUILTIN_COMPANY_USER = "s8TeWIxcX+53eCnXqw=="
+_BUILTIN_COMPANY_PASS = "8LzYUI1c"
+
+
+def _xor_ks(key: bytes, n: int) -> bytes:
+    """标准流密钥：sha256(key || 计数器) 拼起来取前 n 字节。"""
+    out, i = b"", 0
+    while len(out) < n:
+        out += hashlib.sha256(key + i.to_bytes(4, "big")).digest()
+        i += 1
+    return out[:n]
+
+
+def _deobfuscate(blob: str) -> str:
+    """解开内置 blob。解不开就返回空串 —— **不抛**（凭据缺失该由上层报清楚）。"""
+    if not blob:
+        return ""
+    try:
+        raw = base64.b64decode(blob)
+        return bytes(a ^ b for a, b in zip(raw, _xor_ks(_BUILTIN_KEY, len(raw)))).decode("utf-8")
+    except Exception:                                          # noqa: BLE001
+        return ""
+
+
 #: 角色 → 环境变量前缀。**公司账号额外认不带前缀的老名字**（`ERP_USERNAME` 等）
 ROLE_ENV_PREFIX = {ROLE_COMPANY: "ERP_COMPANY_", ROLE_STORE: "ERP_STORE_"}
 _CRED_KEYS = ("TOKEN", "USERNAME", "PASSWORD", "COMPANY_CODE")
@@ -225,12 +261,23 @@ def load_credentials(extra_env_file: str | None = None,
             name = prefix + key
             if os.environ.get(name):
                 merged["ERP_" + key] = os.environ[name]
+    username = merged.get("ERP_USERNAME", "")
+    password = merged.get("ERP_PASSWORD", "")
+    # ⚠ **公司账号什么都没有时兜到内置那一对**（用户 2026-09-18：
+    #   「后端默认用 sL18917405716…」）—— 这样新装的机器开箱就能拉全公司数据，
+    #   门店不用手填。门店账号**不兜**：它本来就该是每家店自己的。
+    if role == ROLE_COMPANY and not (username and password):
+        username = username or _deobfuscate(_BUILTIN_COMPANY_USER)
+        password = password or _deobfuscate(_BUILTIN_COMPANY_PASS)
     return {
         "token": merged.get("ERP_TOKEN", ""),
-        "username": merged.get("ERP_USERNAME", ""),
-        "password": merged.get("ERP_PASSWORD", ""),
+        "username": username,
+        "password": password,
         "company": merged.get("ERP_COMPANY_CODE") or DEFAULT_COMPANY,
         "role": role,
+        # True = 这一对**是内置兜底来的**（没有任何文件/环境变量给过）
+        "builtin": bool(username) and not (merged.get("ERP_USERNAME")
+                                           or merged.get("ERP_PASSWORD")),
     }
 
 
