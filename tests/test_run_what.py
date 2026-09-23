@@ -121,6 +121,9 @@ class TestDailySkipFlags(unittest.TestCase):
         # ⚠ 本店必须是**要走玲珑**的那一类（名单里有串号标识），否则 `daily`
         #   会正确地早退成"没有可跑的步骤" —— 那是 2026-09-18 加的门店权限划分。
         #   以前这些测试读的是开发机上那份真配置，本店换成合作店之后集体变红。
+        # ⚠ `plan_run` 也得挡（2026-09-23）：月度计划 `root=None` ⇒ 真写**项目根**
+        #   `out/plan-2026.json`（固定名 tmp 三头并行抢 ⇒ FileNotFoundError 偶发红）。
+        #   ⚠ 注释不能写进下面的 `\` 续行链 —— 桩不记 calls（断言是"五步"）。
         with mock.patch.object(cli, "load_config",
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
@@ -135,6 +138,7 @@ class TestDailySkipFlags(unittest.TestCase):
                                mk_kw("report", {"ok": True})), \
              mock.patch.object(run_daily, "inbox_run",
                                mk_kw("report-inbox", {"ok": True, "skipped": "没配收信"})), \
+             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}), \
              contextlib.redirect_stdout(buf), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")):
@@ -482,6 +486,9 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
         #   往项目根的 `out/` 写 xlsx 和 json（实测 1.5 秒/次）。
         #   这属于「测试数据隔离」那一步（四项文档 阶段 1.3），本文件顺手先隔离掉。
         # ⚠ 注释**不能写在 `\` 续行链中间** —— 那是语法错误（这里刚踩了一次）。
+        # ⚠ `plan_run` 同样必须挡（2026-09-23 抓到的根因）：月度计划 `root=None` ⇒
+        #   真写**项目根** `out/plan-2026.json`（4.5MB 每次全量被覆盖），固定名
+        #   `plan-2026.json.tmp` 被三个头并行抢 ⇒ `FileNotFoundError` 偶发红。
         with mock.patch.object(cli, "load_config",
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
@@ -496,6 +503,7 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
                                lambda **k: {"ok": True}), \
              mock.patch.object(run_daily, "inbox_run",
                                lambda **k: {"ok": True, "skipped": "没配收信"}), \
+             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")), \
              contextlib.redirect_stdout(buf):

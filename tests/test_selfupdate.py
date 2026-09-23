@@ -1257,8 +1257,13 @@ class Test打包规则对账(unittest.TestCase):
         return names
 
     def test_打包脚本的排除项覆盖所有_NEVER_TOUCH(self):
-        """自更新不碰的东西，包里也不该有 —— 两边漏一个就是一次事故。"""
-        ex = [e.rstrip("/") for e in self._excludes()]
+        """自更新不碰的东西，包里也不该有 —— 两边漏一个就是一次事故。
+
+        ⚠ 比较前剥掉**前导 `/`**（f65d901 起打包用 `/tools` 这种**顶格锚定**写法，
+        防 rsync 把 `web/tools` 一起误伤）—— 锚定只是写法差异，"排除了没有"得按
+        剥干净的名字对账，否则会把 `/tools` 误判成"没排除 tools"。
+        """
+        ex = [e.strip("/") for e in self._excludes()]
         missing = []
         for name in selfupdate.NEVER_TOUCH:
             if any(e == name or e.startswith(name + "/") for e in ex):
@@ -1273,7 +1278,8 @@ class Test打包规则对账(unittest.TestCase):
         git 里保留 —— 两边一致，不是"包里没有、更新却会给"。
         `config/` 只许排除 `store-*.yaml`（这台电脑自己的）。"""
         for e in self._excludes():
-            key = e.rstrip("/")
+            key = e.strip("/")           # 前导 `/` = 顶格锚定（防误伤 web/tools），
+                                         # 对账按剥干净的名字比（见上一条的说明）
             if key == "tests" or key.startswith("tests/"):
                 continue                      # 有意排除：门店不跑 pytest
             self.assertNotIn(
@@ -1288,15 +1294,19 @@ class Test打包规则对账(unittest.TestCase):
                     f"--exclude '{e}'：config/ 里只允许排除**这台电脑自己的**门店配置，"
                     "别的文件（比如 config/stores.yaml）必须进包")
         # tests 必须被排除（跟 SKIP_APPLY 对齐）
-        ex = [e.rstrip("/") for e in self._excludes()]
+        ex = [e.strip("/") for e in self._excludes()]
         self.assertIn("tests", ex,
                       "打包脚本应 --exclude 'tests/'，与 selfupdate.SKIP_APPLY 对齐")
 
     def test_自检名单和排除项对得上(self):
         """⚠ 脚本自己写着「名单要和 `--exclude` 那一段一一对上」——
         本轮核的时候**已经对不上**（`设计文档.md`、`packaging` 两边都没有）。
-        这条测试就是那句话的执行版。"""
-        ex = [e.rstrip("/") for e in self._excludes()]
+        这条测试就是那句话的执行版。
+
+        ⚠ 同上：`--exclude` 里的**前导 `/`（顶格锚定，防误伤 `web/tools`）
+        比较时剥掉** —— 锚定是写法，对账问的是"排除了没有"。
+        """
+        ex = [e.strip("/") for e in self._excludes()]
         bad = []
         for name in self._selfcheck_names():
             if name.startswith("${") or name.startswith("$"):

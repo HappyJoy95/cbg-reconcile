@@ -42,6 +42,12 @@ from .app.report_inbox import run as inbox_run
 # ⚠ 模块级 import（**不是**函数里）—— 测试要能 `mock.patch.object(run_daily, "attain_run")`，
 #   藏在函数里的话打不着桩，测试就会**真去读腾讯文档**（实测：全量测试从 59 秒涨到 165 秒）。
 from .features.sales.attain.attain import run as attain_run
+# ⚠ 月度计划走**同一个模式**（2026-09-23 搬过来的）：它原来是 `_step_plan` 函数体里
+#   `from ... import plan` 再调 —— 测试**打不着桩** ⇒ 每次全量测试都真写**项目根**
+#   `out/plan-2026.json`（4.5MB 真落盘每次被覆盖），且固定名 `plan-2026.json.tmp`
+#   被三个头的 pytest 同时抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError` ——
+#   就是 2026-09-23 抓到的那个并行偶发红。别改回函数内 import。
+from .features.plan.monthly.plan import run as plan_run
 
 #: 一次日常流程有哪些步骤 —— ⚠ **从功能注册表派生**（用户 2026-09-19 的"安装注册机制"）。
 #:
@@ -424,8 +430,9 @@ def main(argv=None) -> int:
 # ⚠ 合作店**也跑这一步**（它读云商、不读玲珑）—— 见下面 `_left` 那张表的注释。
     def _step_plan():
         print("\n[6/9] 月度生意计划（七块 × 本月至今 vs 上月同期）")
-        from .features.plan.monthly import plan as monthly_plan_mod
-        res = monthly_plan_mod.run(root=None, emit=print)
+        # ⚠ 走**模块级别名** `plan_run`（测试在这儿下桩）—— 别改回函数内 import，
+        #   那样打不着桩，测试会真写项目根 out/（2026-09-23 并行偶发红的根因）。
+        res = plan_run(root=None, emit=print)
         rc_plan = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
         done.append(("月度生意计划", rc_plan))
         if rc_plan != cli.EXIT_OK:

@@ -103,7 +103,12 @@ class _Rec:
             #   它们是执行模块（`app.report.run` / `app.report_inbox.run`）——
             #   不挡的话每条用例都会真去读本机库算差集、甚至去连邮箱（网络）。
             mock.patch.object(run_daily, "report_run", self._mk_report()),
-            mock.patch.object(run_daily, "inbox_run", self._mk_inbox()),
+            # ⚠ 第 6 步（M22 月度生意计划 `plan`）同理**必须挡**（2026-09-23 抓到的根因）：
+            #   它 `root=None` ⇒ 每次全量测试都真写**项目根** `out/plan-2026.json`
+            #   （4.5MB 真落盘被反复覆盖），且固定名 `plan-2026.json.tmp` 被三个头
+            #   并行抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError`（并行偶发红）。
+            #   ⚠ 桩**不记 calls** —— 现有断言都是"五步"，plan 只进 done/退出码。
+            mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}),
         )
 
 
@@ -511,6 +516,10 @@ class TestCliWiring(unittest.TestCase):
         #   `root=None` ⇒ 读**真腾讯文档**、往**项目根**写一份只有本店一行的
         #   `out/attain-2026.json` —— 开发机上那份真落盘就这么被覆盖过。
         #   ⚠ 这段注释必须在 `with` **之前**：续行链里插注释是语法错（AGENTS.md 坑）。
+        # ⚠ `cmd_erp_dump` / `plan_run` 也得挡（2026-09-23）：真 erp-dump 看机器状态
+        #   （网络/凭据）决定成败 ⇒ 走到哪一步都不确定（实测两条兄弟用例一条写
+        #   项目根一条不写）；plan `root=None` ⇒ 真写 `out/plan-2026.json`
+        #   （固定名 tmp 三头并行抢 ⇒ FileNotFoundError 偶发红）。
         with mock.patch.object(cli, "load_config",
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
@@ -519,10 +528,12 @@ class TestCliWiring(unittest.TestCase):
              mock.patch.object(cli, "cmd_check", lambda a: 0), \
              mock.patch.object(run_daily, "pos_run", lambda **k: PosRun(ok=True)), \
              mock.patch.object(cli, "cmd_pools", lambda a: 0), \
+             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
              mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
              mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
              mock.patch.object(run_daily, "inbox_run",
-                               lambda **k: {"ok": True, "skipped": "没配收信"}):
+                               lambda **k: {"ok": True, "skipped": "没配收信"}), \
+             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}):
             cli.main(["daily"] + steps_except() + ["--no-refresh"])
         self.assertIs(seen["no_refresh"], True)
 
@@ -538,6 +549,7 @@ class TestCliWiring(unittest.TestCase):
         #   `root=None` ⇒ 读**真腾讯文档**、往**项目根**写一份只有本店一行的
         #   `out/attain-2026.json` —— 开发机上那份真落盘就这么被覆盖过。
         #   ⚠ 这段注释必须在 `with` **之前**：续行链里插注释是语法错（AGENTS.md 坑）。
+        # ⚠ `cmd_erp_dump` / `plan_run` 同上必须挡（2026-09-23，理由见上一条）。
         with mock.patch.object(cli, "load_config",
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
@@ -546,10 +558,12 @@ class TestCliWiring(unittest.TestCase):
              mock.patch.object(cli, "cmd_check", lambda a: 0), \
              mock.patch.object(run_daily, "pos_run", lambda **k: PosRun(ok=True)), \
              mock.patch.object(cli, "cmd_pools", lambda a: 0), \
+             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
              mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
              mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
              mock.patch.object(run_daily, "inbox_run",
-                               lambda **k: {"ok": True, "skipped": "没配收信"}):
+                               lambda **k: {"ok": True, "skipped": "没配收信"}), \
+             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}):
             cli.main(["daily"] + steps_except())
         self.assertIs(seen["no_refresh"], False)
 
@@ -756,6 +770,9 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
             mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}),
             mock.patch.object(run_daily, "inbox_run",
                               lambda **k: {"ok": True, "skipped": "没配收信"}),
+            # ⚠ plan 同理必须挡（同上：root=None ⇒ 真写项目根 out/plan-2026.json，
+            #   固定名 tmp 三头并行抢 ⇒ FileNotFoundError 偶发红）
+            mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}),
         ]
         for p in ps:
             p.start()
