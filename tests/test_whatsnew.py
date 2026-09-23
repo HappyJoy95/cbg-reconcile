@@ -219,9 +219,10 @@ class TestContentIsShippable(unittest.TestCase):
         self.assertTrue((ROOT / "src" / "whatsnew.py").is_file())
 
     def test_不依赖发布说明文件(self):
-        """⚠ `发布说明.md` **不在 git 里**（打包时生成）——
-        自更新的门店拿到的永远是当初拷包那一版。
-        拿它当弹窗内容 = 弹"上一版的更新日志"。
+        """⚠ 弹窗内容**不许**变成读 `发布说明.md` —— 哪怕它 2026-09-23 起
+        已经进了仓库（随自更新走，"停在拷包那版"的坑 2.2.1 修掉了）：
+        弹窗要参与**逻辑**（按版本切 / seen / go 跳转），解析 md 做不到；
+        两份内容各写各的也迟早对不上（一个说改了、一个说没改）。
 
         ⚠ 只看**代码部分**：模块开头的注释里**故意**解释了"为什么不读它"
         （第一版把注释也算进去了，于是这条测试自己把自己绊倒）。
@@ -235,7 +236,7 @@ class TestContentIsShippable(unittest.TestCase):
                 and isinstance(body[0].value.value, str)):
             body = body[1:]
         code = "\n".join(ast.dump(n) for n in body)
-        self.assertNotIn("发布说明.md", code, "代码里引用了那个不在 git 里的文件")
+        self.assertNotIn("发布说明.md", code, "弹窗数据引用了 发布说明.md —— 必须在代码里")
         self.assertNotIn(".md", code, "代码里读了 .md 文件")
         # ⚠ 只查**路径引用**（带扩展名的那种）。文案里提一句"发布说明"
         #   是给人看的正常内容，不是依赖 —— 第一版把这也拦了，

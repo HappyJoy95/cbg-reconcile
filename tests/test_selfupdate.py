@@ -448,42 +448,44 @@ class TestWhitelist(unittest.TestCase):
         self.assertNotIn("agent.md", targets, "agent.md 还是被铺下去了")
         self.assertIn("src/cli.py", targets, "别把不相干的文件也拦了")
 
-    def test_release_notes_python_has_no_invalid_escapes(self):
-        """⚠ 发布说明那段 Python 里的反斜杠必须**写两个**。
-
-        它在 `build_package.sh` 里是个 f-string，而正文里到处是 Windows 路径
-        （`.secrets` 下面那个 json）和带反斜杠的任务名。写一个的话
-        Python 会当成「无效转义」：现在只是每次打包刷一条 `SyntaxWarning`，
-        以后版本会直接报错 —— **而打包脚本报错是在发版那一刻才发现**。
-        这条把它提前到 `pytest` 里。
-
-        ⚠ 已有的 `test_no_invalid_escape_sequences` 只扫 `.py` 文件，
-        **扫不到这个 `.sh`** —— 所以这条不是重复。
+    def test_发布说明跟仓库走(self):
+        """`发布说明.md` 2026-09-23 入 git（2.2.1 修的）—— zipball 里有它，
+        `_targets` 必须放行：根目录文件不在 `NEVER_TOUCH`/`SKIP_APPLY` 里。
+        谁哪天顺手把它加进黑名单，门店的发布说明就**静默地**停回装包那一版
+        —— 正是这次要修的病，钉住别退回去。
         """
-        import re as _re
-        tools = Path(__file__).resolve().parent.parent / "tools"
+        self._mk("发布说明.md")
+        self._mk("src/cli.py")
+        targets = {str(rel) for _, rel in selfupdate._targets(self.zip_root)}
+        self.assertIn("发布说明.md", targets,
+                      "发布说明没被铺下去 —— 门店又收不到新说明了")
+        self.assertIn("src/cli.py", targets, "别把不相干的文件也拦了")
+
+    def test_发布说明正文住在仓库里_打包只拷贝(self):
+        """⚠ 2026-09-23（用户选进 2.2.1）：正文从打包脚本的 heredoc 挪进 git。
+
+        病灶：正文嵌在 `build_package.sh` 里生成，而**打包脚本不下发门店**
+        ⇒ 走自更新升级的机器，`发布说明.md` 永远停在当初拷包那一版
+        （AGENTS「仓库 ≠ 包内容」那节原来就记着这个差）。
+        入了 git 之后：zipball 带它 ⇒ `_targets` 对根目录文件照原样铺 ⇒ 自更新送到。
+
+        这条钉两头：① 仓库根有 `发布说明.md`；② 脚本里**不再有**正文 heredoc、
+        只 `cp`。顺带的好处：正文里的反斜杠转义坑随 f-string 一起消失
+        （原名 `test_release_notes_python_has_no_invalid_escapes` ——
+        病没了，测试就改钉新形状；"病没了"这件事本身也要有测试看着）。
+        """
+        root = Path(__file__).resolve().parent.parent
+        tools = root / "tools"
         if not tools.is_dir():
             self.skipTest("装出来的包里没有 tools/")
+        self.assertTrue(
+            (root / "发布说明.md").is_file(),
+            "发布说明.md 不在仓库根 —— 自更新就又拿不到新说明了")
         script = (tools / "build_package.sh").read_text(encoding="utf-8")
-        m = _re.search(r"<<'RELNOTES'\n(.*?)\nRELNOTES\n", script, _re.S)
-        self.assertIsNotNone(m, "找不到发布说明那段 heredoc —— 打包脚本动过了？")
-        code = m.group(1)
-        import warnings as _w
-        with _w.catch_warnings(record=True) as got:
-            _w.simplefilter("always")
-            compile(code, "release-notes", "exec")
-        # ⚠ **两个 category 都要查**：3.9 上是 `DeprecationWarning`，
-        #   3.13+ 才升级成 `SyntaxWarning`。只查后者的话，
-        #   **开发机（3.9）上这条测试等于没写** —— 这个坑本项目已经踩过一次，
-        #   见 `test_no_invalid_escape_sequences` 里的同一句提醒。我真又踩了一次：
-        #   第一版只查 SyntaxWarning，故意把反斜杠改成单个，测试照样绿。
-        # ⚠ `SyntaxWarning` / `DeprecationWarning` 是**内置**的，不在 `warnings` 里 ——
-        #   `_w.SyntaxWarning` 会 AttributeError（写错过一次）
-        bad = [f"release-notes:{x.lineno}: {x.message}" for x in got
-               if issubclass(x.category, (SyntaxWarning, DeprecationWarning))
-               and "invalid escape sequence" in str(x.message)]
-        self.assertEqual(bad, [], "发布说明里有无效转义（反斜杠要写成两个）：\n"
-                                  + "\n".join(bad))
+        self.assertNotIn("<<'RELNOTES'", script,
+                         "发布说明正文又回到打包脚本里了 —— 门店会重新收不到更新")
+        self.assertIn('cp "${ROOT}/发布说明.md" "${STAGE}/发布说明.md"', script,
+                      "打包脚本没把仓库的 发布说明.md 拷进包（自检会缺文件）")
 
     def test_beta_包名带编号且指纹里留着_beta(self):
         """⚠ 用户 2026-09-17 定的：beta 包要编号（`beta0` / `beta1`…），
@@ -904,7 +906,8 @@ class TestPruneCandidates(_ApplyCase):
         self.assertFalse(c["blocked"])
 
     def test_根目录一律不删(self):
-        """`run*.bat` 是本机生成的、`BUILD.txt` 是装完写的、文档只在包里 ——
+        """`run*.bat` 是本机生成的、`BUILD.txt` 是装完写的、根目录文档
+        （`发布说明.md` 2026-09-23 起也已在仓库里）不参与差集 ——
         在根目录做差集就会删掉它们。"""
         for name in ("run.bat", "run-now.bat", "BUILD.txt", "AGENTS.md", "发布说明.md"):
             self._put(name)
