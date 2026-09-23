@@ -125,7 +125,7 @@ rsync -a \
   --exclude 'out/' \
   --exclude 'in/' \
   --exclude 'dist/' \
-  --exclude 'tools/' \
+  --exclude '/tools/' \
   --exclude 'tests/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
