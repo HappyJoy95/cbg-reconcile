@@ -5,13 +5,14 @@
 而 `install.bat` 的职责恰恰是"装依赖" —— 这就成了先有鸡还是先有蛋：
 在全新的门店电脑上双击 install.bat，只会甩一个英文 ImportError 出来。
 
-所以所有 .bat 都走这里：
-    python bootstrap.py install          装依赖（然后问一句要不要开机自启）
+所以所有 .bat 都走这里（**门店日常只碰 `start.bat` 一个**）：
+    python bootstrap.py service-start    起控制台（start.bat）
+                       —— 依赖没装就**先自动装**、问一句自启，再启动
+    python bootstrap.py install          只装依赖（install.bat；装完也会拉起控制台）
     python bootstrap.py autostart        只注册开机自启（默认**普通权限**）
                        加 --elevated 才注册"以管理员身份启动"（要管理员，且会弄坏抓会话）
     python bootstrap.py uninstall        卸载：撤掉服务 / 定时任务 / 开机自启
                          加 --yes 跳过确认；加 --purge 连报告和凭据一起删
-    python bootstrap.py service-start    后台启动（start.bat）
     python bootstrap.py stop             停止（stop.bat）
     python bootstrap.py selftest         逐项自检（selftest.bat）
 
@@ -197,7 +198,7 @@ def do_install() -> int:
         return 2
     write_build_stamp()
     record_runtime()
-    print("依赖装好了。接下来双击 start.bat 启动控制台。")
+    print("依赖装好了。")
     return 0
 
 
@@ -901,11 +902,15 @@ def main() -> int:
 
         if cmd in ("install", "install-deps"):
             code = do_install()
-            if code == 0:
-                ask_autostart()
-            return code
+            if code != 0:
+                return code
+            ask_autostart()
+            # 装完直接把控制台拉起来 —— 门店不该再记得「还要双击 start」
+            print()
+            print("正在启动控制台…")
+            cmd = "service-start"
 
-        if cmd == "autostart":
+        elif cmd == "autostart":
             # 纯标准库，依赖没装也能跑。
             # ⚠ 默认**普通权限**；`--elevated` 才去注册管理员模式（那条路要管理员
             #   权限，而且会让自动抓会话失败 —— 所以必须显式要，不能猜）。
@@ -930,12 +935,23 @@ def main() -> int:
 
         left = missing()
         if left:
-            print("依赖还没装： " + ", ".join(left))
-            print()
-            print("请先双击 install.bat（它会装 requests / pyyaml / openpyxl）。")
-            print("如果已经装过还报这个，多半是双击 bat 用的 Python 跟装依赖的不是同一个 ——")
-            print("双击 install.bat 重装一次，它会把这次用的 Python 记下来，以后就走它。")
-            return 2
+            # `start.bat` / 装完接着起：缺依赖**当场装**，别再叫人换一个入口。
+            # 其它子命令（selftest / stop / …）仍直接报错 —— 它们不是安装路径。
+            if cmd == "service-start":
+                print("依赖还没装，正在自动安装…")
+                print()
+                code = do_install()
+                if code != 0:
+                    return code
+                ask_autostart()
+                left = missing()
+            if left:
+                print("依赖还没装： " + ", ".join(left))
+                print()
+                print("双击 start.bat 会自动装（requests / pyyaml / openpyxl）。")
+                print("如果已经装过还报这个，多半是双击 bat 用的 Python 跟装依赖的不是同一个 ——")
+                print("双击 install.bat 重装一次，它会把这次用的 Python 记下来，以后就走它。")
+                return 2
 
         # 走到这儿说明依赖齐了 —— 顺手把解释器记一次。
         # 覆盖两种 install 没记上的情况：手工拷贝部署、老版本升上来的。
@@ -943,14 +959,23 @@ def main() -> int:
         if not _runtime_pinned():
             record_runtime()
 
-        from src.cli import main as cli_main          # 依赖齐了才 import
-        return cli_main([cmd, *argv[1:]])
+        return run_cli([cmd, *argv[1:]])
     finally:
         if pause:
             try:
                 input("\n按回车关闭这个窗口…")
             except (EOFError, KeyboardInterrupt):
                 pass
+
+
+def run_cli(args: list) -> int:
+    """把命令交给 `src.cli` —— **抽成函数是为了测试能拦住它**。
+
+    装完会顺着启动控制台；不抽的话，单测里 mock 了 `do_install` 却仍会
+    真去 `import src.cli` / 起服务。
+    """
+    from src.cli import main as cli_main          # 依赖齐了才 import
+    return cli_main(args)
 
 
 if __name__ == "__main__":

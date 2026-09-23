@@ -51,7 +51,7 @@ exit /b 0
 
 :failed
 echo.
-echo   Start failed. Run install.bat first, or selftest.bat for details.
+echo   Start failed. See the messages above, or run selftest.bat for details.
 echo.
 pause
 exit /b 1

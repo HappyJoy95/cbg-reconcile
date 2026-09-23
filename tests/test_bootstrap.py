@@ -194,6 +194,12 @@ class TestMainRouting(unittest.TestCase):
 
         ns["do_install"] = fake_install
         ns["ask_autostart"] = lambda: None      # 别让它去调真的（会往 stdout 漏东西）
+        # 装完会顺着起控制台 —— 测试里别真 import src.cli / 起服务
+        def fake_cli(args):
+            called["cli"] = list(args)
+            return 0
+        ns["run_cli"] = fake_cli
+        ns["missing"] = lambda: []              # 装成功后依赖齐了
         import sys
         old = sys.argv
         sys.argv = ["bootstrap.py", "install"]
@@ -203,6 +209,8 @@ class TestMainRouting(unittest.TestCase):
             sys.argv = old
         self.assertEqual(code, 0)
         self.assertTrue(called.get("yes"), "install 分支不能被依赖检查挡住")
+        self.assertEqual(called.get("cli"), ["service-start"],
+                         "装完要直接起控制台，别再叫人双击 start")
 
 
 class TestWindowsElevation(unittest.TestCase):
@@ -341,6 +349,8 @@ class TestWindowsElevation(unittest.TestCase):
         seen = []
         ns["do_install"] = lambda: 0
         ns["ask_autostart"] = lambda: None
+        ns["missing"] = lambda: []
+        ns["run_cli"] = lambda args: 0
         ns["relaunch_as_admin"] = lambda cmd: seen.append(cmd) or True
         self._call(ns, ["install"])
         self.assertEqual(seen, [], "install 路径不许提权")
@@ -1381,6 +1391,7 @@ class TestInstallThenAsk(unittest.TestCase):
         asked = {}
         ns["do_install"] = lambda: 2                  # 装失败
         ns["ask_autostart"] = lambda: asked.setdefault("x", True)
+        ns["run_cli"] = lambda args: 0
         old = sys.argv
         sys.argv = ["bootstrap.py", "install"]
         try:
@@ -1395,6 +1406,12 @@ class TestInstallThenAsk(unittest.TestCase):
         asked = {}
         ns["do_install"] = lambda: 0
         ns["ask_autostart"] = lambda: asked.setdefault("x", True)
+        ns["missing"] = lambda: []
+        started = {}
+        def fake_cli(args):
+            started["args"] = list(args)
+            return 0
+        ns["run_cli"] = fake_cli
         old = sys.argv
         sys.argv = ["bootstrap.py", "install"]
         try:
@@ -1403,6 +1420,40 @@ class TestInstallThenAsk(unittest.TestCase):
             sys.argv = old
         self.assertEqual(code, 0)
         self.assertTrue(asked.get("x"), "装好了就该问一句")
+        self.assertEqual(started.get("args"), ["service-start"],
+                         "装完要直接把控制台拉起来")
+
+    def test_start_with_missing_deps_installs_then_starts(self):
+        """入口只留 start.bat：缺依赖**当场装**，装完接着起，不叫人换入口。"""
+        ns = _load()
+        state = {"installed": False, "asked": False}
+
+        def fake_install():
+            state["installed"] = True
+            return 0
+
+        def fake_missing():
+            return [] if state["installed"] else ["requests"]
+
+        ns["do_install"] = fake_install
+        ns["ask_autostart"] = lambda: state.__setitem__("asked", True)
+        ns["missing"] = fake_missing
+        ns["run_cli"] = lambda args: 0
+        old = sys.argv
+        sys.argv = ["bootstrap.py", "service-start"]
+        try:
+            import contextlib as _c
+            import io as _io
+            with _c.redirect_stdout(_io.StringIO()) as buf:
+                code = ns["main"]()
+        finally:
+            sys.argv = old
+        self.assertEqual(code, 0)
+        self.assertTrue(state["installed"], "start 缺依赖要自动装")
+        self.assertTrue(state["asked"], "首次装完要问自启")
+        out = buf.getvalue()
+        self.assertIn("自动安装", out)
+        self.assertNotIn("请先双击", out, "别再把人支去另一个入口")
 
 
 class TestNoRealSideEffects(unittest.TestCase):

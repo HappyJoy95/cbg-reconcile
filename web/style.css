@@ -1185,7 +1185,7 @@ body.setup-locked .shell { visibility: hidden; }
 .nav-item[data-tab="valueadd"]:hover .nav-menu,
 .nav-item[data-tab="valueadd"].open .nav-menu { height: 109px; }
 .nav-item[data-tab="tools"]:hover .nav-menu,
-.nav-item[data-tab="tools"].open .nav-menu { height: 109px; }
+.nav-item[data-tab="tools"].open .nav-menu { height: 146px; }
 .nav-menu .subtab {
   width: 100%; text-align: left; border: 0; background: none;
   border-radius: 8px;
