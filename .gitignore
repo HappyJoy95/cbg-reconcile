@@ -43,6 +43,17 @@ run-now.bat
 
 # DSH 隔离区：记忆/临时任务/归档/备份/文档，在库里但不进版本库
 .dsh/
+
+# 本机临时 / 预览 / 源表 —— 不进仓库也不进包
+# （根目录 claim-guide* 是 web/ 下正式页的预览副本；xlsx 是逆推源表）
+.playwright-cli/
+claim-guide-preview.html
+claim-guide.css
+claim-guide.js
+*.xlsx
+!web/tools/**/*
+!**/*.sample.xlsx
+
 # 打包时注入的中台邮箱授权码（由 build_package.sh 生成，只进包不进仓库）
 central-mail.env
 
