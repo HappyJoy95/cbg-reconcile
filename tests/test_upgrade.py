@@ -87,8 +87,11 @@ class TestUpgradeDetection(unittest.TestCase):
                 self.assertTrue(str(name).strip(), "代号不能为空")
 
     def test_首条边界是_2_1_1(self):
-        """钉住用户 2026-09-23 定的首条边界：线上 2.1.1 升到时间戳号 = 大版本 3.0.0。"""
+        """钉住用户 2026-09-23 定的首条边界：线上 2.1.1 升到时间戳号 = 大版本 2.2.0。"""
         self.assertTrue(upgrade.is_major_jump("2.1.1", "26.0923.153045"))
+        # 代号也钉住：用户当天把这一版的号定为 2.2.0（beta 要用对号），
+        # 代号必须跟着它 —— 推送里写着「3.0.0」而实际升的是 2.2.0 会自相矛盾。
+        self.assertEqual(upgrade.major_label("2.1.1", "26.0923.153045"), "2.2.0")
 
     def test_第一次记录不算升级(self):
         """⚠ 刚装上的机器没有 `from` —— 不该推"你从 ? 升到了 2.0.0"。
