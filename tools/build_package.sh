@@ -143,6 +143,11 @@ rsync -a \
   --exclude '设计文档.md' \
   --exclude 'packaging/' \
   --exclude '运维手册.md' \
+  --exclude '/.playwright-cli/' \
+  --exclude '/claim-guide-preview.html' \
+  --exclude '/claim-guide.css' \
+  --exclude '/claim-guide.js' \
+  --exclude '*.xlsx' \
   "${ROOT}/" "${STAGE}/"
 # ⚠ `tests/` **不进门店包**（用户 2026-09-22 方案 2）：门店不跑 pytest；
 #   仓库 git 里保留测试。自更新 `_targets` 用 `SKIP_APPLY` 同步跳过 ——
@@ -785,13 +790,22 @@ if grep -rIl "/Users/ashui" "${STAGE}" 2>/dev/null | head -3 | grep -q .; then
   fail=1
 fi
 # 开发垃圾不能进包（门店同事会打开这个目录，看到缓存文件会困惑）
+# ⚠ `*.xlsx` 也是垃圾：开发期源表（rsync 已排，这里再钉一道）。
 for junk in '.pytest_cache' '__pycache__' 'dist' 'tools' 'packaging' \
-            'run.sh' 'run.bat' 'run-now.sh' 'run-now.bat' '.gitignore'; do
+            'run.sh' 'run.bat' 'run-now.sh' 'run-now.bat' '.gitignore' \
+            '.playwright-cli' 'claim-guide-preview.html' 'claim-guide.css' \
+            'claim-guide.js'; do
   if [ -e "${STAGE}/${junk}" ]; then
     echo "    ✗ 包里混进了开发文件：${junk}"
     fail=1
   fi
 done
+_stray_xlsx="$(find "${STAGE}" -name '*.xlsx' 2>/dev/null | head -5 || true)"
+if [ -n "${_stray_xlsx}" ]; then
+  echo "    ✗ 包里混进了源表 Excel："
+  echo "${_stray_xlsx}" | sed 's/^/       /'
+  fail=1
+fi
 [ "$fail" = "0" ] && echo "    ✓ 全部通过" || { echo "打包中止"; exit 1; }
 
 # ---------------------------------------------------------------- 压缩
