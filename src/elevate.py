@@ -43,8 +43,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# 项目根。跟 src/version.py 一样**用自己的位置算**。
-ROOT = Path(__file__).resolve().parent.parent
+# 项目根 —— 从 src/paths.py 取（提权子进程的 cwd 也用它）
+from .paths import ROOT
 
 
 def is_windows() -> bool:

@@ -1,54 +1,221 @@
-# 体验店名单 + 串号标识映射（唯一真源）
+# 门店名单 —— **云商门店名 ↔ 华为门店编码 ↔ 串号标识**（唯一真源）
 #
-# 验证方式：2026-09-15 用「库存串号」视角交叉验证 ——
-#   拉全库在库/在途合计 26,015 行，按 `串号标识` 分组看 `分仓` 落在哪，
-#   14 个码各自都指向唯一一个仓，与门店名精确对应。见设计文档 §三。
+# 来源：用户 2026-09-18 给的全量名单（29 家），逐行核对过。
+# 字段：
+#   marker       串号标识（本店码）。**空的表示还没拿到** —— 不影响运行。
+#   erp_name     云商里的门店名 —— **匹配的主键**（`sales_rows` 里的「门店」就是它）。
+#   huawei_code  华为门店编码（SCN… / CNSCN… / RA…）。空的表示未知：
+#                不传 storeCode 时，华为接口默认按会话自身所属门店查询。
+#   huawei_name  华为侧完整名字（授权体验店的工商全称）。
+#   kind         店型：`体验店` / `合作店`。**从 huawei_name 里认出来的**
+#                （含「授权体验店」的是体验店，含「合作店」的是合作店）。
 #
-# huawei_code 是华为门店编码（SCN…）。空的表示未知 —— 不影响运行：
-#   不传 storeCode 时，华为接口默认按会话自身所属门店查询。
+# ⚠ `kind` 不是装饰：
+#   * **调拨规则只认体验店** —— `cli.load_config` 的 `_experience` 只收 `kind == 体验店`，
+#     因为「其他体验店卖出(调拨处理)」那条跳过说的是"体验店之间走调拨"。
+#     把合作店也算进去，它们的销售会被当成调拨跳过（那是改行为，不是加数据）。
+#   * 目前那条规则只在**老 `check` 子命令**里跑得到（报量排查 2026-09-17 整步拿掉了），
+#     每天那条 `daily` 走的是 `pools.py`，**不读这份名单**。
+#
+# ⚠ 串号标识的来历（2026-09-15 交叉验证）：用「库存串号」视角拉全库在库/在途
+#   26,015 行，按 `串号标识` 分组看 `分仓` 落在哪，14 个码各自都指向唯一一个仓、
+#   与门店名精确对应。见设计文档 §三。
 stores:
+  # ⚠ **虚拟门店**：云商**平台岗账号**登录时写的就是它。
+  #   用户 2026-09-19：「平台岗就做个虚拟的平台岗门店就是了」。
+  #
+  #   它不绑任何一家店（`huawei_code` 留空），但**身份照样写进配置** ——
+  #   于是"平台岗"和"某家店"走**同一套机制**。
+  #   ⚠ 原来是靠配置里一个独立的 `platform: true` 标志：登录平台岗时只写那个标志、
+  #     **不清原来那家店的字段** ⇒ 配置里同时留着"麦凯乐店"+"平台岗"，
+  #     而画像是 platform 优先短路 ⇒ 那家店成了**死数据**，哪天标志一关它就"活过来"。
+  #   ⚠ `kind` 就是判据（`config_io.PLATFORM_KIND`），别改成别的写法。
+  - marker: ""
+    erp_name: "平台岗"
+    huawei_code: ""
+    huawei_name: "盛联平台岗（不绑门店）"
+    kind: 平台岗
   - marker: D
-    erp_name: 青岛城阳万达店
-    huawei_code: ""
+    erp_name: "青岛城阳万达店"
+    region: 西北区
+    huawei_code: "SCN075029"
+    huawei_name: "山东省青岛市城阳区万达广场盛联华为授权体验店"
+    kind: 体验店
   - marker: W
-    erp_name: 青岛城阳万象汇店
-    huawei_code: ""
+    erp_name: "青岛城阳万象汇店"
+    region: 西北区
+    huawei_code: "SCN294064"
+    huawei_name: "山东省青岛市城阳区万象汇盛联华为授权体验店"
+    kind: 体验店
   - marker: H
-    erp_name: 胶南合美MALL店
-    huawei_code: ""
-  - marker: S          # ⚠ 数据里是小写 s，比对必须忽略大小写
-    erp_name: 青岛顺和汇店
-    huawei_code: ""
+    erp_name: "胶南合美MALL店"
+    region: 南区
+    huawei_code: "SCN253484"
+    huawei_name: "山东省青岛市黄岛区合美茂盛联华为授权体验店"
+    kind: 体验店
+  - marker: S        # ⚠ 数据里是小写 s，比对必须忽略大小写
+    erp_name: "青岛顺和汇店"
+    region: 市区
+    huawei_code: "SCN231117"
+    huawei_name: "山东省青岛市李沧区顺和汇盛联华为授权体验店"
+    kind: 体验店
   - marker: Y
-    erp_name: 青岛新业广场店
-    huawei_code: SCN231409
+    erp_name: "青岛新业广场店"
+    region: 市区
+    huawei_code: "SCN231409"
+    huawei_name: "山东省青岛市市北区新业广场盛联华为授权体验店"
+    kind: 体验店
   - marker: T
-    erp_name: 青岛悦荟店
-    huawei_code: ""
+    erp_name: "青岛悦荟店"
+    region: 市区
+    huawei_code: "SCN261169"
+    huawei_name: "山东省青岛市市北区悦荟广场盛联数码华为授权体验店"
+    kind: 体验店
   - marker: LH
-    erp_name: 青岛胶州龙湖店
-    huawei_code: ""
+    erp_name: "青岛胶州龙湖店"
+    region: 西北区
+    huawei_code: "SCN229444"
+    huawei_name: "山东省青岛市胶州市龙湖天街盛联华为授权体验店"
+    kind: 体验店
   - marker: SCM
-    erp_name: 黄岛传媒广场店
-    huawei_code: ""
+    erp_name: "黄岛传媒广场店"
+    region: 南区
+    huawei_code: "SCN287756"
+    huawei_name: "山东省青岛市黄岛区城市传媒广场盛联华为授权体验店"
+    kind: 体验店
   - marker: M
-    erp_name: 青岛丽达茂店
-    huawei_code: ""
+    erp_name: "青岛丽达茂店"
+    region: 市区
+    huawei_code: "SCN242414"
+    huawei_name: "山东省青岛市市北区丽达茂盛联华为授权体验店"
+    kind: 体验店
   - marker: GT
-    erp_name: 深蓝中心店
-    huawei_code: ""
+    erp_name: "深蓝中心店"
+    region: 市区
+    huawei_code: "SCN343260"
+    huawei_name: "山东省青岛市市南区香港西路深蓝中心盛联华为授权体验店"
+    kind: 体验店
   - marker: Z
-    erp_name: 上街里容滙城店
-    huawei_code: ""
+    erp_name: "上街里容滙城店"
+    region: 南区
+    huawei_code: "SCN346917"
+    huawei_name: "山东省青岛市市南区上街里容匯城盛联华为授权体验店"
+    kind: 体验店
   - marker: C
-    erp_name: 青岛CBD万达店
-    huawei_code: ""
+    erp_name: "青岛CBD万达店"
+    region: 市区
+    huawei_code: "SCN328987"
+    huawei_name: "山东省青岛市市北区延吉路CBD万达盛联华为授权体验店"
+    kind: 体验店
   - marker: JM
-    erp_name: 市南金茂湾店
-    huawei_code: ""
+    erp_name: "市南金茂湾店"
+    region: 南区
+    huawei_code: "SCN351318"
+    huawei_name: "山东省青岛市市南区金茂湾购物中心盛联华为授权体验店"
+    kind: 体验店
   - marker: K
-    erp_name: 城阳首创奥莱店
-    huawei_code: ""
+    erp_name: "城阳首创奥莱店"
+    region: 西北区
+    huawei_code: "SCN330271"
+    huawei_name: "山东省青岛市城阳区高新首创奥特莱斯盛联华为授权体验店"
+    kind: 体验店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛海信广场店"
+    region: 市区
+    huawei_code: "SCN265481"
+    huawei_name: "山东省青岛市市南区海信广场盛联数码华为授权体验店"
+    kind: 体验店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛永旺东部店"
+    region: 市区
+    huawei_code: "CNSCN162188"
+    huawei_name: "青岛市市南区香港中路街道永旺盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛永旺合肥路店"
+    region: 市区
+    huawei_code: "CNSCN179041"
+    huawei_name: "青岛市市北区合肥路街道永旺盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "和达购物中心店"
+    region: 市区
+    huawei_code: "CNSCN288694"
+    huawei_name: "青岛市市北区辽源路街道盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛正阳路利客来店"
+    region: 西北区
+    huawei_code: "CNSCN335668"
+    huawei_name: "青岛市城阳区正阳路利客来盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "城阳大润发店"
+    region: 西北区
+    huawei_code: "CNSCN335071"
+    huawei_name: "青岛市城阳区春阳路大润发盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛城阳家佳源店"
+    region: 西北区
+    huawei_code: "CNSCN193829"
+    huawei_name: "青岛市城阳区城阳街道家佳源盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛市北家佳源店"
+    region: 市区
+    huawei_code: "CNSCN309614"
+    huawei_name: "青岛市市北区家佳源盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "胶州李哥庄店"
+    region: 西北区
+    huawei_code: "SCN176580"
+    huawei_name: "青岛市胶州市李哥庄镇盛联合作店(乡镇)"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "胶南泊里镇店"
+    region: 南区
+    huawei_code: "CNSCN158053"
+    huawei_name: "青岛市黄岛区泊里镇盛联合作店(乡镇)"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛海信国际中心店"
+    region: 市区
+    huawei_code: "CNSCN251237"
+    huawei_name: "青岛市崂山区金家岭街道玺悦汇盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "绿城丽达店"
+    region: 市区
+    huawei_code: "CNSCN302347"
+    huawei_name: "青岛市李沧区绿城丽达购物中心盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛麦凯乐店"
+    region: 市区
+    huawei_code: "CNSCN258646"
+    huawei_name: "青岛市市南区香港中路街道麦凯乐盛联合作店"
+    kind: 合作店
+  - marker: ""            # 还没拿到这个店的串号标识
+    erp_name: "青岛鲁疆广场店"
+    region: 南区
+    # ⚠ 腾讯文档（任务目标分配）里这家写的是 **「鲁疆广场」**，比云商名短一截 ——
+    #   对不上 ⇒ 销售达成那一步这家算不出来（`matched=false`）。
+    #   用户 2026-09-19 定的办法：加一个 `tdoc_name` 别名，**精确匹配**。
+    #   ⚠ **不做模糊匹配**：模糊一下就会配到隔壁店，而界面上看不出来。
+    tdoc_name: "鲁疆广场"
+    huawei_code: "CNSCN341247"
+    huawei_name: "山东省青岛市黄岛区隐珠街道盛联合作店"
+    kind: 合作店
+  # ⚠ 这一家的**云商里的名字待补**（用户给的表里是空的）——
+  #    没有 erp_name 就没法按云商门店名匹配，先只留华为侧信息。
+  - marker: ""
+    erp_name: ""
+    huawei_code: "RA05320282"
+    huawei_name: "青岛市市北区颐高盛联合作店(PC)"
+    kind: 合作店
+    name: "颐高"
 
 # ⚠ 以下标识**不是门店码**，是机况/来源标记，不得当作门店处理
 # （2026-09-15 实测在库台数）：

@@ -62,9 +62,9 @@ import sys
 import time
 from pathlib import Path
 
-# ⚠ 融合后**不再自己找仓库根** —— 它就是 src/ 里的一个模块，
-#   根目录和 `src/cli.py` 用的是同一个定义（`parents[1]`），别搞两套。
-ROOT = Path(__file__).resolve().parent.parent
+# ⚠ 融合后**不再自己找仓库根** —— 2026-09-19 起统一从 `src/paths.py` 取，
+#   全项目只有那一处知道"自己在第几层"（`parents[1]` 这种写法搬文件就会静默算错）。
+from .paths import ROOT
 
 import requests                                                        
 from .cbg import DETAIL_PATH, CbgClient, CbgError                   
@@ -334,14 +334,39 @@ def put(conn, table: str, row: dict) -> None:
 _CAMEL = re.compile(r"(?<!^)(?=[A-Z])")
 
 
+def _run_migrations(conn, migrate_mod=None) -> dict:
+    """把结构迁移跑到最新（**幂等，便宜**）—— 建完表之后调一次。
+
+    ⚠ **绝不抛**：门店那边"抓数"是主线，迁移失败不该让它整个停摆；
+       真失败了把原因打出来，等下一次或人来处理（记在 `meta.schema` 上）。
+    """
+    from .storage import migrate as _m
+    m = migrate_mod or _m
+    try:
+        res = m.run(conn)
+        if res["applied"]:
+            print("结构迁移：%d → %d（%s）"
+                  % (res["from"], res["to"],
+                     "、".join(x["name"] for x in res["applied"])), flush=True)
+        for sk in res["skipped"]:
+            print("结构迁移：%03d %s 先跳过（%s）" % (sk["n"], sk["name"], sk["why"]),
+                  flush=True)
+        return res
+    except Exception as e:                                     # noqa: BLE001
+        print("结构迁移失败（不影响本次抓取，但库结构可能没更新）：%s" % e, flush=True)
+        return {"from": m.current(conn), "to": m.current(conn), "applied": [], "skipped": [],
+                "error": str(e)}
+
+
 def colname(field: str) -> str:
     """接口字段名 → 列名：驼峰转下划线、全小写。
 
-    ⚠ **故意不写字段映射表。** 手写映射一定会漏，而且**接口加一个字段就得回来改**。
-    2026-09-16 用户定"全部保留，为了以后扩展用" —— 这条就是那个决定落到代码上的样子：
-    **接口多给什么，库里就多一列。**
+    ⚠ **这就是个转发**，实现在 `storage/schema.py`（M15 / 阶段 3.4 把它收进存储层了）。
+    名字留着是因为它是**部署契约**的一部分（`pools.py` / 20+ 处引用），
+    见 4.3 红线里"这三个路径不许移动"那条的精神。
     """
-    return _CAMEL.sub("_", field).lower()
+    from .storage.schema import colname as _impl
+    return _impl(field)
 
 
 #: 这些字段**不进主体表** —— 它们各自建表，或者外面已经单独处理过
@@ -370,57 +395,25 @@ def row_from(obj, *, skip=NESTED_SKIP, extras=None) -> dict:
     return row
 
 
-_COLS_CACHE = {}
-
-
 def clear_col_cache() -> None:
-    """清掉"这条连接上这张表有哪些列"的缓存。
+    """**兼容壳**：以前是"新开连接必须清"的那个全局缓存。
 
-    ⚠ **新开一个连接就必须清。** 缓存键是 `(id(conn), 表名)`，而
-    `sqlite3.Connection` 既不支持弱引用、也不能挂属性（实测过），
-    只能拿 `id()` 当键 —— 于是连接释放后 `id()` 被复用，
-    "缓存里说这张表有这个列，新库其实没有" → `ALTER` 被跳过 →
-    写入直接 `OperationalError: table X has no column named Y`。
-
-    `connect()` 会自己调；**自己 `sqlite3.connect()` 的人（测试、`pools.ensure`）
-    也必须调一次**，否则会串到上一个连接的列集合上。
+    ⚠ 2026-09-19 起列缓存挂在**连接自己身上**（`storage/db._Conn._cbg_cols`）⇒
+    **没有"别人的缓存"可清**，这个函数已经是空操作。
+    留着是因为 `pools.ensure()` 和几条测试还在调它 —— 删掉它们会红，
+    而"为了删一个空函数去改十几处"不划算。**新代码别再调它。**
     """
-    _COLS_CACHE.clear()
+    return None
 
 
 def ensure_columns(conn, table: str, row: dict) -> None:
-    """表里没有的列，**当场补上**。
+    """表里没有的列，**当场补上**（实现在 `storage/schema.py`）。
 
-    ⚠ 这是"以后扩展用"的关键：接口加一个字段，**不用回来改代码** ——
-    下次抓取自己就把列建出来了（`ALTER TABLE ADD COLUMN` 不影响老数据）。
-
-    ⚠ 缓存键是 **`(id(conn), 表名)` 而不是光表名** —— 光表名在
-    "一个进程里开第二个库"时会骗人（见 `connect`）。`id()` 会在对象释放后
-    被复用，所以 `connect()` 里必须**清空**缓存，两条一起才严密。
+    ⚠ 转发的意义：**调用方不再需要先 `clear_col_cache()`** ——
+    缓存跟着连接走，这是 M15 / 阶段 3.4 的验收标准之一。
     """
-    key = (id(conn), table)
-    have = _COLS_CACHE.get(key)
-    if have is None:
-        have = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
-        _COLS_CACHE[key] = have
-    for name, val in row.items():
-        if name in have:
-            continue
-        typ = ("INTEGER" if isinstance(val, int) and not isinstance(val, bool)
-               else "REAL" if isinstance(val, float) else "TEXT")
-        # ⚠ 列名**必须加引号**：云商导出的表头里有 `69码` 这种数字开头的，
-        #   裸写就是 `unrecognized token`。加引号对已有的英文列名零影响。
-        conn.execute('ALTER TABLE %s ADD COLUMN "%s" %s' % (table, name, typ))
-        have.add(name)
-
-
-# ------------------------------------------------------- 分页 + 完整性断言
-class FetchIncomplete(RuntimeError):
-    """抓到的行数和接口自报的 `totalRows` 对不上。
-
-    ⚠ **必须抛，不许打印了事。** 这正是"退货少了 3 张而工具报成功"的成因：
-    没有任何东西比对过"接口说有几条"和"实际拿到几条"。
-    """
+    from .storage.schema import ensure_columns as _impl
+    return _impl(conn, table, row)
 
 
 def time_filter(body: dict, start, end) -> dict:
@@ -517,11 +510,8 @@ def connect(path, *, named: bool = False) -> sqlite3.Connection:
     Web 是长驻进程，跨年那天它要建 `cbg-2027.db`，而缓存里还留着
     2026 那个库的列 —— 一年只错一次，最难查的那种。
     """
-    clear_col_cache()
-    conn = sqlite3.connect(str(path))
-    if named:
-        conn.row_factory = sqlite3.Row
-    return conn
+    from .storage.db import connect as _impl
+    return _impl(path, named=named)
 
 
 def open_db(path) -> sqlite3.Connection:
@@ -1015,6 +1005,7 @@ def main(argv=None) -> int:
     conn = connect(db)                 # ⚠ 别直接 sqlite3.connect —— 见 connect 的说明
     conn.executescript(SCHEMA)
     _ensure_columns(conn)
+    _run_migrations(conn)              # 结构迁移（幂等；"这个库是第几版"的唯一权威）
     try:
         d = load_store(conn, client, args.store_code)
         print("门店：%s %s" % (d.get("storeNo"), d.get("storeName")), flush=True)
@@ -1045,7 +1036,12 @@ def main(argv=None) -> int:
         put(conn, "meta", {"key": "window", "value": win_txt})
         put(conn, "meta", {"key": "all_history", "value": "1" if args.all else "0"})
         put(conn, "meta", {"key": "days", "value": str(args.days)})
-        put(conn, "meta", {"key": "schema", "value": "1"})
+        # ⚠ **这里以前写死 `schema = "1"`** —— 2026-09-19 起那个编号归
+        #   `storage/migrate.py` 管（它是"这个库是第几版结构"的唯一权威）。
+        #   留着这一行会让每次抓取都把编号**打回 1**，于是 2、3 号迁移每跑一次
+        #   都被判成"还没做"（它们幂等所以不会坏，但记录从此不可信）。
+        from .storage import migrate as _migrate
+        _run_migrations(conn, _migrate)
         conn.execute(
             "INSERT INTO fetch_log (started_at, finished_at, days, window_start, window_end,"
             " store_code, orders, order_lines, payments, returns, refunds, errors, note)"

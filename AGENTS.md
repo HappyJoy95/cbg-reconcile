@@ -14,15 +14,23 @@
 `bootstrap.py autostart --elevated`，而那条路会让抓会话失败，见坑 7）。
 
 ```bash
-python -m pytest tests/ -q          # 1062 条，约 39 秒。改完必须全绿
+python -m pytest tests/ -q          # 2578 条，约 110 秒。改完必须全绿（**三个头都要绿**）
 python bootstrap.py selftest        # 逐项自检（版本 / 门店 / 依赖 / 会话 / 服务）
 python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
-python -m src.cli daily             # 日常流程：抓华为数据 → 报量排查 → POS 合规
+python -m src.cli daily --steps dump,erp-dump,pos,pools,attain   # 日常流程（**必须点名**）
 ```
 
-> **`daily` 是定时任务跑的那条命令**，三个步骤由 `--skip-dump/--skip-check/--skip-pos`
-> 组合出来。步骤定义只有一份（`run_daily.STEPS`），控制台那四个按钮和「自动化跑什么」
-> 都从它派生 —— 各写一份的话，迟早有一处静默跑错东西。
+> **三个头**（`3.8.10` 门店 Win7 / `3.9` / `3.14`）：本机装在 `.dsh/tasks/venv38|venv39|venv314`，
+> 三条可以**并行**跑；⚠ 跑的时候**别改源码**（会出假红）。
+>
+> ⭐ **`daily` 是唯一的执行入口，而且必须 `--steps` 点名**（2026-09-21 晚定的：
+> 用户「现在不需要 run daily 吧，按定时器运行就行了」）。给它名字的有三处，
+> 全都从 `features/registry.py` 派生：内置定时器（每一步自己的时刻）·
+> 各页「刷新」（`web.REFRESH_STEPS`）· 门店双击那份 `run-now.bat`（`run_daily.MANUAL_STEPS`）。
+> ⚠ **不给 `--steps` 会当场报错**（`cli.EXIT_USAGE`），不再有"整批"这个默认 ——
+> 那条路 2026-09-21 晚连同界面上的「跑一次」卡、`BUTTON_STEPS` 预设、
+> `runner.start()`、`POST /api/run` 一起删了。`--skip-*` 参数**还收**（老脚本兼容），
+> 但只剩"提醒一句它没用了"的作用。
 
 依赖：`requests` / `pyyaml` / `openpyxl`（见 `requirements.txt`）。
 代码要求 **Python 3.8+**（三头都要能跑 —— 门店 Win7 老机器只能 3.8.10、
@@ -38,27 +46,99 @@ python -m src.cli daily             # 日常流程：抓华为数据 → 报量�
 
 ## 目录
 
+⚠ **要动代码，先看 `.dsh/docs/2026-09-19-开发指南-模块与功能接入.md`**（逐步骤模板 +
+六个系统模块的 API 速查）。下面是**地图**，不是全部文件。
+
 ```
-src/cli.py         命令行入口 + 所有 cmd_* 子命令（auth/ping/check/daily/pos/serve…）
-src/run_daily.py   日常流程编排：抓华为数据 → 报量排查 → POS 合规（**步骤定义唯一来源**）
+入口层   src/cli.py        命令行入口 + 所有 cmd_* 子命令 / argparse（**永远留在原地**）
+         src/web.py        控制台后端（HTTP + JSON API，无框架）与 App/Handler
+         src/run_daily.py  日常流程编排（**必须 `--steps` 点名**；名单从注册表派生，见下）
+         web/app.js        控制台前端（原生 JS，**无构建步骤**，改完刷新即可）
+         web/index.html    页面骨架（id 要和 app.js 里 $('#xxx') 对得上）
+         web/theme.css     共享非配色令牌 / 动效总开关（配色在 web/themes/）
+         web/themes/       **一主题一文件**（2026-09-22）：default.css + 各主题覆盖色
+         web/inventory*    **库存盘点那一页**（M16 接进来的独立一页，见下面那条）
+
+能力层   src/modules/      **六个系统模块**（功能模块只跟它们打交道）
+（系统）   auth/ 登录验证 · fetch/ 数据抓取 · notify/ 推送
+         timer/ 计时 · health/ 系统健康状态（含自动更新策略）· theme/ 主题壁纸
+         ⚠ `timer/` 里有四样：`when.py`（时刻表，纯函数）· `store.py`（这台机器改过的
+         唤醒时刻**和执行顺序**）· `once.py`（**一次性注册**："N 秒后跑一遍、跑完删登记"，
+         用户 2026-09-21 要的）· `__init__.py`（任务表 / 到点判定 / 派发 / 服务里的心跳线程）。
+         ⚠ **周期任务用 `whens`（静态声明），一次性任务用 `timer.register_once()`** ——
+         后者落盘、走同一条 `daily --steps` 派发路径、登记/到点/作废都记日志（`wake-once`），
+         而且**不列进**定时器那张"每天要跑"的表（列进去会让人以为要天天跑）。
+         ⚠ **同一时刻到点的几步按"定时器那张表从上到下"的顺序跑**（用户 2026-09-21：
+         「相同时间执行的任务，按照定时器这个列表从上到下执行」）——表里的顺序 =
+         `due()` 的顺序 = `daily --steps` 里的顺序，`run_daily.main` **按点名的顺序跑**
+         （2026-09-21 才改成这样：以前 8 个块是写死的代码顺序，表里调了顺序没用）。
+         功能模块**只声明**「什么时候叫醒我」= `Step(whens=(When(...),))`
+         ⚠ 模块是**对外入口，不搬家实现**；互相可调用但**不许成环**（有测试）
+
+执行层   src/app/         每个功能的执行模块：算 + 落盘 + 推送，一次做完
+         pos.py（POS 合规）· data_state.py（数据五态判据）· staff.py（人员）
+         report.py（**上报**：指纹差集打包 + 发送 + 补发）·
+         report_inbox.py（**收上报**：收信 → 落 `in/report.db`）—— M18/M19
+         ⚠ **`in/` = 收进来的，`out/` = 这台机器产出的**（2026-09-21 晚用户定的）：
+           各店发来的上报包 / 收信库在 `in/`；报告、本机抓的库、待发·已发的包在 `out/`
+
+功能层   src/features/    **一个业务功能一个文件夹**，两级菜单照它摆
+         registry.py     注册表（Feature / Sub / Step）—— 加功能只认这一份
+         __init__.py     ALL = [compliance, sales, inventory]（**显式清单，别扫目录**）
+         compliance/     五项合规 → pos/(POS) · comparison/(报量查询) · store/(人员)
+         sales/          周度重点产品 → attain/（周度达成）· 历史记录（换周就锁住存档，只读）
+         inventory/      **库存盘点** → book.py（取数）· push.py（落盘+推送）
+                         ⚠ **没有 `Step`** —— 人拿扫码枪干的活，不注册定时器
+
+底层     src/storage/     库 / 建表 / 迁移 / **运行记录 runlog**（谁都能调，它不认识业务）
+         src/paths.py     ROOT（全项目只有这一处知道"自己在第几层"）
+```
+
+⚠ **左下角那一组**（账号与人员 / 检查更新 / 通用 / **数据交换** / 玲珑授权 / 定时器设置）
+**不是功能模块**：它们在 `index.html` 的 `#side-foot` 里**手写**，页面落在
+`#panel-settings` 里，可见性写在 `web.FOOT_PAGES`（**不在注册表**）。
+⚠ 「数据交换」（M20 的每店一张卡）就在这儿 —— **只有区长 / 平台看得见**（`multi`），
+而且 `/api/report/stores` 对门店**直接 403**。
+
+### ⚠ 库存盘点那一页（M16，2026-09-20）——两条别踩
+
+**① 它是一整页，但嵌在控制台的 iframe 里。**
+`web/index.html` 的 `#panel-inventory` 里是 `<iframe src="/inventory.html?embed=1">`
+（**懒挂载**：切到那一页才填 `src`）。两个坑：
+
+* **扫码枪的焦点**：扫码枪就是个键盘，输入必须落在 iframe 的扫码框里。用户点一下
+  控制台别处焦点就跑了（"扫了没反应"）。所以有两道兜底（`app.js` 的
+  `mountInventory` / `focusFrame` / 那段 `postMessage({ic:'scan-key'})`，
+  对面 `ui.js` 的 `onParentKey`）—— **只转第一下按键**，之后焦点已经在框里，
+  父页面收不到那些事件，所以不会重复。
+* **`?embed=1`** 让它藏掉自己的大标题和「回控制台」（控制台自己有）。
+
+**② `web/inventory/{core,store,xlsx}.js` 是从上游项目原样搬来的，别在这儿改。**
+它们装着盘点**全部口径**（uid / 在途拆分 / 匹配引擎 / xlsx 生成），
+上游 `~/vibe-coding/Inventory Check` 那 521 条 node 断言验的就是这份代码。
+要改：**回上游改 → `npm test` → 拷回来 → 更新 `tests/test_inventory.py` 里的哈希**。
+（哈希是一把"提醒锁"：谁顺手在这儿改，测试当场红给他看。）
+`ui.js` / `api.js` / `style.css` 是**接过的那三个**（取数改走后端、导出接推送、
+账号不再存在浏览器里），在这儿改就行。
+
+**还没搬的**（§4.5.5 的步 4/6/7）：`http/`（拆 `web.py`）、`integrations/`、`desktop/` ——
+现在还是散在 `src/` 下的单文件：
+
+```
 src/dump.py        华为订单 → SQLite（out/cbg-<年>.db，一年一个库）
-src/pos_metric.py  POS 使用率口径（**纯函数、无 IO**，业务规则只在这）
-src/pos_report.py  POS 的口径 IO 层（读库）+ 推送文案
-src/pos_export.py  POS 明细 Excel
+src/tdoc.py        腾讯文档匿名读（周度任务目标分配）
 src/bugreport.py   「上报 bug」：收集现场 → 打包 → 推送（**先落盘再发**）
 src/whatsnew.py    每版的「改了什么 + 门店要做什么」（更新后弹一次）
                    ⚠ **升 VERSION 必须在这里补一条**，有测试拦着
 src/upgrade.py     升级记录 + **大版本升级就把「要做的事」推出去**
-src/web.py         控制台后端（HTTP + JSON API，无框架）与 App/Handler
-web/app.js         控制台前端（原生 JS，**无构建步骤**，改完刷新即可）
-web/index.html     页面骨架（id 要和 app.js 里 $('#xxx') 对得上）
 src/browser.py     自动抓华为会话（CDP 读 cookie + localStorage 取 csrf）
 src/cbg.py         华为 CBG 接口客户端（订单列表、门店详情、ping）
 src/erp.py         云商 ERP 客户端（销售明细、登录换 token、验证码）
 src/reconcile.py   对账核心：两边串号做差集
 src/report.py      差异清单落盘（xlsx + json）
 src/selfupdate.py  自更新 / 历史版本回退 / 版本检查
-src/runner.py      控制台「运行」页：起子进程 + 日志缓冲
+src/runner.py      起子进程 + 日志缓冲（**按点名的几步起**：`start_steps`/`start_argv`，
+                    ⚠ 那个"按预设起一趟"的 `start()` 2026-09-21 晚删了）
 src/schedule.py    计划任务（schtasks / crontab）+ 自己记的注册参数
                    （`.secrets/schedule.json`，见坑 7 第 3 条）
 src/autostart.py   开机自启（**默认注册表 Run·普通权限**；计划任务那条要显式开）
@@ -66,7 +146,7 @@ src/winutil.py     schtasks 的两个坑（输出编码、字段本地化）集�
 src/runtime.py     记住"安装时用的是哪个 Python"（多 Python 机器不装错）
 src/elevate.py     按需提权：只把"删旧任务/建定时任务"那一步弹一次 UAC
 bootstrap.py       所有 .bat 的统一入口（**纯标准库**，装依赖前就能跑）
-tests/             1062 条单元测试（pytest）
+tests/             2578 条单元测试（pytest）—— 注册表/布局/模块各有专门的钉子
 tools/build_package.sh  打发布包（见下）
 运维手册.md         完整手册（部署/维护用，**不发门店**）
 门店操作手册.md     发门店的精简版（五六步，打包时进包的是这份）
@@ -76,18 +156,24 @@ update-debug.py    更新失败时的现场诊断脚本
 ## 发版
 
 ```bash
-# 1. 改 src/version.py 里的 VERSION
-# 2. commit message 必须是这个格式（历史版本列表靠它筛）：
-#      release: v1.4.11
-# 3. bash tools/build_package.sh          # 正式包 → dist/
-#    bash tools/build_package.sh beta     # 测试包（名字/BUILD.txt/发布说明都带 beta）
+# 版本号（2026-09-23 起）：
+#   * 开发界面显示 = git 短 commit（version.shown_version()）
+#   * 发版号       = 封包时刻 yy.mmdd.hhmmss（正式包自动写入 version.py）
+# 1. 正式包：bash tools/build_package.sh
+#      → 自动 VER=$(date +%y.%m%d.%H%M%S)，写进包内 + 仓库 src/version.py
+# 2. commit message（历史版本列表靠它筛）：
+#      release: 26.0923.153045
+# 3. push 到 main（门店自更新读远端 VERSION）
+#    bash tools/build_package.sh beta     # 测试包（不改仓库 VERSION）
 ```
 
-### 正确顺序：先升 VERSION，再打 beta 包
+### 正确顺序：打正式包会改 VERSION，再 push
 
 ```
-改代码 → 升 VERSION → 打 beta 包试 → 试好了 → push → 打正式包
+改代码 → 打 beta 包试 → 试好了 → 打正式包（自动写时间戳 VERSION）→ commit + push
 ```
+⚠ beta **不改**仓库 VERSION（和以前一样）；正式包会改，**push 后**门店才看得到新号。
+⚠ `whatsnew.NOTES` 不必为每个时间戳手写键 —— 发版号格式对不上时回落 `DEFAULT_NOTE`。
 
 ⚠ **beta 包和正式包的版本号同源** —— 它表示"**这一版正在测**"，
 不是"另一个版本"。所以 `beta` 只是给**同一个版本**加个标记，它本身不改版本号：
@@ -111,17 +197,18 @@ update-debug.py    更新失败时的现场诊断脚本
 
 | | 进包 | |
 |---|---|---|
-| `src/` `web/` `tests/` `config/` | ✅ | 代码、前端、测试、门店映射表 |
+| `src/` `web/` `config/` | ✅ | 代码、前端、门店映射表 |
+| `tests/` | ❌ | **开发用**（三头 pytest 在仓库跑）；门店不跑测试 —— 手工包与自更新都跳过（`SKIP_APPLY`） |
 | 根目录那堆 `*.bat` / `*.py` | ✅ | 门店要双击的 |
 | `门店操作手册.md` `发布说明.md` | ✅ | 门店要看的 |
 | `src/store-config.default.yaml` | ✅ | **门店配置模板**（三行是空的） |
-| `.secrets/` `out/` `config/store-*.yaml` | ❌ | **这台电脑自己的东西**，安装时按需生成 |
+| `.secrets/` `out/` **`in/`** `config/store-*.yaml` | ❌ | **这台电脑自己的东西**（`in/` = 收进来的上报），安装时按需生成 |
 | `tools/build_package.sh` | ❌ | 打包工具，门店不打包 |
 | `AGENTS.md` `README.md` `设计文档.md` `运维手册.md` | ❌ | 给开发者 / AI 的 |
 | `.git/` `.gitignore` `dist/` `.pytest_cache/` | ❌ | 仓库自身的东西 |
 
-⚠ **包里一个会覆盖门店设置的文件都没有**（`.secrets/`、`out/`、
-`config/store-*.yaml` 三样都不进包，由 `bootstrap.ensure_layout()` 按需生成）。
+⚠ **包里一个会覆盖门店设置的文件都没有**（`.secrets/`、`out/`、`in/`、
+`config/store-*.yaml` 都不进包，由 `bootstrap.ensure_layout()` 按需生成）。
 所以**升级时整个目录拷过去覆盖就行**，不需要"记得跳过某几个目录" ——
 那种要人记住的规矩迟早出错。改打包脚本时务必守住这条。
 
@@ -134,6 +221,8 @@ update-debug.py    更新失败时的现场诊断脚本
 * 发版的 commit 里如果混着仓库改动，写发布说明时只讲**进包的那部分**；
 * 打包自检会拦 `README.md` / `设计文档.md` / `运维手册.md` / `AGENTS.md` ——
   它们不该出现在包里（`rsync` 排除 + 反查断言，两道）。
+* ⚠ **`tests/` 两条路径都不下发**（2026-09-22）：git 留着开发；`build_package.sh`
+  `--exclude 'tests/'`；自更新 `_targets` 跳过 `SKIP_APPLY`。旧机器残留交给 prune。
 * ⚠ **别以为"自更新之后的目录 = 包里的目录"** —— 这两套**排除规则不一样**，
   实际差三个文件（2026-09-16 实测比出来的）：
 
@@ -151,6 +240,12 @@ update-debug.py    更新失败时的现场诊断脚本
 
 ## 改动的规矩（用户明确要求过）
 
+* ⭐⭐ **要加功能 / 改功能 / 动系统模块 → 先看**
+  **`.dsh/docs/2026-09-19-开发指南-模块与功能接入.md`**。
+  那份是**照着抄就能接入**的操作手册：系统地图 · 三种加法（加子模块 / 加一级功能 /
+  加定时步骤）的逐步模板 · 六个系统模块（`src/modules/`）的 API 速查 ·
+  前端怎么加一页 · 测试怎么写 · 改完的验收清单 · **现在还没有的东西**（别以为已经有了）。
+  本文（`AGENTS.md`）讲**红线和坑**，那份讲**怎么下手** —— 两份分工，别互相抄。
 * ⭐ **开工前先写「开发目标」**：`.dsh/docs/<日期>-<版本>-开发目标.md`。
   格式照抄 `.dsh/docs/2026-09-16-2.0.0-开发目标.md`（十节：一句话目标 /
   已定的 / 边界（含**项目红线**）/ 里程碑 / 要用户给的 / 验收标准 / 风险 /
@@ -173,7 +268,7 @@ update-debug.py    更新失败时的现场诊断脚本
 * 提交信息写清**为什么**（这个项目的注释和提交信息都是"记录踩过的坑"风格，
   请保持）。中文。
 
-## 十三个踩过的坑（都真踩过，别再踩）
+## 十九个踩过的坑（都真踩过，别再踩）
 
 **1. 路径比较别用 `str(Path)` —— Windows 上是反斜杠**
 
@@ -378,6 +473,20 @@ Python 的 `%` **只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组�
 → **一律配 `assert 旧串 in s`**。批量改源码时再加一条：**改完立刻 `py_compile`**，
 并按行号锚定（"往第 N 行插一段"比"按内容替换"稳）。
 
+⚠⚠ **前端拼 HTML 时更狠的一种**：拿 `replace()` 当"给拼好的标签补个属性"用。
+2026-09-21 抓出来的实例 —— 月度计划**门店那一格**原来是
+
+```js
+one(...).replace('<td class="plan-store">', '<td class="plan-store plan-store-open"…')
+```
+
+后来给每个格都加了列宽 class，实际拼出来的是
+`<td class="plan-store plan-col plan-col-store">` ⇒ 锚串**一个都没替上、也不报错**：
+门店名没有 ▸、点不开，「拆到人」整个失效 —— 而源码里看着这段逻辑还在
+（**靠截图**才看出来的：28 家店一个箭头都没有）。
+→ **别用"事后替换"补属性**，把属性当参数传进那个拼 HTML 的函数；
+`test_plan_web.py::Test分成到人::test_门店那一格是直接拼的_不靠replace` 钉着这条。
+
 **13. 「看到过」和「做完了」是两个状态**，别用一个标志位表示
 
 做更新日志弹窗时踩的：`whatsnew.digest()` 原来用"**看过没**"（`seen`）
@@ -397,9 +506,108 @@ Python 的 `%` **只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组�
 **判断"要不要做某事"的条件，要跟"真正做出去的内容"用同一个口径** ——
 不然会出现"判据说该推、推出来却是空的"这种自相矛盾。
 
+**14. `describe_credentials()` 和 `load_credentials()` 不是一回事**
+
+前者**只看指定的那个文件**，后者走**整条回落链**（环境变量 > `.secrets/erp.env` >
+`~/.dsh/secrets/erp.env` > 内置账号）。2026-09-20（M16）实测踩到：
+盘点页问后端"账号配好了吗、是谁"，后端拿 `describe_credentials()` 报，
+于是页面上写着「云商账号：**（后端没给用户名）**」—— 而账号明明配着、也登得上去。
+门店照着这句会去**重配一遍账号**，白折腾。
+
+→ 判"有没有账号 / 是谁"一律用 `load_credentials()`；
+   `describe_credentials()` 只用来问"**这个文件里**写了什么、是不是从别处来的"
+   （它有 `used_from`，报的是"实际来自哪个文件"）。
+
+**15. `mailer.send()` / `wecom.send_markdown()` **不看 `enabled`** —— 谁调谁负责判**
+
+`通用设置 › 邮件 / 企业微信` 那两个开关是**业务侧**的判断，发送函数自己不检查。
+所以新写一条推送时，**必须自己先问一句"这条渠道开着没"** ——
+漏了的表现是「门店在设置里关掉了，照样发出去」，而**发出去收不回来**。
+→ `features/inventory/push.py::_channel_on()` 就是干这个的；读配置失败时**当"没开"**
+  （宁可少发一条、界面上说明白，也别擅自往群里发东西）。
+
+**16. 嵌在 iframe 里的那一页：扫码枪的焦点得自己兜，而且形态别自己定**
+
+两件事记在一起，因为它们是同一天同一件事的两半（M16 库存盘点）：
+
+* **形态别自己拍**：第一版我做的是"菜单点开**另开一整页**"，理由写得挺足
+  （扫码枪要独占焦点）—— 用户当天就否了：「**做嵌套进来吧，现在单独打开一个页面很奇怪**」。
+  教训：**技术理由充分不等于用户要的形态对** —— 涉及"东西长在哪"这种
+  一眼能看出来的事，先问一句，别拿工程理由替用户决定。
+* **嵌进去之后，焦点就得自己兜**：扫码枪是"键盘模拟"，输入只落在**有焦点**的那个文档里。
+  用户在控制台别处点一下，焦点就跑到 iframe 外面了 —— 表现是"扫了没反应"，
+  而这是最难查的一类故障（上游 README 的 FAQ 第一条就是它）。两道兜底：
+  ① 切到这一页 / 鼠标回到面板 ⇒ `focusFrame()` 把焦点还给 iframe；
+  ② 焦点真在外面 ⇒ 父页面 `postMessage({ic:'scan-key', key})` 把那**一下按键**转进去。
+  **只转第一下**：转过去之后扫码框拿到焦点，后面的字符直接在框里落字
+  （父页面收不到那些事件），所以不会"一个字符进两次"。
+
+**17. 同一个仓库**同时**开两个会话改，改动会被对方的缓冲区覆盖掉**
+
+2026-09-20 真发生：两个会话同时在改这个仓库（一边做自动更新、一边接库存盘点）。
+我改 `src/whatsnew.py` 的 `TABS` 那一行，编辑报成功，**几秒后文件里又是旧值** ——
+另一个会话整份写回时把它盖掉了（它读文件比我改得早）。测试当场红，才发现。
+
+→ 同时开工时：① **改完立刻用 `grep`/跑测试确认自己那处还在**（别信"编辑成功"）；
+  ② 尽量别碰对方正在动的文件（`git status` + 文件 mtime 能看出热点）；
+  ③ 真要动同一处，改完再看一眼。
+
+**18. 「页面藏起来了」不等于「接口拦住了」—— 可见性只能有一份表，而且得在后端**
+
+2026-09-20/21（M17）查出来的：菜单的可见性一直写在**前端**（`web/index.html` 每个标签上
+一个 `data-types`，`app.js` 按 `profile.type` 过滤），**而每个 `/api/*` 一个鉴权都没有** ——
+`PUT /api/attain/split` 任何登录过的人都能改**任意门店**的目标。
+"页面上看不到"从来不是权限，它只是**没人点得到**：写个 curl 就进去了。
+
+现在的形状（改这块之前先读这段）：
+
+* **判据只有 `web.role_scope(app)` 一处**（区长 → 平台 → 门店，**区长必须优先** ——
+  区长的账号恰恰是"能看到 >1 家店"的那种，先判平台就会把他当平台岗、静默看全部门店）。
+* **每个 `/api/*` 都要有一行 `forbid(scope, ...)`**；越权回 **403 + `error` 文案**。
+* **可见性词表四档**：`""`（都看）· `experience` / `partner`（按"这家店要不要玲珑"）·
+  **`multi`（管多店的身份：区长 / 平台，M20 加的）**。⚠ 一个人**同时**属于几档
+  （区长 = `multi` + 玲珑那档）⇒ 判据是**集合相交**（`web.scope_types()`），
+  写成"等于某一个词"会让区长要么丢掉多店视图、要么丢掉五项合规。
+* **可见性表的唯一来源**：**功能模块**那半在注册表的 `Feature.types` / `Sub.types`，
+  **左下角那一组**（账号/更新/通用/数据交换/玲珑/定时）在 `web.FOOT_PAGES`
+  （它们不是功能模块，见目录那节）—— `web._build_page_rules()` 把两边合一，
+  派生成 `PAGE_RULES` → `role_scope()["pages"]` → 前端
+  `applyProfile(role)` 只按它打 `hidden`。⚠ 加新页时**只改注册表**
+  （左下角那种就在 `FOOT_PAGES` 加一行）；
+  在 `PAGE_RULES` 里另写一行、或在前端写 `if (type === ...)`，就是第二份定义。
+* ⚠ **两份定义走散的表现是"菜单里藏了、接口还给"**；反过来（表里漏一个 key）
+  表现是**那一页对所有人永远不显示**，而"某一页不见了"**没人会报**。
+  所以两头都有测试：`tests/test_roles.py::Test可见性对照`（HTML 的 key ↔ `PAGE_RULES`
+  双向）和 `test_功能那半是从注册表派生的`。
+* ⚠ 认不出来的身份**退到最小的范围**（门店），但**可见性上宁多勿少**：
+  少给的表现是"用户看不到自己该用的页、且没有任何提示"，多给只是点进去 403。
+* ⚠ `role_scope()` **每个 API 请求算一次** ⇒ 里面的文件读取只能读一遍
+  （名单走局部 `roster()`）。加 `pages` 时第一版按门店数各读一遍，
+  实测从 10.9ms 涨到 **25.5ms/请求**，收回去才 10.2ms。
+
+**19. 「今天新增」怎么算 —— 别用时间戳、别用 `rowid`，用**指纹差集**
+
+2026-09-21（M18 数据上报）踩出来的。要发"每天的新增项"，第一反应是找个水位字段，
+而本机库**三个候选全是坑**（都实测过）：
+
+| 候选 | 为什么不行 |
+|---|---|
+| `orders.create_time` | 它**不是入库时间** —— 和 `doc_create_time` 逐字相同（业务时间）。而且每天那趟抓的是**整月**（`dump.month_range`），混在一起分不出"今天写的" |
+| `rowid` | 每天整月重拉一遍 `INSERT OR REPLACE` ⇒ **rowid 每跑一趟就翻倍**（实测 447 行 / max(rowid)=894） |
+| 加一列 provenance | 要动 schema + 迁移 + 老库补列，而这是**最好别碰**的地方（迁移有版本、门店在跑） |
+
+→ 现行做法：`out/report/state.db` 存 `(表, 行键) → 行 hash`（值统一转文本再 hash，
+不然 `3` / `3.0` 这种类型差会让同一行**天天"变"一次**）。**补录和改单都能发出去** ——
+而那恰恰是最该报的（云商里 6 月的单今天才补进来）。
+
+⚠⚠ **配套的一条，最容易漏**：「第一次只发最近 7 天」时，
+**必须把整库都登记进指纹**（只登记"这次发出去的"那几行 ⇒ **第二天把一整年当新增发出去**，
+实测第 1 封 476 行 / 327 KB、第 2 封 1401 行 / **3.9 MB**）。
+语义要写成"**我已经把整库登记为已知**，往后只有变化才发"。
+
 ## 数据与凭据（别提交）
 
-`.gitignore` 已排除：`.secrets/`、`out/`、`dist/`、`BUILD.txt`、
+`.gitignore` 已排除：`.secrets/`、`out/`、**`in/`**（收进来的东西）、`dist/`、`BUILD.txt`、
 `run*.bat`（安装时按本机 Python 路径生成）、
 **`config/store-*.yaml`（门店配置 —— 以前是跟踪的，现在只发模板
 `src/store-config.default.yaml`）**。
@@ -407,3 +615,18 @@ Python 的 `%` **只对元组展开**：`"%-9s %4d" % row` 在 `row` 是元组�
 优先级别搞错：云商凭据 **环境变量 > `.secrets/erp.env` > `~/.dsh/secrets/erp.env`**。
 华为会话按店存：`.secrets/cbg-<门店码>.json` —— **换店等于换一份会话**，
 要用那个店的账号重新抓一次（否则"登得上、抓不到"）。
+
+**三份名单，别搞混**（谁管哪些店全靠它们）：
+
+| 文件 | 是什么 | 进包？ |
+|---|---|---|
+| `config/stores.yaml` | **门店名单**（唯一真源）：`erp_name` ↔ 华为编码 ↔ 串号标识 ↔ **`region`（区域）** | ✅ 随程序走 |
+| `config/managers.yaml` | **区长名单**：`accounts`（按登录账号认人）+ `regions: [区域]`（**按区域圈店**） | ❌ 机器自己的 |
+| `config/store-*.yaml` | **这台机器是哪家店** | ❌ 机器自己的 |
+
+⚠ **区长看哪些店 = 区域**（2026-09-21 用户拍的 B 方案）：区域是**门店的属性**，
+区长只写区名 ⇒ 新店在名单里**标了区域就自动进**对应区长。
+判据只有一处：`config_io.stores_of_manager()`（`web.role_scope()` 与
+`attain/split.py::managers_of()` 都走它）；老写法 `stores: [店名…]` 仍然认。
+⚠ 改名单时跑一下 `config_io.region_audit()`（`selftest` 也会打印）——
+区名打错会让那位区长**一家店都看不到**，而界面上只会显示"没有数据"。

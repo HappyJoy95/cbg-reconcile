@@ -33,10 +33,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# 项目根。跟 src/version.py 一样**用自己的位置算**，不借别人的 ——
-# 安装布局和仓库布局是同一套（见 selfupdate 顶部），所以这里算出来的
-# 永远是"这份代码所在的项目根"。
-ROOT = Path(__file__).resolve().parent.parent
+# 项目根 —— 从 src/paths.py 取（⚠ 别再自己 `parent.parent`：搬文件会静默算错根，见那儿顶部）
+from .paths import ROOT
 
 REL = Path(".secrets") / "python.txt"
 

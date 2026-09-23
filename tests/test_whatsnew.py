@@ -312,6 +312,14 @@ class TestModalWiring(unittest.TestCase):
                         "必须先 esc 再替换成 HTML")
 
 
+class Test发版时间戳也有更新日志(unittest.TestCase):
+    def test_pack格式不弹空窗(self):
+        from src import whatsnew
+        got = whatsnew.notes_for("26.0923.153045")
+        self.assertIsNotNone(got)
+        self.assertTrue(got.get("title"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

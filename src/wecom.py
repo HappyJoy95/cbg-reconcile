@@ -67,8 +67,7 @@ class WecomConfig:
         out = []
         if not self.key:
             out.append("webhook 地址")
-        if self.when not in WHEN:
-            out.append(f"发送时机（只能是 {'/'.join(WHEN)}）")
+        # ⚠ 2026-09-22：when 不再校验（设置页已去掉发送时机）
         return out
 
 
@@ -95,6 +94,13 @@ def _as_bool(v, default: bool = False) -> bool:
 
 # --------------------------------------------------------------------- 配置
 def load_wecom_config(cfg: dict, root=None) -> WecomConfig:
+    """⚠ 2026-09-22：有 `push-paths.json` 时以路径列表第一条为准（空列表 = 没配）。"""
+    from . import push_paths
+    if push_paths.has_file(root):
+        rows = push_paths.load_raw(root).get("wecom") or []
+        if rows:
+            return wecom_from_row(rows[0], root)
+        return WecomConfig(enabled=False, webhook="", when="always")
     w = (cfg or {}).get("wecom") or {}
     env_path = envfile.resolve(w.get("env_file") or DEFAULT_ENV_FILE, root)
     sec = envfile.parse(env_path)
@@ -121,12 +127,87 @@ def save_wecom_secrets(env_file, webhook: str | None = None) -> Path:
     return envfile.update(envfile.resolve(env_file or DEFAULT_ENV_FILE), updates)
 
 
+# ------------------------------------------------------------- 路径列表（2026-09-22）
+def wecom_from_row(row: dict, root=None) -> WecomConfig:
+    """路径行 → `WecomConfig`。有行就算配了（`enabled=True`）。"""
+    if not isinstance(row, dict):
+        row = {}
+    return WecomConfig(
+        enabled=True,
+        webhook=str(row.get("webhook") or "").strip(),
+        when="always",   # 留字段兼容；路径模式不再看 when
+        # 界面已撤掉这两项；代码内默认与 yaml 一致（mention_all=False、send_file=True）
+        mention_all=_as_bool(row.get("mention_all"), False),
+        send_file=_as_bool(row.get("send_file"), True),
+        env_file=str(row.get("env_file") or DEFAULT_ENV_FILE),
+    )
+
+
+def load_wecom_paths(cfg: dict, root=None) -> list:
+    """全部企微路径；列表空 = 这条渠道没配。返回 `(path_id, WecomConfig)`。"""
+    from . import push_paths
+    if push_paths.has_file(root):
+        rows = push_paths.load_raw(root).get("wecom") or []
+        return [(str(r.get("id") or ""), wecom_from_row(r, root)) for r in rows]
+    wc = load_wecom_config(cfg, root)
+    if wc is None or not (wc.enabled and wc.ready):
+        return []
+    return [("legacy", wc)]
+
+
+def wecom_configs_only(cfg: dict, root=None) -> list:
+    return [wc for _id, wc in load_wecom_paths(cfg, root)]
+
+
+def save_wecom_paths(rows, root=None) -> Path:
+    """整表写回 wecom 侧；mail 键原样保留。"""
+    from . import push_paths
+    clean = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        webhook = str(r.get("webhook") or "").strip()
+        clean.append({
+            "id": str(r.get("id") or "") or "",
+            "webhook": webhook,
+            "mention_all": _as_bool(r.get("mention_all"), False),
+            "send_file": _as_bool(r.get("send_file"), True),
+            "env_file": str(r.get("env_file") or DEFAULT_ENV_FILE),
+        })
+    push_paths.ensure_ids(clean)
+    data = push_paths.load_raw(root)
+    data["wecom"] = clean
+    if not isinstance(data.get("mail"), list):
+        data["mail"] = []
+    return push_paths.save(data, root)
+
+
+def describe_wecom_paths(cfg: dict, root=None) -> dict:
+    """给设置页：路径列表。**webhook 只回打码 key**。"""
+    paths = []
+    for pid, wc in load_wecom_paths(cfg, root):
+        paths.append({
+            "id": pid or "legacy",
+            "webhook_key": mask_key(wc.key),
+            "has_webhook": bool(wc.key),
+            "webhook_hint": ("已配置（%s）" % mask_key(wc.key)) if wc.key else "",
+            "ready": wc.ready,
+            "problems": wc.problems(),
+        })
+    return {
+        "paths": paths,
+        "count": len(paths),
+        "ready_count": sum(1 for p in paths if p["ready"]),
+    }
+
+
 def describe_wecom(wc: WecomConfig) -> dict:
     """给界面看 —— **webhook 只回显打码后的 key**。"""
     return {
         "enabled": wc.enabled,
         "webhook_key": mask_key(wc.key),
         "has_webhook": bool(wc.key),
+        # when / mention_all / send_file：设置页已撤，字段仍给老调用方
         "when": wc.when,
         "mention_all": wc.mention_all,
         "send_file": wc.send_file,
@@ -136,18 +217,16 @@ def describe_wecom(wc: WecomConfig) -> dict:
     }
 
 
-def should_send(wc: WecomConfig, has_diff: bool,
+def should_send(wc: WecomConfig, has_diff: bool = True,
                 ignore_when: bool = False) -> tuple[bool, str]:
     """要不要发。
 
-    `ignore_when=True` 给 POS 那条用 —— POS **没有"差异"这个概念**，
-    「只有差异才发」那个开关是给报量排查的（用户 2026-09-16 定的：
-    POS 每次跑完都推当月分数）。
+    ⚠ 2026-09-22 设置改版：**不再看 `when` / `has_diff` / `ignore_when`**
+      （发送时机已从界面去掉，配了 webhook 就推）。三个参数**签名保留**
+      —— 业务侧各处还在传，别为了"干净"改调用点。
     """
     if not wc.enabled:
-        return False, "企微推送没开"
-    if wc.when == "only_diff" and not has_diff and not ignore_when:
-        return False, "配置的是「仅有差异时发」，本次无差异"
+        return False, "没有企微推送路径"
     bad = wc.problems()
     if bad:
         return False, "配置不全：" + "、".join(bad)
@@ -294,10 +373,20 @@ def upload_file(wc: WecomConfig, path) -> str:
     return mid
 
 
-def send_file(wc: WecomConfig, path) -> None:
-    media_id = upload_file(wc, path)
-    _check(_post(f"{API}/send?key={wc.key}", {"msgtype": "file", "file": {"media_id": media_id}}),
+def send_media_id(wc: WecomConfig, media_id: str) -> None:
+    """用**已经换好的** `media_id` 发文件（`send_file` 是"上传 + 发送"，这个只管后半截）。
+
+    ⚠ 存在的理由：有的模板要**先知道文件传没传上去、再决定正文怎么写**
+      （「库存盘点」那条要在尾部说清"群里也发了一份"）——
+      先传再发的话，`send_file(wc, path)` 会把同一次上传做两遍。
+    """
+    _check(_post(f"{API}/send?key={wc.key}",
+                 {"msgtype": "file", "file": {"media_id": media_id}}),
            "发文件")
+
+
+def send_file(wc: WecomConfig, path) -> None:
+    send_media_id(wc, upload_file(wc, path))
 
 
 def push(wc: WecomConfig, ctx: dict, missing: list, unshipped: list,
@@ -342,14 +431,14 @@ def build_pools_markdown(ctx: dict, lines, headline: str) -> str:
             body.append("%s%s%s" % (_WARN_OPEN, ln, _WARN_CLOSE))
         else:
             body.append(ln)
-    return ("## %s 四池对账\n**%s**\n\n%s\n"
+    return ("## %s 双平台数据对比\n**%s**\n\n%s\n"
             "<font color=\"comment\">AD=玲珑报了、云商没报 ｜ BC=云商报了、玲珑没报"
             "</font>" % (store, headline, "\n".join(body)))
 
 
 def push_pools(wc: WecomConfig, ctx: dict, lines, headline: str,
                xlsx=None) -> str:
-    """推四池对账这一条（摘要 + 可选清单附件）。
+    """推双平台数据对比这一条（摘要 + 可选清单附件）。
 
     ⚠ **和 POS 不同，这条是"有活要干"** —— 门店要拿 BC 去补报量、催云商出 AD。
     所以它跟报量排查同一性质，不是月度指标。
@@ -370,6 +459,36 @@ def push_pools(wc: WecomConfig, ctx: dict, lines, headline: str,
     return "、".join(sent)
 
 
+def build_attain_markdown(ctx: dict, lines, headline: str) -> str:
+    """销售达成的推送正文 —— 和 POS / 双平台**分开三条**。
+
+    ⚠ 和 POS **故意相同、和报量排查故意不同**的三条：
+      1. **不 @人**（它是"本周成绩"，不是"今天有活要干"；
+         天天 @所有人 会被门店屏蔽，连带把真正要紧的报量排查也屏蔽掉）；
+      2. **不受「只有差异才推」约束** —— ⚠ 这条对达成尤其要紧：
+         达成**每天都有数，可能就是 0%**，而"0%"恰恰是最该推的那条，
+         判成"没差异、不推"就正好把最该看的那条吞了；
+      3. **不带附件** —— 明细在控制台那一页上看，发个 xlsx 到群里没人开。
+
+    企微 markdown 不支持表格，所以用 `> 引用行` 排版（和 POS 一个路子）。
+    """
+    store = ctx.get("门店", "?")
+    out = [f"## 销售达成 · {store}", f"**{headline}**", ""]
+    for ln in lines:
+        out.append(f"> {ln.strip()}")
+    out.append(f"\n<font color=\"comment\">口径：零售/分销/退货按台量合计（退货已是负数），"
+               f"演示机与体验机剔除、串号标识为「外调」的剔除；单项达成率封顶 120%，"
+               f"总达成率 = 各产品列按占比加权。\n"
+               f"cbg-reconcile 自动发送 · {ctx.get('生成时间', '')}</font>")
+    return _fit("\n".join(out))
+
+
+def push_attain(wc: WecomConfig, ctx: dict, lines, headline: str) -> str:
+    """推销售达成这一条（M5）。**和 POS 一样不 @人、不附附件。**"""
+    send_markdown(wc, build_attain_markdown(ctx, lines, headline))
+    return "已发销售达成摘要"
+
+
 def push_pos(wc: WecomConfig, ctx: dict, lines, headline: str) -> str:
     """推 POS 合规这一条。**和报量排查完全分开**（用户 2026-09-16 定的）。
 
@@ -384,6 +503,60 @@ def push_pos(wc: WecomConfig, ctx: dict, lines, headline: str) -> str:
     """
     send_markdown(wc, build_pos_markdown(ctx, lines, headline))
     return "已发 POS 合规摘要"
+
+
+def build_stock_markdown(ctx: dict, lines, headline: str) -> str:
+    """**库存盘点**的推送正文（M16）—— 和另外四条**分开**。
+
+    ⚠ 和 POS / 达成**故意相同**的两条，别顺手改：
+
+    1. **不 @人**。这一条是门店**自己盘完点按钮**发出来的，不是"系统发现了新问题
+       在催你" —— @所有人会让人把它当噪音，连带把真正要紧的报量排查一起屏蔽；
+    2. **不受「只有差异才推」约束**（`has_diff` 那个开关是给报量排查的）：
+       用户点了「导出并推送」就是要发，被挡掉才莫名其妙。
+
+    ⚠ **文件要不要发到群里，跟双平台对比一个规矩**（受 `wc.send_file` 控制）——
+      原来我把这条做成"只发摘要"，是 2026-09-21 用户指出来的：
+      「推送没问题，**但是没有文件**ok嘛」。盘点清单门店是要拿去对货的，
+      没有文件等于只给了个数字。
+
+    ⚠ 尾部那句"文件在哪"**按事实写**（`ctx["附件说明"]`）：
+      邮件没配好/没发出去、或者群文件没传上去时还写"见附件"就是骗人 ——
+      而门店会照着去找。
+    """
+    store = ctx.get("门店", "?")
+    out = [f"## 库存盘点 · {store}", f"**{headline}**", ""]
+    for ln in lines:
+        out.append(f"> {ln.strip()}")
+    tail = ctx.get("附件说明") or "完整清单（7 张表）以导出的 xlsx 为准"
+    out.append(f"\n<font color=\"comment\">{tail}\n"
+               f"cbg-reconcile 自动发送 · {ctx.get('生成时间', '')}</font>")
+    return _fit("\n".join(out))
+
+
+def push_stock(wc: WecomConfig, ctx: dict, lines, headline: str, xlsx=None) -> str:
+    """推库存盘点的汇总这一条（M16）—— **摘要 + 清单文件**（文件受 `wc.send_file` 控制）。
+
+    ⚠ **先传文件、再发摘要**：这样尾部那句"群里也发了一份"是**按事实**写的。
+      反过来的话，正文说完"在下面那个文件里"、文件却传失败，门店会去翻一个不存在的东西。
+    ⚠ 文件传失败**不连累摘要**：摘要本身有用（未扫到几台、表外几个），
+      照发，只在尾部说明"群里那份没传上去"。
+    """
+    ctx = dict(ctx or {})
+    media = ""
+    if wc.send_file and xlsx:
+        try:
+            media = upload_file(wc, xlsx)
+        except WecomError as e:
+            ctx["附件说明"] = "%s（群里那份文件没传上去：%s）" % (ctx.get("附件说明") or "", e)
+    if media:
+        ctx["附件说明"] = "%s；**群里也发了一份**（见下面那个文件）" % (ctx.get("附件说明") or "")
+    send_markdown(wc, build_stock_markdown(ctx, lines, headline))
+    sent = ["已发摘要"]
+    if media:
+        send_media_id(wc, media)
+        sent.append("已发清单文件")
+    return "、".join(sent)
 
 
 def test_push(wc: WecomConfig) -> str:

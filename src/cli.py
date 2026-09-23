@@ -24,14 +24,15 @@ from . import (autostart, browser, config_io, lockfile, mailer, runtime,
 from .cbg import CbgClient, CbgError
 from .erp import (ErpCaptchaRequired, ErpClient, ErpError, describe_credentials,
                   effective_env_file, load_credentials)
+from .modules import auth, notify
 import json
 import sqlite3
 
+from .paths import ROOT
 from .reconcile import classify_sales, reconcile, sn_row_index
 from .report import summary_lines, write_report
 from .session import CbgAuthError, CbgSession
 
-ROOT = Path(__file__).resolve().parent.parent
 #: 每月**头几天**顺带把上个月的云商销售重拉一遍。
 #:
 #: ⚠ 为什么需要：9-30 21:00 那趟跑完之后又录进去的销售，**只拉当月是永远补不到的**
@@ -48,6 +49,11 @@ DEFAULT_CONFIG = "config/store-SCN231409.yaml"
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
 EXIT_OK, EXIT_AUTH, EXIT_FETCH, EXIT_DIFF, EXIT_INTERNAL = 0, 1, 2, 3, 9
+
+#: **命令写错了**（不是跑失败）—— `daily` 忘了点名 `--steps`、点了不认识的步骤都走它。
+#: ⚠ 数**故意**跟 `EXIT_FETCH` 一样是 2：argparse 自己的用法错误就是 2，
+#:   把它们分开命名只是为了让读代码的人一眼看出"这不是取数失败"。
+EXIT_USAGE = 2
 
 
 def browser_profile(cfg: dict) -> Path:
@@ -75,25 +81,55 @@ def load_config(path: str | Path, root=None) -> dict:
 
     stores_doc = yaml.safe_load((base / "config" / "stores.yaml").read_text(encoding="utf-8"))
     stores = stores_doc.get("stores") or []
-    cfg["_experience"] = {s["erp_name"] for s in stores if s.get("erp_name")}
-    cfg["_experience_markers"] = {s["marker"] for s in stores if s.get("marker")}
+    # ⚠ **只收体验店**（`kind == 体验店`）—— 名单 2026-09-18 从 14 家扩到 29 家，
+    #   但「其他体验店卖出(调拨处理)」那条跳过说的是"**体验店之间**走调拨"，
+    #   把 14 家合作店也算进去，它们的销售会被当成调拨跳过 —— 那是**改行为**，
+    #   不是加数据。所以这里按 `kind` 过滤，扩名单前后行为完全一致。
+    #
+    #   `kind` 缺省的按**体验店**算：老版本写下的名单没有这个字段，
+    #   而那时能进名单的**本来就只有**体验店（14 家全带串号标识）。
+    def _is_experience(s):
+        return (s.get("kind") or "体验店") == "体验店"
+
+    cfg["_experience"] = {s["erp_name"] for s in stores
+                          if s.get("erp_name") and _is_experience(s)}
+    cfg["_experience_markers"] = {s["marker"] for s in stores
+                                  if s.get("marker") and _is_experience(s)}
     cfg["_non_store_markers"] = set(stores_doc.get("non_store_markers") or ())
     doc_types = stores_doc.get("doc_types") or {}
     cfg.setdefault("check", {})
     cfg["check"].setdefault("include_doc_types", doc_types.get("include") or [])
     cfg["check"].setdefault("exclude_doc_types", doc_types.get("exclude") or [])
 
+    # ⚠ 判据是**整份名单**，不是 `_experience`（那里面只有体验店）。
+    #   2026-09-18：名单从 14 家扩到 29 家（15 体验店 + 14 合作店）之后，
+    #   拿 `_experience` 判会把**每一家合作店**都报成"不在名单里"——
+    #   而合作店不在调拨规则里本来就是对的，那条警告纯属噪音。
     own = cfg.get("erp_store_name")
-    if own and own not in cfg["_experience"]:
-        print(f"[警告] {own!r} 不在 config/stores.yaml 的体验店名单里 —— "
-              f"「其他体验店卖出跳过」这条规则会对它失效，请补进名单。", file=sys.stderr)
+    if own and own not in {s["erp_name"] for s in stores if s.get("erp_name")}:
+        print(f"[警告] {own!r} 不在 config/stores.yaml 的门店名单里 —— "
+              f"匹配不到华为编码和串号标识，请把这家店补进名单。", file=sys.stderr)
     return cfg
 
 
+def store_profile_of(cfg: dict) -> dict:
+    """这台机器是哪家店、要不要玲珑 —— `cli` 这边的入口。
+
+    ⚠ 只是一层转发，真逻辑在 `config_io.store_profile` ——
+      **全项目只有那一处判断**（`run_daily` / 门禁 / 菜单都靠它）。
+      各写一份的话，迟早出现"菜单里藏了但任务还在跑"这种自相矛盾。
+    """
+    return config_io.store_profile(cfg, ROOT)
+
+
 def session_path(cfg: dict) -> Path:
-    rel = (cfg.get("session") or {}).get("file") or f".secrets/cbg-{cfg.get('store_code') or 'default'}.json"
-    p = Path(rel)
-    return p if p.is_absolute() else ROOT / p
+    """华为会话文件路径 —— **口径在 `modules/auth`**，这里只是入口层的名字。
+
+    ⚠ 留这个薄转发（而不是各处直接 `auth.session_path`）是为了保住一个**接缝**：
+      `tests/test_data_state.py` 等地方 `mock.patch.object(cli, "session_path")`，
+      本文件里的调用点查的就是这个名字。实现只有一份，转发不算第二份真相。
+    """
+    return auth.session_path(cfg)
 
 
 def make_client(cfg: dict, verbose=False) -> CbgClient:
@@ -472,6 +508,20 @@ def _run_check(args, cfg: dict) -> int:
     return EXIT_OK if res.ok else EXIT_DIFF
 
 
+"""差异推送 / 邮件推送 —— **该不该推在这儿判，发出去走 `modules.notify`**。
+
+用户 2026-09-19 划的分工：「**该不该推交给业务模块**，推送模块就只管接收
+推送渠道编码和推送内容，然后推送出去，以及记录各个推送渠道」。
+
+⇒ 所以下面这些 `should_send` / `--no-push` 判断**留在原处**（这是业务口径），
+  但真正发出去那一步改走 `notify.send(渠道编码, 内容)` —— 它会在 `run_record`
+  里记一笔（`notify:wecom` / `notify:mail`），"上次推成没成"于是看得见。
+
+⚠ 还没搬的那半：这两个函数**是业务逻辑，却住在入口层**（`cli.py`）——
+  和 `app/pos.py` 那条链一样的搬法（搬到 `app/` 去），等它们有第二个调用方时再动。
+"""
+
+
 def _maybe_wecom(cfg: dict, args, ctx: dict, report_path, res) -> None:
     if getattr(args, "no_push", False):
         print("\n[6/6] 企微：已用 --no-push 跳过")
@@ -487,16 +537,18 @@ def _maybe_wecom(cfg: dict, args, ctx: dict, report_path, res) -> None:
         print(f"\n[6/6] 企微：跳过（{why}）")
         return
 
-    try:
-        what = wecom.push(wc, ctx, res.missing, res.reverse_unshipped,
-                          matched=len(res.matched),
-                          total=len(res.matched) + len(res.missing),
-                          report_path=report_path)
-    except wecom.WecomError as e:
-        print(f"\n[6/6] 企微：❌ 推送失败 —— {e}", file=sys.stderr)
+    r = notify.send("wecom", {"template": "report", "ctx": ctx,
+                              "missing": res.missing,
+                              "reverse_unshipped": res.reverse_unshipped,
+                              "matched": len(res.matched),
+                              "total": len(res.matched) + len(res.missing),
+                              "report_path": report_path},
+                    cfg=cfg, root=ROOT)
+    if not r["ok"]:
+        print(f"\n[6/6] 企微：❌ 推送失败 —— {r['why']}", file=sys.stderr)
         print("      （对账本身是成功的，退出码不受影响）", file=sys.stderr)
         return
-    print(f"\n[6/6] 企微：✅ {what}")
+    print(f"\n[6/6] 企微：✅ {r['why']}")
 
 
 def _maybe_mail(cfg: dict, args, ctx: dict, lines: list, report_path, res) -> None:
@@ -516,14 +568,15 @@ def _maybe_mail(cfg: dict, args, ctx: dict, lines: list, report_path, res) -> No
 
     subject, body = mailer.build_report_mail(ctx, lines, len(res.missing),
                                              len(res.reverse_unshipped))
-    try:
-        mailer.send(mc, subject, body, [report_path])
-    except mailer.MailError as e:
+    r = notify.send("mail", {"subject": subject, "body": body,
+                             "attachments": [str(report_path)]},
+                    cfg=cfg, root=ROOT)
+    if not r["ok"]:
         # 对账结果是主产物，邮件只是投递方式 —— 邮件挂了要大声说，但别把整件事判成失败
-        print(f"\n[5/6] 邮件：❌ 发送失败 —— {e}", file=sys.stderr)
+        print(f"\n[5/6] 邮件：❌ 发送失败 —— {r['why']}", file=sys.stderr)
         print("      （对账本身是成功的，退出码不受影响）", file=sys.stderr)
         return
-    print(f"\n[5/6] 邮件：✅ 已发送到 {'、'.join(mc.recipients)}")
+    print(f"\n[5/6] 邮件：✅ {r['why']}")
 
 
 # ---------------------------------------------------------------------- main
@@ -586,6 +639,49 @@ def cmd_erp_login(args) -> int:
     who = f"：{r['who']}" if r.get("who") else ""
     print(f"✅ 登录成功{who}")
     print(f"   token {d['token']} 已写入 {d['env_file']}")
+    return EXIT_OK
+
+
+def cmd_mail_key_new(args) -> int:
+    """生成一把邮件附件加密的密钥（**只在打包那台机器上跑**）。
+
+    用户 2026-09-21：「解密密钥**随着大版本的安装包走，不进入小版本推包**」
+    ⇒ 这条链是：**这儿生成** → `tools/build_package.sh` 把它拷进包根 →
+    门店双击 `install.bat` 时由 `bootstrap._seed_mail_key()` 播进 `.secrets/` →
+    `.secrets/` 在自更新的 `NEVER_TOUCH` 里 ⇒ **之后升级永远不动它**。
+
+    ⚠ 门店机器上**不用跑这个** —— 它们的密钥是装包时播下来的。
+    ⚠ 生成之后**别再改**：改一把发出去的密钥 = 换密钥 = 所有老包解不开
+      （`pending/` 里压着的、邮箱里的老邮件都算）。
+    """
+    from . import mailcrypto
+    got = mailcrypto.new_key(ROOT, key_id=getattr(args, "key_id", "") or "",
+                             note=getattr(args, "note", "") or "")
+    if not got.get("ok"):
+        print(f"❌ {got.get('why')}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"✅ 生成密钥 {got['key_id']} → {got['path']}")
+    print()
+    print("下一步：打正式包时 tools/build_package.sh 会把它塞进包根（mail-key.json），")
+    print("       门店装包时由 bootstrap 播进 .secrets/，之后自更新不会动它。")
+    print("⚠ 这把密钥**不要提交进仓库**（仓库是公开的）—— .gitignore 已经挡住。")
+    return EXIT_OK
+
+
+def cmd_mail_key_show(args) -> int:
+    """看邮件附件加密的密钥状态 —— ⚠ **不打印密钥本体**（它会进日志/截图）。"""
+    from . import mailcrypto
+    d = mailcrypto.describe(ROOT)
+    print(f"密钥文件：{d['path']}")
+    if d.get("ok"):
+        print(f"当前密钥：{d['key_id']}"
+              f"（本机共 {len(d.get('keys') or [])} 把：{'、'.join(d.get('keys') or [])}）")
+        print("走邮件渠道的推送，附件都会用它加密（正文照旧是明文，能直接看）。")
+    else:
+        print(f"⚠️ 没有可用的密钥：{d.get('why')}")
+        print("   ⇒ 邮件附件会**明文发出去**，正文末尾会写一行说明。")
+        print("   ⇒ 3.0.0 之前的机器靠自更新升上来时就是这样：")
+        print("     把带密钥的完整安装包再拷一次、双击 install.bat。")
     return EXIT_OK
 
 
@@ -719,6 +815,57 @@ def cmd_service_start(args) -> int:
     return EXIT_OK
 
 
+def selftest_data_lines(root=None) -> tuple:
+    """自检第 8 项的内容 —— 返回 `(要打印的行, 要不要记成失败)`。
+
+    ⚠ **只有"采集失败"才算失败**：`missing`（刚装完还没抓过）和 `stale`
+    （数据旧了）都是**信息**，不该让"装完自检"直接不通过 ——
+    门店第一次跑 selftest 时库里本来就是空的。
+    """
+    from .app import data_state as ds
+    from .storage import migrate as _mig
+    from .storage import db as _db
+    lines = []
+    # 结构版本（M15 / 阶段 3.6）—— 以前 `meta.schema` 写了没人读，现在它是权威
+    try:
+        db_path = ds._find_db(root or ROOT)
+        if db_path:
+            conn = _db.read_only(db_path)
+            try:
+                lines.append("结构：" + _mig.describe(_mig.status(conn)))
+            finally:
+                conn.close()
+    except Exception as e:                                     # noqa: BLE001
+        lines.append("结构：读不出来（%s: %s）" % (type(e).__name__, e))
+    st = ds.data_state(root or ROOT)
+    lines += ds.summary_lines(st)
+    failed = any(x["state"] == ds.FAILED for x in st["sources"])
+    if not failed and not st["ok"]:
+        lines.append("（都不算故障：没抓过 / 数据旧了，跑一次日常流程就好）")
+    # 第 8 项顺带一条：**周度目标那份腾讯文档读得到吗**（M2–M5 的数据源）。
+    # ⚠ 它**不算故障**：办公室周一早上可能还没改表、门店也可能断网 ——
+    #   这两件事都不该让"装完自检"不通过。但要**说清是网络还是文档**，
+    #   不然门店只会看到"销售达成那一页是空的"。
+    lines.append(_attain_doc_line())
+    return lines, failed
+
+
+def _attain_doc_line() -> str:
+    """腾讯文档读不读得到 —— 一句话（**只读一次、失败也算信息**）。"""
+    try:
+        from .features.sales.attain import attain as _attain
+        plan = _attain.read_plan(ROOT)
+    except Exception as e:                                     # noqa: BLE001
+        msg = str(e)
+        # 网络类错误单独说 —— 门店看到"读不到目标表"会以为表被删了
+        if any(k in msg for k in ("Timeout", "timed out", "Connection", "Max retries",
+                                  "getaddrinfo", "SSL", "ProxyError")):
+            return "周度目标：连不上腾讯文档（网络？）—— 销售达成那一步会跳过"
+        return "周度目标：读不到（%s）—— 销售达成那一步会跳过" % msg[:60]
+    return ("周度目标：%s（%s ~ %s，%d 家门店 %d 个产品列）"
+            % (plan.period, plan.start, plan.end, len(plan.stores), len(plan.columns)))
+
+
 def cmd_selftest(args) -> int:
     """逐项自检 —— selftest.bat 调这个（中文同样由 Python 输出）。"""
     import unittest
@@ -750,6 +897,26 @@ def cmd_selftest(args) -> int:
         print("  门店　 ⚠️ 没配全（store_code / erp_store_name）—— "
               "到控制台「设置 → 门店」里填")
         print("          ⚠️ 配错门店会对到别的店账上去，而且看起来一切正常")
+    # **区长分区体检**（2026-09-21 用户定的 B 方案：区长按**区域**圈店）——
+    # ⚠ 这一条盯的是"静默看不见"：区域名打错一个字，那个区长**一家店都看不到**，
+    #   而界面上只会显示"没有数据"，没人会想到是配置写错了。
+    # ⚠ 门店机器上通常没有区长名单 ⇒ 这一块一个字都不打印。
+    try:
+        _mgrs = config_io.managers_table(ROOT)
+        _probs = config_io.region_audit(ROOT) if _mgrs else []
+    except Exception:                                          # noqa: BLE001
+        _mgrs, _probs = [], []
+    if _mgrs:
+        if _probs:
+            print(f"  区长分区 ⚠️ {len(_mgrs)} 位区长，有 {len(_probs)} 条要处理：")
+            for _p in _probs:
+                print("          · " + _p)
+            if any("一家店都看不到" in _p for _p in _probs):
+                failures.append("区长分区配错（有区长一家店都看不到）")
+        else:
+            _regs = config_io.regions_of(config_io.stores_table(ROOT))
+            print(f"  区长分区 {len(_mgrs)} 位 · {len(_regs)} 个区（{'、'.join(_regs)}）"
+                  " —— 按区域圈店，没重没漏")
     # 门店电脑上可能是 3.14，也可能是 Win7 老机器的 3.8.10 —— 出问题时这一行能省很多来回。
     # ⚠ **两个都要打印**：现在跑着的这个，和安装时记下的那个。不一样就说明
     #   "双击 bat 用错 Python 了"，那是门店最常见的一类"装没成功"。
@@ -770,6 +937,25 @@ def cmd_selftest(args) -> int:
     else:
         print("  安装时用的 Python：没记录（双击 install.bat 会补上）")
     print(f"  系统　 {platform.system()} {platform.release()}")
+    # **邮件附件加密的密钥**（2026-09-21）—— 「密钥随大版本安装包走，不进小版本推包」，
+    # 而自更新（小版本推包）**不带它** ⇒ **靠自更新升上来的机器是没有密钥的**，
+    # 得人工把完整包再拷一次。⚠ 这件事必须**看得见**：不然门店升完只看到
+    # "附件怎么还是明文"，而没有任何地方说得清为什么。
+    # ⚠ 它**不算 failures**：附件不加密不影响对账；算成"自检失败"会让门店
+    #   以为程序坏了，跑去修一个没坏的东西（而真正该做的是重拷一次包）。
+    from . import mailcrypto as _mailcrypto
+    try:
+        _mk = _mailcrypto.describe(ROOT)
+    except Exception as _e:                                    # noqa: BLE001
+        _mk = {"ok": False, "why": "读不出来：%s" % _e, "key_id": "", "keys": []}
+    if _mk.get("ok"):
+        print(f"  邮件加密 密钥 {_mk['key_id']}"
+              f"（本机 {len(_mk.get('keys') or [])} 把）—— 走邮件的附件都会加密")
+    else:
+        print("  邮件加密 ⚠️ 没有密钥 —— 邮件附件**不会加密**（明文发出去）")
+        print(f"          {_mk.get('why') or ''}")
+        print("          3.0.0 之前的机器靠自更新升上来时就是这样：")
+        print("          把带密钥的完整安装包再拷一次、双击 install.bat 就有了。")
     import importlib.metadata as md
     for pkg in ("requests", "PyYAML", "openpyxl"):
         try:
@@ -841,12 +1027,75 @@ def cmd_selftest(args) -> int:
     print(f"  运行中：{got.get('host')}:{got['port']}" if got
           else "  没在跑（正常）—— 双击 start.bat 启动")
 
+    # ⚠ 中断的升级必须**在人看得见的地方**说出来：否则程序会静默跑在
+    #   "一半新一半旧"的代码上（这正是加 journal 要解决的事）。
+    head(7, "代码完整性")
+    from . import selfupdate
+    _lines = selfupdate.integrity_lines(ROOT)
+    if _lines:
+        for _ln in _lines:
+            print("  " + _ln)
+        failures.append("上次升级没走完")
+    else:
+        print("  正常（没有断在半路的升级）")
+
+    # ⚠ 五态里**只有"采集失败"算故障** —— 刚装完（missing）或数据旧了（stale）
+    #   都是信息。门店第一次跑自检时库里本来就是空的（M14 / 阶段 3.3）。
+    head(8, "数据能不能算")
+    _lines, _failed = selftest_data_lines(ROOT)
+    for _ln in _lines:
+        print("  " + _ln)
+    if _failed:
+        failures.append("有数据源采集失败")
+
     print()
     if failures:
         print("自检发现问题：" + "、".join(failures))
         print("照着上面的提示处理；搞不定就把这段输出发回来。")
         return EXIT_FETCH
     print("自检通过，可以开始用了。")
+    return EXIT_OK
+
+
+def cmd_update(args) -> int:
+    """升级 / 修复没走完的升级 —— **服务起不来时唯一还能用的那条路**。
+
+    不带参数：把现场念一遍（有没有断在半路的升级）。
+    """
+    from . import selfupdate
+    try:
+        if args.restore:
+            res = selfupdate.repair(ROOT, current=version.VERSION, mode="restore")
+            if not res.get("ok"):
+                print("❌ " + str(res.get("message") or "恢复失败"))
+                return EXIT_FETCH
+            print("✅ " + res["message"])
+            print("   现在双击 start.bat 启动控制台。")
+            return EXIT_OK
+        if args.repair:
+            res = selfupdate.repair(ROOT, current=version.VERSION)
+            print(f"✅ 重跑完成：v{res.get('to') or '?'}，"
+                  f"改了 {res.get('count') or 0} 个文件")
+            if res.get("removed"):
+                print(f"   清掉 {len(res['removed'])} 个旧文件（都在 "
+                      f"{res.get('backup') or '备份目录'} 里）")
+            print("   现在双击 start.bat 启动控制台。")
+            return EXIT_OK
+    except selfupdate.PartialUpdate as e:
+        print(f"❌ 又断在半路：{e}")
+        print("   现场还在，可以再跑一次 --repair，或者改用 --restore 退回上一版。")
+        return EXIT_FETCH
+    except selfupdate.UpdateError as e:
+        print(f"❌ {e}")
+        return EXIT_FETCH
+
+    lines = selfupdate.integrity_lines(ROOT)
+    if not lines:
+        print("没有没走完的升级。")
+        print("（平时升级在控制台「设置 → 检查更新」里点；命令行这条路是给"
+              "「服务起不来」准备的。）")
+        return EXIT_OK
+    print("\n".join(lines))
     return EXIT_OK
 
 
@@ -887,6 +1136,55 @@ def cmd_autostart(args) -> int:
     st = autostart.status(ROOT)
     print(f"现在：{'已注册' if st['installed'] else '未注册'}")
     return EXIT_OK if res.get("ok") else EXIT_FETCH
+
+
+#: 计划任务那份脚本留下的日志（`out/run.log`）—— 和 `schedule.LOG_NAME` 同一个文件名。
+#: ⚠ 写死在这儿而不是 import `schedule`：那个模块会 import 平台细节，
+#:   而这条命令要在**任何**平台上都能跑（包括没注册过任务的机器）。
+LOG_NAME = "run.log"
+
+
+def cmd_ensure_service(args) -> int:
+    """**确保服务在跑**（不在跑就拉起来）—— 系统计划任务现在只干这件事。
+
+    用户 2026-09-20 定的分工：**内置定时器负责干活**（它就在服务里，
+    到点自己叫醒各功能模块），系统计划任务**降级成兜底** ——
+    服务被关了 / 机器刚起来而自启没生效时，把它拉起来。
+
+    ⚠ 为什么不让计划任务继续直接跑 `daily`：
+      两边都会跑 ⇒ 一天两遍（云商不能并行登录，撞上就是四个域一起超时）。
+      "谁干活"只能有一个答案，现在是**服务里的定时器**。
+
+    ⚠ 已经在跑就直接退出（**退出码 0**）—— 这是"没事发生"，不是失败。
+    """
+    from . import service
+    got = service.find_running(ROOT)
+
+    # 往 out/run.log 留一行 —— 计划任务那边**只看得到这份日志**。
+    # ⚠ 原来这行是 bat 自己 echo 的（"run.bat launching"），现在判断"在不在跑"
+    #   要读状态文件 + 探接口，bat 干不了，所以连同这行痕迹一起搬进 Python。
+    def _trace(what: str) -> None:
+        try:
+            log = ROOT / "out" / LOG_NAME
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a", encoding="utf-8", errors="replace") as f:
+                f.write("[%s] ensure-service：%s\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), what))
+        except OSError:
+            pass
+
+    if got:
+        url = f"http://{got.get('host', '127.0.0.1')}:{got.get('port', 8787)}/"
+        print(f"服务已经在跑（{url}）—— 计划任务这一步什么都不用做。")
+        _trace("服务已经在跑，什么都不用做")
+        return EXIT_OK
+    print("服务没在跑 —— 拉起来（到点由服务里的定时器干活）。")
+    _trace("服务没在跑 —— 拉起来")
+    from .web import serve
+    # ⚠ 不 `open_browser=False` 的话，系统计划任务到点会**弹出浏览器窗口** ——
+    #   门店半夜看到浏览器自己开了，只会当成中毒。
+    serve(port=8787, host="127.0.0.1", open_browser=False, root=ROOT, config=args.config)
+    return EXIT_OK
 
 
 def cmd_serve(args) -> int:
@@ -991,7 +1289,18 @@ def report_bug(root, config_path, *, no_mail=False, no_push=False,
                         % bugreport._now().strftime("%Y-%m-%d %H:%M:%S"))
                 # ⚠ prefix="" ：主题自己带了 `[bug 上报]`，
                 #   再套一层 `[报量对账]` 会读成"对账邮件"
-                mailer.send(mc, subject, body, [path], prefix="")
+                # ⚠⚠ **改走 notify**（2026-09-21 接加密时改的）：邮件附件要在
+                #   **推送模块**里加密（`notify.seal_attachment`），而直接调
+                #   `mailer.send` 会**绕过加密** —— bug 包里恰恰带着业务数据
+                #   （串号 / 金额），正是该保护的那种。
+                #   ⚠ 顺带修掉一个真 bug：`_send_mail` 原来写的是
+                #   `content.get("prefix") or None`，`""` 会被吃掉 ⇒ 主题上
+                #   又套回 `[报量对账]`（直接调 mailer 时看不出来）。
+                res = notify.send("mail", {"subject": subject, "body": body,
+                                           "attachments": [path], "prefix": ""},
+                                  cfg=cfg, root=root)
+                if res.get("state") != notify.SENT:
+                    raise RuntimeError(res.get("why") or "发送失败")
                 out["mail"] = "✅ 已发到 %s" % "、".join(mc.recipients)
                 out["sent"].append("邮件")
         except Exception as e:                                 # noqa: BLE001
@@ -1091,7 +1400,7 @@ def _maybe_rebuild_db() -> None:
         for old, new in r["archived"]:
             print("    %s → %s" % (Path(old).name, Path(new).name))
         print("    确认没问题后可以自己删掉那些 `.%s-*` 文件。" % dbmigrate.SUFFIX)
-        print("    ⚠ 下一步「抓四池数据」会重新抓一遍 —— **第一次会很慢（几分钟）**，"
+        print("    ⚠ 下一步「抓取玲珑数据」会重新抓一遍 —— **第一次会很慢（几分钟）**，"
               "而且在那之前 POS 看板是空的。")
     elif not r.get("skipped"):
         print("⚠ 2.1.0 库重建没做成：%s（下次启动还会再试）" % r.get("reason"),
@@ -1130,10 +1439,20 @@ def cmd_daily(args) -> int:
     if args.days_ago is not None and not args.date:
         # ⚠ 显式给了 --date 就别再给 --days-ago：两个都传的话谁赢不确定
         argv += ["--days-ago", str(args.days_ago)]
-    for flag, on in (("--skip-dump", args.skip_dump),
-                     ("--skip-check", args.skip_check),
-                     ("--skip-pos", args.skip_pos),
-                     ("--skip-pools", getattr(args, "skip_pools", False)),
+    # ⚠ 这两个是**内置定时器那条路**的参数，必须原样转发 ——
+    #   漏了的话定时器派发出来的命令会变成"整批跑"，而且日志里看不出来。
+    for flag, val in (("--steps", getattr(args, "steps", "")),
+                      ("--wake-slot", getattr(args, "wake_slot", ""))):
+        if val:
+            argv += [flag, str(val)]
+    # ⚠ 老的 `--skip-*` **原样转发**（内层 `daily` 收下 → 提醒一句"它没用了" → 忽略）：
+    #   漏掉一个的话，老脚本里那个开关会在**这一层**就被拒（unrecognized arguments），
+    #   而门店看到的是"双击了一下，窗口一闪就没了"。
+    from .features.registry import step_flags as _step_flags
+    for _flag in _step_flags().values():
+        if getattr(args, _flag.lstrip("-").replace("-", "_"), False):
+            argv.append(_flag)
+    for flag, on in (("--skip-check", getattr(args, "skip_check", False)),
                      ("--no-mail", args.no_mail),
                      ("--no-push", args.no_push),
                      ("--no-refresh", args.no_refresh)):
@@ -1141,7 +1460,45 @@ def cmd_daily(args) -> int:
             argv.append(flag)
     if getattr(args, "verbose", False):
         argv.append("-v")
-    return run_daily.main(argv)
+    t0 = time.time()
+    rc = run_daily.main(argv)
+    # ⚠ 内置定时器那一趟：**在这儿记**（不在 `run_daily.main` 里）——
+    #   那边有好几个提前 return（第 1 步失败、合作店早退），
+    #   而"失败的那一趟"恰恰是最该记的：不记就会被每 30 秒重派一次。
+    if getattr(args, "wake_slot", ""):
+        run_daily.record_wake(getattr(args, "steps", ""), args.wake_slot, rc,
+                              seconds=time.time() - t0)
+    return rc
+
+
+def _record_fetch(kind: str, ok: bool, *, why: str = "", rows: int = 0,
+                  started=None, conn=None) -> None:
+    """记一次采集**尝试**（M14 / C 项的 3.2）—— **失败也记**。
+
+    ⚠ 以前失败时库里一行都不写 ⇒ "没跑"和"跑失败了"长得一模一样，
+    门店在界面上只会看到"还是昨天那份"（`out/pools-<年>.json` 只有成功才写）。
+
+    ⚠ **为什么埋在编排层（`cli`）而不是 `dump`/`pools` 内部**：那两个函数里
+    有六七处早期返回（没会话 / ping 不过 / 窗口定不了…），挨个埋点必漏；
+    而"什么时候算一次尝试"本来就是编排的事。
+
+    ⚠ **绝不抛**：记不上不能影响抓取本身（跟 `startup` 那套一个道理）。
+    """
+    from . import dump as dumpmod
+    from .app import data_state as ds
+    try:
+        own = conn is None
+        if own:
+            db = _find_pos_db() or dumpmod.year_db(ROOT / "out", datetime.date.today().year)
+            conn = dumpmod.connect(str(db))
+        try:
+            ds.record_attempt(conn, kind, ok, why=why, rows=rows,
+                              started_at=started, finished_at=datetime.datetime.now(CST))
+        finally:
+            if own:
+                conn.close()
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def cmd_dump(args) -> int:
@@ -1180,153 +1537,211 @@ def cmd_dump(args) -> int:
         argv.append("--all")
     else:
         argv += ["--month", args.month or "current"]
-    rc = dumpmod.main(argv)
+    _t0 = datetime.datetime.now(CST)
+    try:
+        rc = dumpmod.main(argv)
+    except Exception as e:                                     # noqa: BLE001
+        _record_fetch("dump", False, why="%s: %s" % (type(e).__name__, e), started=_t0)
+        raise
+    _record_fetch("dump", rc == 0,
+                  why="" if rc == 0 else "退出码 %d（看上面的报错）" % rc, started=_t0)
     if rc != 0:
         # ⚠ 华为没抓到就**不再往下抓** —— 保持"第 1 步失败 → 整条流程中止"的语义，
         #   免得后面对着一份半新不旧的库算对账。
         return rc
 
-    # 顺手把另外三个池子也拉了 —— **这一步现在叫「抓四池数据」**：
-    #   池A = 刚抓的华为订单；池B/C/D 在这里补齐。
+    # 顺手把**玲珑那边**的池子也拉了（池A = 刚抓的华为订单，池B = 玲珑在库）。
+    #
+    # ⚠⚠ 2026-09-20 **改过**（用户：「数据抓取再加个**云商数据定时抓取**吧」）：
+    #   **云商那两个池子（池C 销售 / 池D 在库）挪去 `erp-dump` 了** ——
+    #   它们跟玲珑是两件独立的事，各自要能单独设时间、单独开关。
+    #   原来是"顺手"一起拉的，界面上看不出来，也没法"只重抓云商"。
     #   ⚠ 只有 `--fetch` 时 `cmd_pools` 才**只抓不算**（不算象限、不推送）——
-    #   对账和推送是第 4 步的事。
+    #   对账和推送是后面那几步的事。
     print()
-    print("— 顺带抓另外三个池子（玲珑在库 / 云商在库 / 云商销售）—")
+    print("— 顺带抓玲珑在库（池B）—")
     return cmd_pools(argparse.Namespace(
-        config=args.config, fetch=["lg-stock", "erp-stock", "erp-sales"],
+        config=args.config, fetch=["lg-stock"],
         start="", end="", date="", days_ago=0,
         no_refresh=True, no_push=True, no_mail=True,
         verbose=getattr(args, "verbose", False)))
+
+
+def cmd_erp_dump(args) -> int:
+    """**抓云商数据**（池D 云商在库 + 池C 云商销售）→ 同一个库。
+
+    用户 2026-09-20：「数据抓取再加个**云商数据定时抓取**吧」——
+    这一步以前是**混在 `dump` 里顺手做**的（`cmd_dump` 末尾那段），
+    现在拆出来：能在「定时器设置」里单独设时间、单独开关，
+    也能单独跑一次（`python -m src.cli erp-dump`）。
+
+    ⚠ 跟 `dump` 一样**只抓不算**（`fetch=[...]` + `--no-push --no-mail`）：
+    算象限和推送是「双平台数据对比」那一步的事。
+    """
+    print("— 抓云商数据（云商在库 池D / 云商销售 池C）—")
+    rc = cmd_pools(argparse.Namespace(
+        config=args.config, fetch=["erp-stock", "erp-sales"],
+        start="", end="", date="", days_ago=0,
+        no_refresh=True, no_push=True, no_mail=True,
+        verbose=getattr(args, "verbose", False)))
+    # ⚠⚠ **两个池各报各的**（用户 2026-09-21 问过：「为啥显示失败但是数据刷新了」）——
+    #   这一步是"在库 + 销售"两件事，**一个成一个败时整步算失败**，
+    #   但成功那个池的数据**已经落库了**。不写清的话，日志只有一句"失败"，
+    #   看起来像"什么都没更新"（实际上池D 更新了）。
+    try:
+        from .app import data_state as _ds
+        st = {x["key"]: x for x in _ds.data_state(ROOT).get("sources", [])}
+        for key, label in (("erp-stock", "池D 云商在库"), ("erp-sales", "池C 云商销售")):
+            one = st.get(key) or {}
+            ok = one.get("state") == "ok"
+            print("   %s %s：%s%s" % ("✓" if ok else "✗", label,
+                                      one.get("state_label") or "?",
+                                      "" if ok else "（%s）" % (one.get("why") or "")))
+    except Exception as e:                                     # noqa: BLE001
+        print("   （两个池各自的状态没读出来：%s: %s）" % (type(e).__name__, e))
+    if rc != 0:
+        print("   ⚠ 整步算失败（后面那几步要用**这两个池**）——"
+              "但上面 ✓ 的那个池**数据已经更新了**，✗ 的那个没进来。")
+    return rc
+
+
+def cmd_autoupdate(args) -> int:
+    """**自动更新**（定时器每小时叫醒的那一步）。
+
+    用户 2026-09-20：「健康模块默认注册一个自动更新，**固定一个小时执行一次**」。
+
+    ⚠ 这里只是"命令行入口"，判断和动手都在 `modules/health/auto_update()`：
+      查新版本 → 过策略（`update_plan`：健康 + 今天那趟跑完 + 没有半截升级）→
+      铺代码 → 起小助手重启服务。
+    ⚠ **没有新版本是绝大多数情况**（一天 24 次里 23 次都是）—— 那时候要安静地退 0，
+      不能报错、也不能刷一堆日志。
+    """
+    from .modules import health
+    res = health.auto_update(ROOT, version.VERSION, emit=print)
+    if res.get("action") == "updated":
+        print("自动更新：%s" % res.get("why"))
+        return EXIT_OK
+    if res.get("ok"):
+        # 已经是最新 / 策略说等等 —— 都不是错
+        return EXIT_OK
+    print("❌ 自动更新没跑成：%s" % (res.get("why") or "未知原因"), file=sys.stderr)
+    return EXIT_FETCH
 
 
 def cmd_pos(args) -> int:
     """算 POS 合规率 → 落 `out/pos-<年>.json`（**看板只读它，不现场算**）。
 
     算完**单独推一条** POS 合规（和报量排查分开两条）——
-    见 `_maybe_pos_push`。用 `--no-push --no-mail` 可以只算不发。
+    见 `app.pos.notify`。用 `--no-push --no-mail` 可以只算不发。
+
+    ⚠ 真正的活在 **`src/app/pos.py`** 里（阶段 2 / B 项试点）：这里只管
+    「参数 → 执行 → 退出码」。`daily` 和控制台走的是**同一个**执行模块，
+    所以"手动跑出 44.7%、daily 跑出别的"这类不一致从结构上就不可能。
     """
-    from . import pos_report
-    db = Path(args.db) if args.db else _find_pos_db()
-    if not db or not db.is_file():
-        print("❌ 没找到订单库（out/cbg-<年>.db）\n   先抓一次：python -m src.cli dump",
-              file=sys.stderr)
+    from .app import pos as pos_app
+    res = pos_app.run(db=getattr(args, "db", "") or "",
+                      config_path=getattr(args, "config", None),
+                      no_push=getattr(args, "no_push", False),
+                      no_mail=getattr(args, "no_mail", False),
+                      emit=print)
+    if not res.ok:
+        print(f"❌ {res.why}\n   先抓一次：python -m src.cli dump", file=sys.stderr)
         return EXIT_FETCH
-    from . import pos_metric as pm
-    conn = sqlite3.connect(str(db))
-    conn.row_factory = sqlite3.Row
-    orders, returns = pos_report.load(conn)
-    conn.close()
-
-    months = pm.months_of(orders, returns)
-    # ⚠ 「暂定」：口径是「退货在退货当月扣减」⇒ **前一个月的分数还会被这个月的退货改**。
-    #   所以最近两个月标暂定，免得两个月后有人拿旧报表对不上账。
-    def provisional(m):
-        return m >= months[-2] if len(months) >= 2 else True
-
-    rows = []
-    for m in months:
-        row = {"month": m, "provisional": provisional(m)}
-        for by in pm.BOTH:
-            cur = pm.score_month(orders, returns, m, by)
-            ap = pm.score_month(orders, returns, m, by, exclude_team=True)
-            row[by] = {"den": round(cur.den, 2), "num": round(cur.num, 2), "rate": cur.rate,
-                       "orders": cur.orders, "cut_den": round(cur.cut_den, 2),
-                       "ap_den": round(ap.den, 2), "ap_num": round(ap.num, 2), "ap_rate": ap.rate}
-        rows.append(row)
-
-    year = int(months[-1][:4]) if months else datetime.datetime.now(CST).year
-    out = ROOT / "out" / ("pos-%d.json" % year)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    try:                                    # 库路径写成相对 ROOT 的，别把开发机绝对路径带进落盘
-        db_rel = str(db.relative_to(ROOT))
-    except ValueError:
-        db_rel = str(db)
-    out.write_text(json.dumps({
-        "generated_at": datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
-        "year": year, "db": db_rel, "orders": len(orders), "returns": len(returns),
-        "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"POS 合规 → {out}")
-    for row in rows:
-        la = row[pm.BY_LABEL]
-        f = lambda v: "  —  " if v is None else "%5.2f" % v     # 分母为 0 时分数是 None，不是 0
-        print("  %s%s  按标签 %s%%（申诉后 %s%%）  分母 %s"
-              % (row["month"], "（暂定）" if row["provisional"] else "        ",
-                 f(la["rate"]), f(la["ap_rate"]), format(la["den"], ",.2f")))
-    _maybe_pos_push(getattr(args, "config", None), args, rows)
     return EXIT_OK
 
 
-def _pos_ctx(cfg: dict) -> dict:
-    """POS 推送的上下文 —— 字段名跟报量排查那边一致（`门店`/`生成时间`…），
-    这样 `wecom`/`mailer` 两套组装不用为"POS 版"再分一次支。
+def cmd_attain(args) -> int:
+    """算周度销售达成 → 落 `out/attain-<年>.json`（**看板只读它，不现场算**）。
+
+    ⚠ 真正的活在 `features/sales/attain/`（口径在 `metric.py`，纯函数）：
+      这里只管「参数 → 执行 → 退出码」，和 `cmd_pos` 一个形状。
     """
-    return {
-        "门店": cfg.get("erp_store_name") or cfg.get("store_code") or "?",
-        "华为门店编码": cfg.get("store_code") or "",
-        "串号标识": cfg.get("marker") or "",
-        "生成时间": datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
-        "配置文件": cfg.get("_path") or "",
-    }
+    from .features.sales.attain import attain as attain_mod
+    store = getattr(args, "store", "") or ""
+    if not store:
+        # 门店端只看自己那一行；办公室 / 平台岗看全区（M2–M5 设计 §5.3）
+        try:
+            cfg = load_config(args.config)
+            if config_io.store_profile(cfg, ROOT).get("type") != "platform":
+                store = cfg.get("erp_store_name") or ""
+        except SystemExit:
+            store = ""
+    res = attain_mod.run(db=getattr(args, "db", "") or "", root=ROOT,
+                         store_filter=store, config_path=args.config,
+                         no_push=getattr(args, "no_push", False),
+                         no_mail=getattr(args, "no_mail", False), emit=print)
+    if not res.get("ok"):
+        print(f"[销售达成] 没算成：{res.get('why')}", file=sys.stderr)
+        return EXIT_FETCH
+    return EXIT_OK
 
 
-def _maybe_pos_push(config_path, args, rows) -> None:
-    """POS 合规的**第二条推送** —— 和报量排查分开发（用户 2026-09-16 定的）。
+def cmd_plan(args) -> int:
+    """算**月度生意计划** → 落 `out/plan-<年>.json`（**看板只读它，不现场算**）。
 
-    ⚠ 这里**刻意不复用** `_maybe_mail` / `_maybe_wecom`：
-    那两条是围着 `ReconcileResult` 长的（missing / unshipped / xlsx 附件），
-    硬塞进 POS 只会长出一堆 `if`。共用的是**格式化**（`pos_report.notify_lines`）
-    和**发送**（`wecom.push_pos` / `mailer.build_pos_mail`）。
-
-    ⚠ 推送失败**不影响退出码** —— 分数是主产物，推送只是投递方式。
-    这条跟报量排查那边一个道理（那边也是这么写的）。
+    ⚠ 真正的活在 `features/plan/`（口径在 `monthly/metric.py`，纯函数）：
+      这里只管「参数 → 执行 → 退出码」，和 `cmd_pos` / `cmd_attain` 一个形状。
+    ⚠ 它算的是**全部 28 家店**（名单内）—— 按身份的过滤在**接口层**做，
+      不在这儿（落盘里只有本店的话，区长/平台那份还得再算一次）。
     """
-    if not config_path:
-        return
-    from . import pos_report          # 延迟 import：跟 `cmd_pos` 保持一致
-    if getattr(args, "no_push", False) and getattr(args, "no_mail", False):
-        print("\n[推送] POS：已用 --no-push --no-mail 跳过")
-        return
-    try:
-        cfg = load_config(config_path)
-    except Exception as e:                                    # noqa: BLE001
-        print(f"\n[推送] POS：⚠️ 配置读不出来（{e}），跳过")
-        return
-    ctx = _pos_ctx(cfg)
-    lines = pos_report.notify_lines(rows)
-    head = pos_report.headline(rows)
+    from .features.plan.monthly import plan as plan_mod
+    res = plan_mod.run(db=getattr(args, "db", "") or "", root=ROOT, emit=print)
+    if not res.get("ok"):
+        print(f"[月度生意计划] 没算成：{res.get('why')}", file=sys.stderr)
+        return EXIT_FETCH
+    return EXIT_OK
 
-    if not getattr(args, "no_push", False):
-        try:
-            wc = wecom.load_wecom_config(cfg, ROOT)
-            # ⚠ `ignore_when=True`：POS 没有"差异"概念，
-            #   「只有差异才推」那个开关是给报量排查的
-            ok, why = wecom.should_send(wc, has_diff=False, ignore_when=True)
-            if not ok:
-                print(f"\n[推送] POS 企微：跳过（{why}）")
-            else:
-                print(f"\n[推送] POS 企微：✅ {wecom.push_pos(wc, ctx, lines, head)}")
-        except Exception as e:                                # noqa: BLE001
-            print(f"\n[推送] POS 企微：❌ {e}", file=sys.stderr)
-            print("      （分数已经算好了，退出码不受影响）", file=sys.stderr)
 
-    if not getattr(args, "no_mail", False):
-        try:
-            mc = mailer.load_mail_config(cfg, ROOT)
-            ok, why = mailer.should_send(mc, has_diff=False)
-            if not ok:
-                print(f"[推送] POS 邮件：跳过（{why}）")
-            else:
-                subject, body = mailer.build_pos_mail(ctx, lines, head)
-                mailer.send(mc, subject, body, prefix=mailer.POS_SUBJECT_PREFIX)
-                print(f"[推送] POS 邮件：✅ 已发送到 {'、'.join(mc.recipients)}")
-        except Exception as e:                                # noqa: BLE001
-            print(f"[推送] POS 邮件：❌ {e}", file=sys.stderr)
-            print("      （分数已经算好了，退出码不受影响）", file=sys.stderr)
+def cmd_film(args) -> int:
+    """防护膜达成 —— 算一遍并落 `out/film.json` 快照（页面本身是现算的）。"""
+    from .features.valueadd.film import compute as film_compute
+    res = film_compute.run(root=ROOT, emit=print)
+    return EXIT_OK if res.get("ok") else EXIT_FETCH
+
+
+def cmd_report(args) -> int:
+    """**把当天新增上报给区长**（M18）—— 打包 + 发信 + 补发欠着的。
+
+    ⚠ 真正的活在 `app/report.py`：这里只管「参数 → 执行 → 退出码」，和 `cmd_pos` 一个形状。
+    ⚠ 手动跑这一条**不会**绕过渠道开关：邮件没开就明说"没发"（见那条模块注释第 2 条）。
+      要"只生成不发"用 `--dry-run`。
+    """
+    from .app import report as report_mod
+    res = report_mod.run(ROOT, config_path=args.config,
+                         date=getattr(args, "date", "") or "",
+                         no_push=getattr(args, "no_push", False),
+                         force=getattr(args, "force", False),
+                         dry_run=getattr(args, "dry_run", False), emit=print)
+    if res.get("skipped"):
+        print("[数据上报] 没发：%s" % res["skipped"], file=sys.stderr)
+        return EXIT_OK                       # 「没发」不是失败（渠道关着 / --no-push）
+    if not res.get("ok"):
+        print("[数据上报] 没发出去：%s" % (res.get("why") or "？"), file=sys.stderr)
+        return EXIT_FETCH
+    return EXIT_OK
+
+
+def cmd_report_inbox(args) -> int:
+    """**收门店上报**（M19）—— 读邮箱里的 `[CBG上报]` 附件 → 落 `in/report.db`。
+
+    ⚠ 这台机器没配收信（IMAP）就**跳过**（门店机器就是这样），退出码仍是 0：
+      "没配"和"收失败了"是两件事（后者要看得到）。
+    """
+    from .app import report_inbox as inbox_mod
+    res = inbox_mod.run(ROOT, config_path=args.config,
+                        limit=int(getattr(args, "limit", 0) or inbox_mod.SCAN),
+                        dry_run=getattr(args, "dry_run", False), emit=print)
+    if res.get("skipped"):
+        print("[收上报] 跳过：%s" % res["skipped"], file=sys.stderr)
+        return EXIT_OK
+    if not res.get("ok"):
+        return EXIT_FETCH
+    return EXIT_OK
 
 
 def cmd_pos_export(args) -> int:
     """出 POS 明细 Excel。"""
-    from . import pos_export
+    from .features.compliance.pos import pos_export
     db = Path(args.db) if args.db else _find_pos_db()
     if not db or not db.is_file():
         print("❌ 没找到订单库", file=sys.stderr)
@@ -1340,17 +1755,18 @@ def cmd_pos_export(args) -> int:
 
 
 def _find_pos_db():
-    """找 `out/` 里最新的那个 `cbg-<年>.db`。一年一个库，取年份最大的。"""
-    d = ROOT / "out"
-    if not d.is_dir():
-        return None
-    cands = sorted(d.glob("cbg-[0-9][0-9][0-9][0-9].db"))
-    return cands[-1] if cands else None
+    """找 `out/` 里最新的那个 `cbg-<年>.db`。一年一个库，取年份最大的。
+
+    ⚠ 实现在 `app.pos.find_db`（一个业务一份实现，别两处各写一遍）——
+    这里留个名字是因为 `cli.py` 自己（dump 那步判断"第一次跑"）和测试都在用它。
+    """
+    from .app.pos import find_db
+    return find_db(ROOT)
 
 
-# --------------------------------------------------------------------- 四池
+# --------------------------------------------------------------------- 双平台
 def _maybe_pools_push(cfg: dict, conn, xlsx, counts: dict, args) -> None:
-    """把四池对账推出去 —— 邮件 / 企微各一条，并**更新推送记忆**。
+    """把双平台数据对比推出去 —— 邮件 / 企微各一条，并**更新推送记忆**。
 
     ⚠ **不受「只有差异才推」约束**：没有差异时也推一条"都对得上"，
     否则门店分不清"今天没差异"和"今天压根没跑"（跟 POS 同一个理由）。
@@ -1371,10 +1787,10 @@ def _maybe_pools_push(cfg: dict, conn, xlsx, counts: dict, args) -> None:
     marks = pools_notify.annotate(sns, state) if sns else {}
     n_new = sum(1 for m in marks.values() if m.get("new"))
 
-    head = "四池对账：AD %d 台 / BC %d 台" % (counts["AD"], counts["BC"])
+    head = "双平台数据对比：AD %d 台 / BC %d 台" % (counts["AD"], counts["BC"])
     if sns:
         head += "，其中新出现 %d 台" % n_new
-    lines = P.notify_lines(conn, marks=marks) or ["本次没有差异 —— 四池都对得上。"]
+    lines = P.notify_lines(conn, marks=marks) or ["本次没有差异 —— 两边都对得上。"]
     has_diff = bool(counts["AD"] or counts["BC"])
     sent_ok = False
 
@@ -1383,13 +1799,16 @@ def _maybe_pools_push(cfg: dict, conn, xlsx, counts: dict, args) -> None:
             wc = wecom.load_wecom_config(cfg, ROOT)
             ok, why = wecom.should_send(wc, has_diff=has_diff, ignore_when=True)
             if not ok:
-                print("[推送] 四池企微：跳过（%s）" % why)
+                print("[推送] 双平台企微：跳过（%s）" % why)
             else:
-                print("[推送] 四池企微：✅ %s"
-                      % wecom.push_pools(wc, ctx, lines, head, xlsx=xlsx))
-                sent_ok = True
+                r = notify.send("wecom", {"template": "pools", "ctx": ctx,
+                                          "lines": lines, "head": head, "xlsx": xlsx},
+                                cfg=cfg, root=ROOT)
+                print("[推送] 双平台企微：%s %s" % ("✅" if r["ok"] else "❌", r["why"]),
+                      file=sys.stdout if r["ok"] else sys.stderr)
+                sent_ok = r["ok"]
         except Exception as e:                                # noqa: BLE001
-            print("[推送] 四池企微：❌ %s" % e, file=sys.stderr)
+            print("[推送] 双平台企微：❌ %s" % e, file=sys.stderr)
             print("      （清单已经算好了，退出码不受影响）", file=sys.stderr)
 
     if not getattr(args, "no_mail", False):
@@ -1397,15 +1816,18 @@ def _maybe_pools_push(cfg: dict, conn, xlsx, counts: dict, args) -> None:
             mc = mailer.load_mail_config(cfg, ROOT)
             ok, why = mailer.should_send(mc, has_diff=has_diff, ignore_when=True)
             if not ok:
-                print("[推送] 四池邮件：跳过（%s）" % why)
+                print("[推送] 双平台邮件：跳过（%s）" % why)
             else:
                 subject, body = mailer.build_pools_mail(ctx, lines, head, has_attach=True)
-                mailer.send(mc, subject, body, attachments=[str(xlsx)],
-                            prefix=mailer.POOLS_SUBJECT_PREFIX)
-                print("[推送] 四池邮件：✅ 已发送到 %s" % "、".join(mc.recipients))
-                sent_ok = True
+                r = notify.send("mail", {"subject": subject, "body": body,
+                                         "attachments": [str(xlsx)],
+                                         "prefix": mailer.POOLS_SUBJECT_PREFIX},
+                                cfg=cfg, root=ROOT)
+                print("[推送] 双平台邮件：%s %s" % ("✅" if r["ok"] else "❌", r["why"]),
+                      file=sys.stdout if r["ok"] else sys.stderr)
+                sent_ok = sent_ok or r["ok"]
         except Exception as e:                                # noqa: BLE001
-            print("[推送] 四池邮件：❌ %s" % e, file=sys.stderr)
+            print("[推送] 双平台邮件：❌ %s" % e, file=sys.stderr)
             print("      （清单已经算好了，退出码不受影响）", file=sys.stderr)
 
     if sent_ok:
@@ -1430,7 +1852,7 @@ def cmd_pools(args) -> int:
     池的定义和口径见 `src/pools.py` 顶部。这里只管**编排**：
     调哪个取数方法、落哪张表、什么时候轮转快照。
 
-    ⚠ **四池同库**（`out/cbg-<年>.db`，跟对账/POS 是同一个）——
+    ⚠ **同库**（`out/cbg-<年>.db`，跟对账/POS 是同一个）——
     对账时四张表直接 JOIN，不用 ATTACH。
     """
     from . import dump as dumpmod
@@ -1439,8 +1861,9 @@ def cmd_pools(args) -> int:
     db = _find_pos_db() or dumpmod.year_db(ROOT / "out", datetime.date.today().year)
     conn = dumpmod.connect(str(db))
     P.ensure(conn)
+    dumpmod._run_migrations(conn)      # 结构迁移（幂等，见 storage/migrate.py）
     # ⚠ 配置**只用来推送**（门店名 / 邮件 / 企微）—— 看状态时不该强依赖它：
-    #   没配置文件时"只看一眼四池"必须照样能用（只有 `--fetch` 才真需要配置）。
+    #   没配置文件时"只看一眼双平台"必须照样能用（只有 `--fetch` 才真需要配置）。
     try:
         cfg = load_config(args.config)
     except SystemExit:
@@ -1496,11 +1919,11 @@ def cmd_pools(args) -> int:
                         print("      %-12s %s" % (label, v))
 
         # 出 Excel + 推送 —— 明细就是**最后推给门店的那份**
-        xlsx, counts = P.export_xlsx(conn, db.parent / ("四池对账-%s.xlsx" % P.today()))
+        xlsx, counts = P.export_xlsx(conn, db.parent / ("双平台数据对比-%s.xlsx" % P.today()))
         print()
         print("清单已出：%s（AD %d 台 / BC %d 台）" % (xlsx, counts["AD"], counts["BC"]))
 
-        # 记一份到历史 —— 控制台「四池比对」页翻的就是它。
+        # 记一份到历史 —— 控制台「报量查询」页翻的就是它。
         # ⚠ 明细存 `details()` 的原样行（串号/机型/门店/单号都在），
         #   前端和 Excel 用同一份，不另排一遍。
         from . import pools_history as pools_hist
@@ -1515,16 +1938,28 @@ def cmd_pools(args) -> int:
 
     rc = 0
     for pool in args.fetch:
-        if pool == "lg-stock":
-            rc |= _fetch_lg_stock(cfg, conn, args)
-        elif pool == "erp-stock":
-            rc |= _fetch_erp_stock(conn, args)
-        elif pool == "erp-sales":
-            rc |= _fetch_erp_sales(conn, args)
-        else:
-            print("❌ 不认识的池：%s（可选：%s）" % (pool, " / ".join(P.POOLS)),
-                  file=sys.stderr)
-            return 2
+        # ⚠ 每个池各记一次**尝试**（成功失败都记）—— 池名就是 `data_state` 里的来源名，
+        #   两处对得上，"哪个池挂了"才判得出来（M14 的 C 项）。
+        _t0 = datetime.datetime.now(CST)
+        try:
+            if pool == "lg-stock":
+                one = _fetch_lg_stock(cfg, conn, args)
+            elif pool == "erp-stock":
+                one = _fetch_erp_stock(conn, args)
+            elif pool == "erp-sales":
+                one = _fetch_erp_sales(conn, args)
+            else:
+                print("❌ 不认识的池：%s（可选：%s）" % (pool, " / ".join(P.POOLS)),
+                      file=sys.stderr)
+                return 2
+        except Exception as e:                                 # noqa: BLE001
+            _record_fetch(pool, False, why="%s: %s" % (type(e).__name__, e),
+                          started=_t0, conn=conn)
+            raise
+        _record_fetch(pool, one == EXIT_OK,
+                      why="" if one == EXIT_OK else "退出码 %d" % one,
+                      started=_t0, conn=conn)
+        rc |= one
 
     purged = P.purge_snapshots(conn)
     hit = {k: v for k, v in purged.items() if v}
@@ -1625,8 +2060,25 @@ def _fetch_erp_sales(conn, args) -> int:
         return EXIT_FETCH
     w, sns, nosn = P.save_sales(conn, "erp-sales", rows)
     print("池C 云商销售 %s ~ %s：明细 %d 行 → 落库 %d 行"
-          "（拆出串号 %d，其中无串号原始行 %d —— 配件/礼品，对不了串号级）"
+          "（拆出串号 %d，无串号行 %d —— 贴膜/配件等，合成 nosn: 键落库，不进串号对账）"
           % (start, end, len(rows), w, sns, nosn))
+    # ⚠⚠ **只有这里能判"有没有多串号行"** —— `save_sales` 对"主串 空格 副串"的行会
+    #   **拆成多行、每行复制原行的金额与数量**（对账必须这么拆），而拆完的产物
+    #   跟"一单卖了两台同款同价"**在库里长得一模一样**，事后从 `erp_sales` 反推不出来。
+    #   2026-09-21 踩过：M22 一开始在 `plan` 侧写了条"同 (单号,商品编码,金额,数量)
+    #   出现多行 = 拆行"的体检，实测 **1028 行全是假阳性**（回源数据逐单核过：
+    #   源里就是两行、一行一个串号、卖了两只同价鼠标）⇒ 那条体检已删。
+    #   ⇒ **要判就在源头判**（这里才有原始行）。
+    _multi = 0
+    for _r in rows:
+        _parts = [x for x in str(_r.get("串号") or "").replace("，", " ").split()
+                  if len(x.strip()) >= 8]
+        if len(_parts) > 1:
+            _multi += 1
+    if _multi:
+        print("  ⚠ 有 %d 行的「串号」列挤了多个串号 —— 会被拆成多行，**每行都复制"
+              "原行的金额与数量**。对账要这么拆，但**按销售额/毛利汇总时那几行的钱"
+              "会重复**，要按 (单号, 商品编码) 先去重" % _multi)
     return 0
 
 
@@ -1662,6 +2114,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("mail-test", help="发一封测试邮件，验证 SMTP 配置")
     p.set_defaults(func=cmd_mail_test)
+
+    p = sub.add_parser("mail-key-new",
+                       help="生成邮件附件加密的密钥（**只在打包那台机器上跑**）")
+    p.add_argument("--key-id", default="", help="指定编号（默认自动排 m1 / m2 …）")
+    p.add_argument("--note", default="", help="备注，写进密钥文件备忘")
+    p.set_defaults(func=cmd_mail_key_new)
+
+    p = sub.add_parser("mail-key-show", help="看邮件附件加密的密钥状态（不打印密钥本体）")
+    p.set_defaults(func=cmd_mail_key_show)
 
     p = sub.add_parser("wecom-test", help="往企微群推一条测试消息，验证 webhook")
     p.set_defaults(func=cmd_wecom_test)
@@ -1701,6 +2162,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stop", help="停掉后台服务")
     p.set_defaults(func=cmd_stop)
 
+    # ⚠ 存在的理由：**服务起不来的时候，控制台进不去** ——
+    #   那就只剩命令行这一条路（`selftest` 也会把这两句提示打出来）。
+    p = sub.add_parser("update", help="升级 / 修复没走完的升级（服务起不来时用）")
+    p.add_argument("--repair", action="store_true", help="重跑上次没走完的升级")
+    p.add_argument("--restore", action="store_true", help="从备份退回升级前的代码")
+    p.set_defaults(func=cmd_update)
+
     p = sub.add_parser("autostart", help="开机自启：默认看状态")
     p.add_argument("--on", action="store_true", help="注册开机自启")
     p.add_argument("--off", action="store_true", help="取消开机自启")
@@ -1729,10 +2197,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-refresh", action="store_true",
                    help="会话失效时别开浏览器静默续期（第 1 步就会直接失败）")
     p.add_argument("--out-dir", default="", help="报告输出目录")
-    p.add_argument("--skip-dump", action="store_true", help="跳过第 1 步：不抓华为数据")
-    p.add_argument("--skip-check", action="store_true", help="跳过第 2 步：不做报量排查")
-    p.add_argument("--skip-pos", action="store_true", help="跳过第 3 步：不算 POS 合规")
-    p.add_argument("--skip-pools", action="store_true", help="跳过第 4 步：不做四池对账")
+    # ⚠⚠ `--skip-*` 这一组**已经不用了**（2026-09-21 晚：跑什么一律由 `--steps` 点名）。
+    #   留着**只为一件事**：老门店那份 `run.bat` / `run-now.bat` 里写死了它们，
+    #   而那份脚本是**安装时生成、不进版本库**的 —— 自更新不会重写它，
+    #   得等门店打开一次控制台（概览页里那条自愈）才换成新的。
+    #   在那之前双击它，参数必须**收得下**，否则报的是
+    #   `unrecognized arguments`（门店看到的是"窗口一闪就没了"，最难查的一种）。
+    #   ⚠ 名单**从注册表派生**，别在这儿再手抄一份 —— 手抄的那份当年就漏了
+    #     `--skip-erp-dump`（老脚本里真带着它）。
+    from .features.registry import step_flags as _step_flags
+    for _flag in _step_flags().values():
+        p.add_argument(_flag, action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--skip-check", action="store_true", help=argparse.SUPPRESS)
+    # ⭐ 内置定时器（M10）派发时走这两个：`--steps` 说"就这几步"，
+    #   `--wake-slot` 是那个时间点（收尾记一笔，定时器靠它去重）。
+    p.add_argument("--steps", default="",
+                   help="**必给**：就跑这几步（逗号分隔，如 dump,erp-dump,pos,pools,attain）")
+    p.add_argument("--wake-slot", default="",
+                   help="内置定时器派发的那个时间点（YYYY-MM-DD HH:MM），只用来记录")
     p.add_argument("--log-file", default="", help="把对账那段同时写一份到文件")
     p.set_defaults(func=cmd_daily)
 
@@ -1743,11 +2225,50 @@ def build_parser() -> argparse.ArgumentParser:
                    help="会话失效时别开浏览器静默续期")
     p.set_defaults(func=cmd_dump)
 
+    p = sub.add_parser("autoupdate", help="自动更新：查新版本 → 过策略 → 铺代码 → 重启")
+    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_autoupdate)
+
+    p = sub.add_parser("erp-dump", help="抓云商数据（在库 + 销售明细）→ 同一个订单库")
+    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_erp_dump)
+
     p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json（并单独推一条）")
     p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
     p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
     p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
     p.set_defaults(func=cmd_pos)
+
+    p = sub.add_parser("attain", help="周度销售达成 → out/attain-<年>.json（读腾讯文档目标）")
+    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+    p.add_argument("--store", default="", help="只看这家云商门店（默认：按本店配置 / 全区）")
+    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+    p.set_defaults(func=cmd_attain)
+
+    p = sub.add_parser("plan", help="月度生意计划 → out/plan-<年>.json（七块 × 本月 vs 上月同期）")
+    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+    p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("film", help="防护膜达成（落快照 out/film.json）")
+    p.set_defaults(func=cmd_film)
+
+    p = sub.add_parser("report", help="把当天新增上报给区长（SQLite 附件走邮件）")
+    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+    p.add_argument("--date", default="", help="包里写哪天（默认今天）")
+    p.add_argument("--no-push", action="store_true", help="只生成，不发")
+    p.add_argument("--dry-run", action="store_true", help="连包都不生成，只看会跑哪几步")
+    p.add_argument("--force", action="store_true",
+                   help="指纹说没变也照样发（人工重发用）")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("report-inbox", help="收门店上报 → in/report.db（区长/平台机器用）")
+    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+    p.add_argument("--limit", type=int, default=0, help="最多往回扫几封（默认 200）")
+    p.add_argument("--dry-run", action="store_true", help="只看会收哪几封，不落库")
+    p.set_defaults(func=cmd_report_inbox)
 
     p = sub.add_parser("pos-export", help="出 POS 明细 Excel")
     p.add_argument("--month", required=True, help="2026-08")
@@ -1772,6 +2293,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
     p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
     p.set_defaults(func=cmd_pools)
+
+    p = sub.add_parser("ensure-service", help="服务没跑就把它拉起来（系统计划任务只干这个）")
+    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+    p.set_defaults(func=cmd_ensure_service)
 
     p = sub.add_parser("serve", help="打开本地控制台（报告 / 运行 / 会话 / POS / 设置）")
     p.add_argument("--port", type=int, default=8787, help="端口，默认 8787；被占用时自动换")

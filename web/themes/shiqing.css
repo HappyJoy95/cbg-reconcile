@@ -1,0 +1,70 @@
+/* 8 · 石青蓝 × 月白 —— 冷静清爽
+   主色 石青蓝 #3D7A99 · 辅色 月白 #F0F4F8 · 突出色 靛 #1F5F7A
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 石青 */
+body[data-theme="shiqing"] {
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 底：月白偏冷的浅蓝灰 */
+  --bg: #f3f6f9;
+  --card: #fffeff;
+  --line: #dfe6ee;
+  --text: #16202a;
+  --muted: #6a7888;
+  --muted-2: #475666;
+  --text-2: #344454;
+
+  /* 主色：石青蓝 */
+  --brand: #35728f;
+  --brand-dark: #2a5f7a;
+  --on-brand: #ffffff;
+  --brand-wash: rgba(61, 122, 153, .12);
+  --focus-ring: #9ecfe0;
+  --glow-fab: drop-shadow(0 5px 14px rgba(53, 114, 143, .40));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(53, 114, 143, .52));
+
+  /* 辅色：月白 —— 表头 / hover / 信息底 / logo 第二端偏冷 */
+  --brand-2: #7aafc4;
+  --info-bg: #eaf1f7;
+  --on-info: #2f4a5c;
+  --th-bg: #eef3f8;
+  --row-alt: #f6f8fb;
+  --hover: #eaf0f6;
+  --field: #fffeff;
+  --code-bg: #eef2f7;
+  --idle: #6a7888;
+  --idle-bg: #e8eef4;
+  --icon-muted: #96a6b6;
+  --line-strong: #c5d0dc;
+
+  /* 状态：贴石青冷调 */
+  --ok: #1a7a5c;
+  --ok-bg: #d4f0e4;
+  --on-ok: #0f4a38;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --on-bad: #7f1d1d;
+  --warn: #a06820;
+  --warn-bg: #faf0d8;
+  --on-warn: #6b4410;
+  --on-warn-strong: #7c4010;
+  --warn-line: #e8c878;
+  /* 突出色：靛，热点/强调 */
+  --hot: #1f5f7a;
+  --log-ok: #3dcea8;
+  --log-bad: #fca5a5;
+  --log-dim: #6a7888;
+
+  --film-lo: #fce4e4;
+  --film-hi: #dde7f0;
+  --film-sum: #b54850;
+  --on-film-sum: #fff;
+
+  --ink: #0f1a24;
+  --ink-2: #0c151e;
+  --ink-text: #c5d4e0;
+  --overlay: rgba(15, 26, 36, .45);
+}

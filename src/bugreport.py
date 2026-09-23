@@ -166,7 +166,11 @@ def schedule_text(root: Path) -> str:
     try:
         lines.append("任务脚本：%s" % sch.script_path(root))
         lines.append("脚本存在：%s" % sch.script_path(root).exists())
-        lines.append("认出来的勾选：%s" % (sch.existing_steps(root),))
+        # ⚠ 2026-09-21 晚：`existing_steps()`（从老脚本反推"勾了哪几件"）删了 ——
+        #   跑什么现在由注册表派生（`run_daily.MANUAL_STEPS`）。这份现场记录
+        #   照样有用：把"这份脚本**应该**跑哪几步"写进去，好跟脚本里那行对照。
+        from . import run_daily
+        lines.append("手动脚本应跑的步骤：%s" % ",".join(run_daily.MANUAL_STEPS))
     except Exception as e:                                    # noqa: BLE001
         lines.append("（读脚本失败：%s）" % e)
     try:

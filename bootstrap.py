@@ -53,7 +53,9 @@ STDLIB_ONLY = ("install", "install-deps", "autostart", "uninstall",
 # 在管理员命令行里拼出删除命令，硬写两处迟早对不上（改了一处、另一处就成了
 # "删一个不存在的任务"）。名字的真源在 `src/autostart.py`，但那要 import 依赖，
 # 而这个提示可能在任何时候打印，所以在这儿留一个常量、并由测试钉住两者一致。
-AUTOSTART_TASK_NAME = "CBG报量对账-开机自启"
+AUTOSTART_TASK_NAME = "盛联门店数据平台-开机自启"   # ⚠ 跟 `autostart.AUTOSTART_TASK` 必须一致（有测试盯着）
+# ⚠ 2026-09-19 改过名：`CBG报量对账` → `盛联门店数据平台`。
+#   旧名字那个任务得一起删掉（`autostart.LEGACY_APP_NAMES`），否则开机启两次。
 
 # 底线是 **3.8**，不是"随便多旧都行"。
 #
@@ -467,6 +469,7 @@ def do_uninstall(yes: bool = False, purge: bool = False) -> int:
     print("  **不会**动这些（要删得你自己来）：")
     print("    · 程序目录本身")
     print("    · out\\ 里的历史报告")
+    print("    · in\\ 里收到的上报（区长/平台机器才有）")
     print("    · .secrets\\ 里的账号和会话")
     print()
     print("  历史报告和凭据默认**保留** —— 要一起删加 --purge，或在下面回答 y。")
@@ -525,7 +528,7 @@ def do_uninstall(yes: bool = False, purge: bool = False) -> int:
     wipe = purge
     if not purge and sys.stdin and sys.stdin.isatty():
         try:
-            a = input("        连 .secrets\\（账号/会话）和 out\\（报告）一起删？"
+            a = input("        连 .secrets\\（账号/会话）、out\\（报告）和 in\\（收到的上报）一起删？"
                       "**删了就恢复不了** [y/N] ").strip().lower()
             wipe = a in ("y", "yes", "是", "1")
         except (EOFError, KeyboardInterrupt):
@@ -533,7 +536,7 @@ def do_uninstall(yes: bool = False, purge: bool = False) -> int:
     if wipe:
         import shutil
         import time as _time
-        for name in (".secrets", "out"):
+        for name in (".secrets", "out", "in"):
             d = ROOT / name
             if not d.exists():
                 continue
@@ -551,7 +554,7 @@ def do_uninstall(yes: bool = False, purge: bool = False) -> int:
                     else:
                         _time.sleep(2)
     else:
-        print("        保留 .secrets\\ 和 out\\（不删）")
+        print("        保留 .secrets\\、out\\ 和 in\\（不删）")
 
     print()
     print("=" * 46)
@@ -700,12 +703,27 @@ ERP_COMPANY_CODE=
 ERP_TOKEN=
 """
 
-_OUT_README = """对账产出的差异清单、运行日志都写在这个目录。
+_OUT_README = """**这台机器自己产出**的东西写在这个目录（报告 / 库 / 待发的包）。
 
   差异_<日期>_<门店码>.xlsx    差异清单（每次跑都生成，没差异也生成）
   差异_<日期>_<门店码>.json    给控制台看的摘要
+  cbg-<年>.db                  本机抓下来的订单库
   run.log                      计划任务跑的日志（如果配了）
   autostart.log                开机自启的日志（如果有报错）
+  report/ · splits/            上报用的指纹库 / 待发的包 / 拆分文件
+
+⚠ **别人发来的东西不放这儿**，放 `in\\`（见那份 README）——
+  分界线是"这是我自己生出来的，还是收进来的"。
+"""
+
+
+_IN_README = """**收进来的**东西写在这个目录（只有区长 / 平台那台机器会有东西）。
+
+  report.db                    收信库（各家店发来的上报：台账 + 明细 + 目标拆分）
+  packages/                    收到的**原件**（门店发来的 SQLite 包 / 拆分包）
+
+⚠ 这些**不是这台机器抓的**，是各门店发邮件过来的 —— 所以放在 `in\\` 而不是 `out\\`。
+⚠ 这个目录**不进包、也不参与自更新**（跟 `.secrets\\` / `out\\` 一样是"这台电脑自己的"）。
 """
 
 
@@ -719,16 +737,102 @@ def ensure_layout() -> None:
     任何一步失败都**只打印一行、绝不抛异常**：这是启动路径上的东西，
     补不出来最多是"门店得自己去界面上填一次"，不该让程序起不来。
     """
-    for d in (ROOT / ".secrets", ROOT / "out"):
+    # ⚠ `in\\` 也在这儿建（2026-09-21 晚加）：门店机器上它是空的（没人往它发东西），
+    #   但**目录本身是布局的一部分** —— 由这一处声明，别让各模块自己想到才建。
+    for d in (ROOT / ".secrets", ROOT / "out", ROOT / "in"):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             print(f"  （{d.name}\\ 建不出来，不影响使用：{e}）")
     for rel, body in ((".secrets/README.txt", _SECRETS_README),
                       (".secrets/erp.env", _ERP_ENV_TEMPLATE),
-                      ("out/README.txt", _OUT_README)):
+                      ("out/README.txt", _OUT_README),
+                      ("in/README.txt", _IN_README)):
         _write_if_missing(ROOT / rel, body)
+    _seed_central_mail()
+    _seed_mail_key()
     _ensure_default_config()
+
+
+def _seed_mail_key() -> None:
+    """把**打包时塞进来的邮件密钥**播进 `.secrets/mail-key.json`。
+
+    用户 2026-09-21：「解密密钥**随着大版本的安装包走，不进入小版本推包**」——
+    跟上面那个中台授权码（`_seed_central_mail`）是**同一条路子**：
+    打包时注入 → 安装时播种 → `.secrets/` 在自更新的 `NEVER_TOUCH` 里
+    ⇒ **装一次之后一直有效，小版本推包覆盖不到它**。
+
+    ⚠⚠ **跟中台那条有一处实质差别，别照抄那句话**：
+      那边是「**已有键绝不覆盖**」（门店自己配的邮箱是他的设置，不该被包冲掉）；
+      这边是「**current 必须跟着包更新、老 key 必须留着**」——
+      * 不更新 current ⇒ **换了密钥等于没换**（门店还在用旧的那把发）；
+      * 不留老 key ⇒ `pending/` 里压着的历史包、邮箱里的老邮件**永久解不开**。
+      合并那半在 `mailcrypto.seed_from_pack()` 里，**判据只有那一处**。
+
+    ⚠ 包根那份**读完不删**（跟中台那份一个规矩：留着无害；
+      删了反而"重装一次就没了"）。
+    ⚠ 出错只打印一行 —— 这是启动路径（`ensure_layout` 的老规矩）。
+    """
+    try:
+        from src import mailcrypto            # 纯标准库，装依赖前也能跑
+        got = mailcrypto.seed_from_pack(ROOT)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  （邮件密钥没播上，不影响使用：{e}）")
+        return
+    if got.get("state") == "none":
+        return                                # 包里没带 —— 什么都不做、什么都不说
+    if not got.get("ok"):
+        print(f"  （邮件密钥没播上，不影响使用：{got.get('why')}）")
+        return
+    if got.get("state") == "same":
+        print(f"  邮件附件加密：密钥 {got.get('current')}（已是最新）")
+        return
+    extra = ("，新增 " + "、".join(got.get("added") or [])) if got.get("added") else ""
+    print(f"  邮件附件加密：密钥 {got.get('was') or '无'} → {got.get('current')}{extra}")
+
+
+def _seed_central_mail() -> None:
+    """把**打包时塞进来的中台邮箱授权码**播进 `.secrets/mail.env`。
+
+    用户 2026-09-19 定的路子：「能不能在 **3.0.0 安装时**把授权码给门店，
+    然后后续**仓库里就不带这个**，以后一直默认？」
+
+    ⇒ 三件事一起才成立：
+      ① **打包时注入**（`tools/build_package.sh` 从本机 `.secrets/mail.env` 读出来，
+         写成包根的 `central-mail.env`）—— 仓库和 git 里**始终没有**这个码；
+      ② **安装时播种**（就是这儿）：把它**追加**进 `.secrets/mail.env`；
+      ③ 播种之后**一直有效**：`.secrets/` 在自更新的 `NEVER_TOUCH` 里，
+         以后升级**不会**动它 ⇒ "以后一直默认" ✓。
+
+    ⚠ 三条纪律：
+      * **已有键绝不覆盖** —— 门店自己改过邮箱/授权码的话，那是他的设置；
+      * 包根那份**读完不删**（留着无害；删了反而"重装一次就没了"）；
+      * 出错只打印一行 —— 这是启动路径（`ensure_layout` 的老规矩）。
+    """
+    src = ROOT / "central-mail.env"
+    dst = ROOT / ".secrets" / "mail.env"
+    try:
+        if not src.is_file():
+            return
+        add = []
+        for line in src.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            cur = dst.read_text(encoding="utf-8", errors="replace") if dst.exists() else ""
+            if key and key not in cur:            # ⚠ 已有键不覆盖
+                add.append(line)
+        if add:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with dst.open("a", encoding="utf-8") as f:
+                if dst.exists() and dst.stat().st_size:
+                    f.write("\n")
+                f.write("# 中台邮箱（安装时随包带进来，之后一直默认）\n")
+                f.write("\n".join(add) + "\n")
+            print("  已配置中台邮箱（%d 项）" % len(add))
+    except OSError as e:
+        print(f"  （中台邮箱没配上，不影响使用：{e}）")
 
 
 def _write_if_missing(path: Path, body: str) -> None:

@@ -11,6 +11,12 @@ config/store-*.yaml
 # 运行产物
 out/
 !out/.gitkeep
+# 门店自己传的壁纸（web/wallpaper/）—— 不进仓库也不进包；升级不带走
+web/wallpaper/*
+!web/wallpaper/.gitkeep
+# ⚠ `in/` = **收进来的**东西（各店发来的上报包 / 收信库）——
+#   跟 out/ 一起属于"这台电脑自己的"，不进仓库（用户 2026-09-21 定的布局）。
+in/
 
 # Python
 __pycache__/
@@ -37,3 +43,12 @@ run-now.bat
 
 # DSH 隔离区：记忆/临时任务/归档/备份/文档，在库里但不进版本库
 .dsh/
+# 打包时注入的中台邮箱授权码（由 build_package.sh 生成，只进包不进仓库）
+central-mail.env
+
+# 打包时注入的邮件附件加密密钥（由 build_package.sh 从 .secrets/mail-key.json
+# 读出来塞进包根，安装时播种进门店的 .secrets/）。
+# ⚠⚠ 仓库是**公开**的（自更新匿名读 api.github.com）—— 这个文件进来一次，
+#    附件加密就当场归零。`.secrets/` 那条已经挡住本机那份了，这一行挡的是
+#    **包根那份**：它散装在仓库根目录，不写就会裸奔。
+mail-key.json

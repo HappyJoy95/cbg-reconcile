@@ -1,0 +1,75 @@
+/* 2 · 暮山蓝 × 晚桃粉 —— **深色模式**
+   主色 暮山蓝 #4A5F8C（深底上提亮为可点按钮）
+   辅色 晚桃粉 #E8B4A2（侧栏渐变 / 信息底 / 洗底）
+   突出色 亮桃 #F4C4B0（focus / 热点 / logo 第二端）
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 暮山蓝 × 晚桃粉（深色） */
+body[data-theme="dusk"] {
+  --rate-red: #8b4a4a;
+  --rate-orange: #8b6a3a;
+  --rate-lg: #3d5c42;
+  --rate-g: #2f5238;
+
+  --bg: #141a2e;
+  --card: #1e2742;
+  --line: #2f3a58;
+  --text: #e8eaf4;
+  --muted: #9aa3c0;
+  --muted-2: #6b7594;
+  --text-2: #c5cbe0;
+
+  /* 主色：暮山蓝提亮，保证按钮/链接在深底上可读 */
+  --brand: #7b96e0;
+  --brand-dark: #5a78c8;
+  --on-brand: #12182a;
+  --brand-wash: rgba(232, 180, 162, .14);
+  --focus-ring: #f4c4b0;
+  --glow-fab: drop-shadow(0 5px 14px rgba(232, 180, 162, .40));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(244, 196, 176, .52));
+
+  /* 辅色：晚桃粉 —— logo 渐变第二端 + 表头/行底/信息底偏暖 */
+  --brand-2: #e8b4a2;
+  --info-bg: #2a2438;
+  --on-info: #f0d0c4;
+  --th-bg: #1a2238;
+  --row-alt: #182040;
+  --hover: #283252;
+  --field: #141a2e;
+  --code-bg: #252e4a;
+  --idle: #8b90a8;
+  --idle-bg: #2a3050;
+  --icon-muted: #8a92b0;
+  --line-strong: #4a5578;
+
+  /* 状态色：深底 + 暮山蓝环境 */
+  --ok: #6ecf9a;
+  --ok-bg: #1a3d2a;
+  --on-ok: #b8f0d0;
+  --bad: #f87171;
+  --bad-bg: #7f1d1d;
+  --on-bad: #fecaca;
+  --warn: #f0c070;
+  --warn-bg: #4a3820;
+  --on-warn: #f8e0b0;
+  --on-warn-strong: #f0d090;
+  --warn-line: #a07840;
+  --hot: #f4c4b0;
+  --log-ok: #6ecf9a;
+  --log-bad: #f87171;
+  --log-dim: #6b7594;
+
+  --film-lo: #4a3038;
+  --film-hi: #1e3050;
+  --film-sum: #c04050;
+  --on-film-sum: #ffffff;
+
+  --ink: #0e1224;
+  --ink-2: #0e1224;
+  --ink-text: #c5cbe0;
+  --overlay: rgba(8, 10, 20, .62);
+
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, .48);
+  --shadow-float: 0 18px 46px rgba(0, 0, 0, .55);
+  --shadow-modal: 0 18px 48px rgba(0, 0, 0, .6);
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, .5);
+}

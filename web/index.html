@@ -5,18 +5,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>门店数据平台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232563eb'/%3E%3Ctext x='50' y='72' font-size='62' text-anchor='middle' fill='white'%3E%E2%87%84%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css">
+<!-- ⚠ 配色（`theme.css` + `themes/*.css`）必须排在 `style.css` **前面**：
+     令牌本身跟顺序无关（`var()` 是算的时候才解析），但主题块靠**层叠顺序**
+     压过组件规则，排后面会把组件的颜色一起盖掉。
+     ⭐ 一主题一文件（2026-09-22）：`web/themes/<名>.css`，加载时整目录引入。 -->
+<link rel="stylesheet" href="/theme.css?v=135">
+<link rel="stylesheet" href="/themes/default.css?v=135">
+<link rel="stylesheet" href="/themes/dark.css?v=135">
+<link rel="stylesheet" href="/themes/celadon.css?v=135">
+<link rel="stylesheet" href="/themes/dusk.css?v=135">
+<link rel="stylesheet" href="/themes/pome.css?v=135">
+<link rel="stylesheet" href="/themes/pine.css?v=135">
+<link rel="stylesheet" href="/themes/mist.css?v=135">
+<link rel="stylesheet" href="/themes/bean.css?v=135">
+<link rel="stylesheet" href="/themes/butter.css?v=135">
+<link rel="stylesheet" href="/themes/shiqing.css?v=135">
+<link rel="stylesheet" href="/themes/daiqiu.css?v=135">
+<link rel="stylesheet" href="/themes/zhusha.css?v=135">
+<link rel="stylesheet" href="/themes/zhuqing.css?v=135">
+<link rel="stylesheet" href="/themes/taotu.css?v=135">
+<link rel="stylesheet" href="/themes/dianye.css?v=135">
+<link rel="stylesheet" href="/themes/photo.css?v=136">
+<link rel="stylesheet" href="/style.css?v=147">
+<link rel="stylesheet" href="/inventory/style.css?v=136">
+<link rel="stylesheet" href="/gomoku/style.css?v=1">
 </head>
 <body>
 
 <!-- ⚠ 2026-09-18（用户定）：一级页签按**业务**分家 ——
-     销售 / 合规 / 会话 / 通用设置。
-     原来是「一个功能一个页签」（四池比对 / POS 合规 / 运行 / 会话 / 设置），
+     销售数据 / 五项合规（名字后来调过，见下）。
+     原来是「一个功能一个页签」（报量查询 / POS 合规 / 运行 / 会话 / 设置），
      3.0.0 再加「销售达成」就 6 个，门店面对的是一排平铺的功能名，没有层级。
      * **会话保持一级** —— 抓会话是门店唯一要人工介入的地方，不能藏深。
      * **运行不再是页签** —— 进了右下角那个常驻抽屉（`#run-drawer`），
-       任何页面都能拉开看日志、「跑一次」。
-     * **四池比对和 POS 合规不混在一张表** —— 合规页下两个并列的二级标签。
+       任何页面都能拉开看日志、上报 bug。（⚠ 2026-09-21「跑一次」那张卡删了。）
+     * **报量查询和 POS 合规不混在一张表** —— 合规页下两个并列的二级标签。
+
+     ⚠ 2026-09-19（用户）：「把左边儿一级标签的设置去掉吧，给它弄成鼠标移动到
+       左下角门店那个页面的时候，**向上**出现设置里的那些东西」。
+       ⚠ 但**搬下去的只有「通用设置」** —— 用户随后纠正了范围：
+         「**各个模块的设置还是要给模块**，只把通用设置做下来就行了」。
+       ⇒ 结果分两处：
+         * **通用设置**（玲珑授权 / 人员设置 / 通用）→ 左下角 `#side-menu`，
+           鼠标移上去向上弹出来；「通用设置」这个一级页签**没了**；
+         * **模块自己的「设置」**（销售数据的 / 五项合规的）**留在各自模块的
+           下拉里**，别一起搬下去。
+       判别标准：跟**业务**有关的设置留在模块；这台**电脑本身**的配置才在左下角。
+       一级页签因此只剩 **两个业务页**。
+
      见 `.dsh/docs/2026-09-18-3.0.0-开发目标.md` 四·五。 -->
 <!-- 左侧栏的折叠开关（用户 2026-09-18：「加个折叠的按钮，可以把左侧的标签栏
      折叠隐藏和展开」）。⚠ 它**必须在侧栏外面**、固定定位 ——
@@ -28,6 +64,47 @@
        JS 不用换内容。 -->
   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>
 </button>
+
+<!-- ⚠ 上次升级**没走完**时的横幅（阶段 1.4d）。
+     中断的升级会让程序静默跑在"一半新一半旧"的代码上 —— 这是最难查的一种状态，
+     所以这件事必须在**哪个页面都看得见**，不能藏进设置里。
+     默认 hidden，由 app.js 按 `overview.update_pending` 决定显不显示。 -->
+<div class="banner bad" id="update-broken" hidden>
+  <b>⚠ 上次升级没走完</b>
+  <span id="ub-text"></span>
+  <button class="btn primary small" id="btn-update-repair">重跑一遍</button>
+  <button class="btn ghost small" id="btn-update-restore">退回上一版</button>
+</div>
+
+<!-- ⚠ **启动自检的硬门槛没过**（用户 2026-09-19 的启动流程：先健康，再启动）。
+     `blocking` 那一档是"程序自己坏了"（升级断在半路 / 库结构不对 / 注册表有问题）；
+     服务照常起来，但**这件事得让人一眼看见**——"修复页"就是靠这条横幅。
+     ⚠ 软警告和待办**不挂这儿**：没配邮箱、没登录都是常态，挂出来只会让人麻木。
+     默认 hidden，由 app.js 按 `overview.boot.blocking` 决定显不显示。 -->
+<div class="banner bad" id="boot-broken" hidden>
+  <b>⚠ 启动自检没过</b>
+  <span id="bs-text"></span>
+</div>
+
+<!-- ⚠ 数据没到位（M14 / 阶段 3.3）：**确实为零 / 没有数据 / 采集失败 / 数据过期**。
+     以前这四种在界面上是同一个画面（"还是昨天那份"），门店会把"ERP 挂了"
+     读成"今天没卖"。只在**不是全 ok** 时出现 —— 没事别老挂一条黄条。 -->
+<!-- ⚠ 预览模式（2026-09-21）—— 玲珑没登录、但用户显式跳过了。
+     一直挂着，直到点「退出预览」或者真的把玲珑登录上。 -->
+<div class="banner warn" id="preview-broken" hidden>
+  <b>预览模式</b>
+  <span id="preview-text"></span>
+  <button class="btn ghost small banner-x" id="btn-preview-off">退出预览</button>
+</div>
+
+<div class="banner warn" id="data-broken" hidden>
+  <b>⚠ 数据没到位</b>
+  <span id="ds-text"></span>
+  <!-- ⚠ 用户 2026-09-21：「上面这个东西**一直不让关**」——
+       关掉的只是**这一条**（后端记指纹）：再出新的、或者又失败一次，它会重新弹出来。 -->
+  <button class="btn ghost small banner-x" id="btn-ds-dismiss"
+          title="收起来（新的问题还会再弹）">收起来</button>
+</div>
 
 <div class="shell">
   <!-- ───────────────────────── 侧边栏 ─────────────────────────
@@ -42,43 +119,190 @@
     </div>
 
     <nav class="tabs">
+  <!-- ═══════════ 可见性：**表在后端**，这里只留 key ═══════════
+
+       用户 2026-09-19：「体验店也不是全开，体验店是开**体验店对应的**，
+       合作店是开**合作店对应的**……你需要把这个**整理到一起**，
+       每个一级标签和二级标签内容上都加上这个标记。为了以后的开发方便」。
+
+       ⚠⚠ **2026-09-21（M17，甲方案）改过**：可见性表**从这份 HTML 搬到了后端**
+         （`src/web.py` 的 `PAGE_RULES` / `pages_for()`，随 `/api/overview` 的
+         `role.pages` 下发）。原来每个标签上挂一个 `data-types` 属性（`experience`
+         / `platform` 这类），前端按 `profile.type` 过滤 —— 那是**两份定义**
+         （后端还有一套 `_can_for`），而"页面藏了、接口照样给"就是这么来的：
+         M17 之前**每个 `/api/*` 都没鉴权**。
+         现在**一份表**说了算，前端 `applyProfile` 只按 `role.pages` 渲染。
+         ⚠ 这个属性现在**全文件一个都不许再有**（`test_setup_gate` 拿原文钉着）。
+       ⚠ **加新功能时：后端 `PAGE_RULES` 里加一行**（key = 下面标签的
+         `data-subtab` / `data-tab` / `data-foot` 的**值本身**），前端一个字都不用改。
+         有一条测试**双向对照**（HTML 的 key ↔ `PAGE_RULES`），漏了当场红。
+       ⚠ 表里没有的 key = **永远看不见**（不像 `data-types` 时代"不标就是公开"）——
+         所以别在这儿加一个后端不知道的 key。 -->
+
   <!-- ⚠ 2026-09-18（用户定，参考苹果官网那种）：**悬停只展开菜单，点击才跳**。
-       三个一级菜单**一律挂下拉**，二级标签**只有下拉这一份**（页内不再占一行）——
+       两个一级菜单**一律挂下拉**，二级标签**只有下拉这一份**（页内不再占一行）——
        用户 2026-09-18 选的："跟销售/合规一样，页内那排删掉"。
        ⚠ 两处各写一份的话迟早有一处不同步（这个项目为"两份定义"栽过好几次）。 -->
-  <div class="nav-item" data-tab="sales">
-    <button class="tab active" data-tab="sales" aria-haspopup="true" aria-expanded="false">销售</button>
-    <div class="nav-menu" hidden>
-      <button class="subtab" data-subtab="attain">达成</button>
+  <!-- ⚠ 2026-09-19（用户）：「把左边儿一级标签的设置去掉吧，给它弄成鼠标移动到
+       左下角门店那个页面的时候，向上出现设置里的那些东西」——
+       ⚠ **搬下去的只有「通用设置」**（那个一级页签整个没了）。
+         用户随后补了一句关键的范围：「**各个模块的设置还是要给模块**，
+         只把通用设置做下来就行了」 ⇒ 销售数据 / 五项合规各自的「设置」
+         **留在自己的下拉里**，不跟着下去。
+       ⚠ 判别标准：**跟业务有关**的设置（这条推送推不推）留在模块里；
+         **这台电脑本身**的配置（登录态 / 人员 / 邮件 / 定时）才在左下角。 -->
+  <!-- ⚠ 名字 2026-09-20 改过：「销售数据」→「**周度重点产品**」（用户定）。
+       `data-tab="sales"` 是 key，**不动** —— 它同时挂在 `GO_TARGETS` / 老更新日志的 `go` 上。 -->
+  <div class="nav-item" data-tab="sales">          <!-- 周度重点产品：三类都看 -->
+    <button class="tab active" data-tab="sales" aria-haspopup="true" aria-expanded="false">周度重点产品</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="attain">周度目标达成情况</button>
+      <button class="subtab" data-subtab="attain-history">历史记录</button>
       <button class="subtab" data-subtab="sales-settings">设置</button>
     </div>
   </div>
+  <!-- ⚠ 月度生意计划（M22，2026-09-21 用户：「设计一个新模块，叫做**月度生意计划**，
+       包含折叠机、FD、ND、穿戴、音频、平板、电脑几个大块，每个产品系列分开，
+       统计每个店**当月和上个月同期**的销量、销售额、利润和环比升降」）——
+       ⚠ 它跟「周度重点产品」**是两回事**：那边算的是**目标达成率**（对目标），
+         这边算的是**实际经营 + 环比**（不对目标）。两条口径各自独立，别合并。
+       ⚠ 数据范围**只看门店名单里那 28 家**（云商导出里另有 15 家不是我们的店：
+         联想专卖店 / 部门 / 机场店）—— 那个筛选在**算的时候**就做了（`plan.load_sales`），
+         这一页看到的每一行都是名单内的店。 -->
+  <div class="nav-item" data-tab="plan">
+    <button class="tab" data-tab="plan" aria-haspopup="true" aria-expanded="false">月度生意计划</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="monthly">经营看板</button>
+      <button class="subtab" data-subtab="plan-settings">设置</button>
+    </div>
+  </div>
   <div class="nav-item" data-tab="compliance">
-    <button class="tab" data-tab="compliance" aria-haspopup="true" aria-expanded="false">合规</button>
-    <div class="nav-menu" hidden>
+    <button class="tab" data-tab="compliance" aria-haspopup="true" aria-expanded="false">五项合规</button>
+    <div class="nav-menu">
       <button class="subtab" data-subtab="pos">POS 合规</button>
-      <button class="subtab" data-subtab="pools">四池比对</button>
+      <button class="subtab" data-subtab="pools">报量查询</button>
       <button class="subtab" data-subtab="compliance-settings">设置</button>
     </div>
   </div>
-  <div class="nav-item" data-tab="settings">
-    <button class="tab" data-tab="settings" aria-haspopup="true" aria-expanded="false">通用设置</button>
-    <div class="nav-menu" hidden>
-      <button class="subtab" data-subtab="general">通用</button>
-      <button class="subtab" data-subtab="linglong">玲珑授权</button>
+  <!-- ⚠ 库存盘点（M16，2026-09-20 用户：「把库存盘点功能整理成一个模块接入我们这个项目」）——
+       它是**同文档子面板**（`#subpanel-inventory` 里的 `.inv-root`，已拆 iframe），
+       跟 POS / 报量查询一样切过去就能用，不再另开一个标签页
+       （用户当天改的口径：「做嵌套进来吧，现在单独打开一个页面很奇怪」）。
+
+       ⚠ 嵌入式唯一要留神的是**扫码枪的焦点**：扫码枪就是键盘，输入必须落在
+         iframe 里的扫码框上。光靠"进来时聚焦一次"不够 —— 用户点一下控制台别处，
+         焦点就跑了，表现是"扫了没反应"。兜底见 app.js 的 `mountInventory` / `focusInvScan`：
+           ① 切到这一页、以及鼠标在面板上动时，把焦点还给 iframe；
+           ② 焦点真在外面时，父页面把**那一下按键**转给 iframe（只转第一下，
+              之后焦点已经在里面了）—— 一个字符都不会丢。
+       理由与踩坑：`.dsh/docs/2026-09-20-3.0.0-M16-库存盘点接入-开发目标.md` -->
+  <div class="nav-item" data-tab="inventory">
+    <button class="tab" data-tab="inventory" aria-haspopup="true" aria-expanded="false">库存盘点</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="inventory">库存盘点</button>
+      <button class="subtab" data-subtab="inventory-settings">设置</button>
+    </div>
+  </div>
+  <!-- ⚠ 增值 · 防护膜达成情况（2026-09-22）：口径见 metric.py。
+       新机=(零售净+美团分销净)×0.9，京东分销不算。 -->
+  <div class="nav-item" data-tab="valueadd">
+    <button class="tab" data-tab="valueadd" aria-haspopup="true" aria-expanded="false">增值</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="film">防护膜达成情况</button>
+      <button class="subtab" data-subtab="benefit">无忧会员权益</button>
+      <button class="subtab" data-subtab="valueadd-settings">设置</button>
+    </div>
+  </div>
+  <!-- ⚠ 小工具（2026-09-22）：价签 / 工牌 —— 资源在 web/tools/price-tag/。
+       **两个 iframe 各装一格**（用户：「把 iframe 拆开」）—— 各自懒挂载。 -->
+  <div class="nav-item" data-tab="tools">
+    <button class="tab" data-tab="tools" aria-haspopup="true" aria-expanded="false">小工具</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="pricetag">价签工具</button>
+      <button class="subtab" data-subtab="badge">工牌工具</button>
+      <button class="subtab" data-subtab="claim-pending">权益领取</button>
+      <button class="subtab" data-subtab="sn-trace">串号追踪</button>
     </div>
   </div>
 </nav>
 
-    <!-- 左下角：这台电脑是谁、现在什么状态 -->
-    <div class="side-foot">
-      <div class="sub" id="store-line">加载中…</div>
-      <div class="sub mono-build" id="build-line"></div>
-      <div class="pills">
-        <span class="pill" id="pill-session" title="华为会话状态">会话</span>
-        <span class="pill" id="pill-schedule" title="定时执行状态">定时</span>
+    <!-- 左下角：这台电脑是谁、现在什么状态。
+         ⚠ 2026-09-19（用户）：「把左边儿一级标签的设置去掉吧，给它弄成鼠标移动到
+           左下角门店那个页面的时候，**向上**出现设置里的那些东西」。
+           ⚠ 但**只搬「通用设置」**（用户随后的原话：「各个模块的设置还是要给模块，
+             只把通用设置做下来就行了」）—— 销售数据/五项合规各自的「设置」
+             **留在各自模块的下拉里**，别一起搬下来。
+         ⇒ **整块 `side-foot` 就是触发面**（门店名 / 版本号 / 状态徽章都算），
+           指针一进来就从它**上面**升起 `#side-menu`。
+         ⚠ `tabindex="0"` 不是摆设：这块里**没有可聚焦的元素**（徽章是 span），
+           不给它 `tabindex` 的话键盘用户永远够不到设置。 -->
+    <div class="side-foot" id="side-foot" tabindex="0"
+         aria-haspopup="true" aria-expanded="false">
+      <!-- ⚠ **这不是浮层**（用户 2026-09-19 改的）——
+           原来鼠标移上去会在上面浮出一块菜单，现在改成**这几行自己变形**：
+
+             门店 · 姓名   → 账号设置      （右边显示云商账号状态 + 退出/换账号）
+             版本号        → 检查更新      （「有新版本」徽章跟着这一行走）
+             会话导入情况  → 玲珑授权
+             未定时        → 定时器设置
+             人员设置 / 通用 —— **插缝出现**（高度 0 → 一行）
+
+           ⚠ 每一行里放**两份内容**：`.foot-info`（平时显示的）和 `.foot-label`
+             （菜单名），叠在同一格里交叉淡入淡出 —— 见 `style.css` 的 `.foot-item`。
+           ⚠ 看得见看不见由**后端 `PAGE_RULES`** 说了算（2026-09-21 起，见上面那段）：
+             比如「玲珑授权」那一行，对合作店整条不出现。
+           ⚠ 用 **`data-foot`**（不是 `data-subtab`）—— 这是左下角菜单**自己的键空间**：
+             `data-subtab` 的约定是"有子面板 + 有加载器"，而
+             「检查更新」「定时器设置」只是跳到「通用」页里的**一张卡**，不是页面。
+             混用会让 `test_每个_data_subtab_都有对应的子面板` 这类测试失去意义。
+           ⚠ 顺序 = 界面顺序，也是 `app.js` 里 `FOOT_GO` 的顺序。 -->
+      <button class="foot-item" data-foot="account">
+        <!-- 天气挂在这一行右侧胶囊位（2026-09-22）：和 pill-update 同格，
+             **不新增 data-foot 行**（左下角仍是 7 行，有 IA 测试钉着）。
+             放 foot-info 里面会被长店名 ellipsis 吃掉（实测截断）。 -->
+        <span class="foot-info" id="store-line">加载中…</span>
+        <span class="pill" id="foot-weather" hidden title=""></span>
+        <span class="foot-label">账号与人员</span>
+      </button>
+
+      <button class="foot-item" data-foot="update">
+        <span class="foot-info mono-build" id="build-line"></span>
+        <span class="foot-label">检查更新</span>
         <span class="pill" id="pill-update" title="有新版本" hidden></span>
-      </div>
+      </button>
+
+      <button class="foot-item foot-gap" data-foot="general">
+        <span class="foot-label">推送设置</span>
+      </button>
+
+      <!-- 主题设置：独立二级页（用户 2026-09-22）—— 两个色彩风格一张卡里切 -->
+      <button class="foot-item foot-gap" data-foot="theme">
+        <span class="foot-label">主题设置</span>
+      </button>
+
+      <!-- ⚠ 2026-09-21（用户：「**数据上报这个是好的，放到左下角的系统设置吧，
+           一级标签改叫数据交换**」）—— 它原来是顶部一个一级标签，
+           现在跟「通用」「玲珑授权」一样是**左下角那一行**，名字叫「数据交换」。
+           ⚠ 它仍然是**唯一一个跨店**的页面（别的东西都是"这台机器自己那家店"的），
+             而且是**只有区长/平台**看得见（后端 `PAGE_RULES` 里是 `multi`；
+             `/api/report/stores` 对门店**直接 403** —— C4）。 -->
+      <button class="foot-item foot-gap" data-foot="stores">
+        <span class="foot-label">数据交换</span>
+      </button>
+
+      <button class="foot-item" data-foot="linglong">
+        <span class="foot-info"><span class="pill" id="pill-session"
+              title="华为会话状态">会话</span></span>
+        <span class="foot-label">玲珑授权</span>
+      </button>
+
+      <button class="foot-item" data-foot="scheduler">
+        <span class="foot-info"><!-- ⚠ 内容由 `app.js` 按**内置定时器的下一次**填（原来读"有没有 Windows
+             计划任务"，那个兜底撤掉之后它永远显示「未设定时」） -->
+        <span class="pill" id="pill-schedule"
+              title="定时执行状态">定时</span></span>
+        <span class="foot-label">定时器设置</span>
+      </button>
     </div>
   </aside>
 
@@ -86,39 +310,160 @@
 
 <!-- ───────────────────────────── 销售 ───────────────────────────── -->
 <section class="panel active" id="panel-sales">
-  <div class="subpanel active" id="subpanel-attain">
+  <!-- 一级标签的**介绍页** —— 点一级标签落这儿（用户 2026-09-18）。
+       ⚠ 它的 id 是 `subpanel-sales-home`，**不在导航下拉里**（见 app.js 的 TAB_HOME）。 -->
+  <!-- ⚠ 介绍页已删（2026-09-19 用户：「B 吧，现在来看这个介绍页没用」）——
+     点一级标签直接进它第一个二级页，见 app.js 的 switchTab。 -->
+
+  <div class="subpanel" id="subpanel-attain">
     <div class="cards" id="attain-cards"></div>
     <div class="card">
       <div class="card-head">
-        <h2>门店销售达成 <span class="hint" id="attain-meta"></span></h2>
-        <button class="btn ghost small" id="btn-refresh-attain">刷新</button>
+        <h2>周度目标达成情况 <span class="hint" id="attain-meta"></span></h2>
+        <label class="switch" title="按达成率给格子标色：&lt;60% 绿 / 60~80% 橙 / 80~100% 浅绿 / 100%+ 红">
+          <input type="checkbox" id="attain-color">
+          <span class="switch-track"><span class="switch-knob"></span></span>
+          <span>标色</span>
+        </label>
+        <button class="btn ghost small" id="btn-refresh-attain" title="重新抓云商销售数据并重算达成（约 1~2 分钟）"
+                  aria-label="刷新：重新抓云商销售数据并重算达成（约 1~2 分钟）">刷新</button>
+        <button class="btn ghost small" id="btn-export-attain"
+                title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 导出的范围就是你能看到的这几家店"
+                aria-label="导出为 Excel">导出 Excel</button>
       </div>
       <div id="attain-table"></div>
+      <!-- 导出结果那一行（点完才露出来）：文件名 + 「再下一次」+ 服务端留的那份在哪 -->
+      <div class="hint" id="attain-export-result" hidden style="margin-top:10px"></div>
       <div class="hint" style="margin-top:10px;line-height:1.7">
         <b>目标</b>来自腾讯文档「任务目标分配」的<b>周度重点产品</b>表（按台量），
         <b>实际</b>来自云商销售报表，两边用<b>商品编码</b>对上。<br>
         <b>达成率</b>：目标为 0 记 100%；单项封顶 120%；总达成率 = 各单项按占比加权平均。<br>
         <b>剔除</b>：演示机 / 体验机、串号标识含「外调」的行；退货按负数冲减。<br>
+        点<b>区域名</b>可把该区门店合并成一行<b>区域汇总</b>（再点展开）。<br>
         ⚠ <b>数据截至</b>以表头为准 —— 周中打开时是「至今累计」，不是最终达成。
+      </div>
+    </div>
+  </div>
+
+  <!-- ⚠ 「目标拆分」不再单独一页（用户 2026-09-20）：改在「周度目标达成情况」里，
+       点门店名就地展开；只有门店账号能改目标数。 -->
+
+  <div class="subpanel" id="subpanel-attain-history">
+    <div class="card">
+      <div class="card-head">
+        <h2>历史记录 <span class="hint" id="attain-hist-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-attain-hist">刷新</button>
+      </div>
+      <!-- 左「周列表」右「那一周的表」—— 点左边一行，右边换成那一周。
+           ⚠ 这儿的内容**只读**：存档是过了这一周就锁住的那一份。 -->
+      <div class="hist-wrap">
+        <div class="hist-list" id="attain-hist-list">加载中…</div>
+        <div class="hist-body" id="attain-hist-body"></div>
+      </div>
+      <div class="hint" style="margin-top:10px;line-height:1.7">
+        每到新的一周、第一次获取达成时，<b>上一周会就地锁住存档</b>（14–20 号那一周，
+        21 号跑完就进这里了）。<br>
+        ⚠ <b>存档锁住后不会再改</b> —— 它就是当时那一份，复盘引用的是它；
+        想看最新的一周请到「周度目标达成情况」。
       </div>
     </div>
   </div>
 
   <div class="subpanel" id="subpanel-sales-settings">
     <div class="card">
-      <div class="card-head"><h2>销售达成推送</h2></div>
-      <p class="hint">
-        ⚠ <b>还没做</b>（3.0.0 的 M5）。<br>
-        推送的<b>通道参数</b>（SMTP / 企微 webhook）在「通用设置」里配，
-        这里只放<b>本业务推不推</b>的开关。
+      <div class="card-head">
+        <h2>周度目标达成情况推送</h2>
+        <button class="btn ghost small" id="btn-refresh-attain-set">刷新</button>
+      </div>
+      <!-- ⚠ 这里**只放"本业务推不推"**；通道参数（SMTP / webhook）在左下角
+           「通用设置」里 —— 判别标准：跟**业务**有关的留在模块里，
+           这台**电脑本身**的配置才在左下角（用户 2026-09-19 定的）。 -->
+      <div id="attain-set-body">加载中…</div>
+    </div>
+
+    <!-- ⭐ 这个模块**自己那一步**的定时设置（用户 2026-09-20：
+         「每个模块的设置页面加上定时执行相关设置」）。
+         ⚠ 只显示**归属本模块**的步骤（后端按注册表算好 `owner_key` 给过来），
+           前端不许自己列一份"哪一步属于谁"。 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>什么时候自动跑 <span class="hint" id="timer-meta-sales"></span></h2>
+      </div>
+      <div id="timer-tasks-sales">加载中…</div>
+      <p class="hint" style="margin:8px 0 0 0">
+        改完点那一行的「保存」，<b>立刻生效、不用重启</b>。<br>
+        整个系统的时间表（含另外两个模块和系统兜底任务）在
+        <b>设置 › 定时器设置</b>。
       </p>
     </div>
   </div>
 </section>
 
+<!-- ───────────────────── 月度生意计划（M22）─────────────────────
+     ⚠ 这一页**只读** `out/plan-<年>.json`（`python -m src.cli plan` 算好的那份）——
+       看板不做计算、不读数据库（跟达成那一页同一个理由：算一次要全表扫两遍，
+       而页面随时会被刷新）。
+     ⚠ 表格是**列可展开**的：行永远是"门店"，**点列名**（块 / 系列）就地展开成
+       它下面的产品线（用户原话：「做个合并的，**点击列名可以展开**显示几个产品线」
+       + 后来补的「**三级也做**」）。
+     ⚠ 展开状态记在 `localStorage`（点了展开再刷新，不该又合上）。 -->
+<section class="panel" id="panel-plan">
+  <div class="subpanel" id="subpanel-monthly">
+    <div class="card">
+      <div class="card-head">
+        <h2>月度生意计划 <span class="hint" id="plan-meta"></span></h2>
+        <!-- 指标切换（销量 / 销售额 / 利润）—— 一次看一个，表才不至于宽到没法读。
+             ⚠ 默认「销售额」：日常先看钱。 -->
+        <div class="seg" id="plan-metric" role="tablist" aria-label="看哪个指标">
+          <button class="seg-btn" data-metric="qty" role="tab">销量</button>
+          <button class="seg-btn active" data-metric="amount" role="tab">销售额</button>
+          <button class="seg-btn" data-metric="profit" role="tab">利润</button>
+        </div>
+        <button class="btn ghost small" id="btn-refresh-plan"
+                title="重新抓云商销售数据并重算（约 1~2 分钟）"
+                aria-label="刷新：重新抓云商销售数据并重算（约 1~2 分钟）">刷新</button>
+        <button class="btn ghost small" id="btn-export-plan"
+                title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 导出的范围就是你能看到的这几家店"
+                aria-label="导出为 Excel">导出 Excel</button>
+      </div>
+      <div id="plan-warn"></div>
+      <div id="plan-table" class="plan-wrap"></div>
+      <div class="hint" id="plan-legend" style="margin-top:8px"></div>
+      <div class="hint" id="plan-export-result" hidden style="margin-top:10px"></div>
+      <div class="hint" id="plan-unknown" style="margin-top:10px"></div>
+      <div class="hint" style="margin-top:10px;line-height:1.7">
+        <b>本月</b>是「当月 1 号 ~ 数据截至日」，<b>上月同期</b>是「上月 1 号 ~ 上月同一天」
+        （同天数，遇到上月没那一天就取到月底）。<br>
+        <b>环比</b> =（本月 − 上月同期）/ 上月同期；上月为 0 写「新增」、
+        上月为负或两边都是 0 时<b>不给百分比</b>（显示「—」）。<br>
+        <b>利润</b>取云商「零售考核毛利」。<b>销量</b>含退货（源数据里已是负数，直接相减）。<br>
+        <b>剔除</b>：核销 / 客情单等非零售单据、演示机 / 体验机、串号标识含「外调」的行；
+        名单外的店（联想专卖店 / 部门 / 机场店）一条都不算。<br>
+        ⚠ 这是「<b>按串号卖出去的</b>」口径（跟四池对账同一份数据），
+        <b>不是云商全部开单</b> —— 无串号的行（配件、第三方耳机等）不在内。<br>
+        ⚠ 展开后看到的是<b>系列 / 机型</b>，它们的数**加不出**上一层的合计
+        （同一台机器只在一个机型里，但层级行都在表里）—— 要合计看最左边那一列。
+      </div>
+    </div>
+  </div>
+  <div class="subpanel" id="subpanel-plan-settings">
+    <div class="card">
+      <div class="card-head">
+        <h2>月度计划推送</h2>
+        <span class="hint">默认关闭 · 与「推送设置」同步</span>
+      </div>
+      <div id="notify-pref-list-plan">加载中…</div>
+      <p class="hint">邮件/企微通道在左下角「推送设置」里配。</p>
+    </div>
+  </div>
+</section>
+
 <!-- ───────────────────────────── 合规 ─────────────────────────────
-     ⚠ POS 和四池**各是各的表**，不许混（用户 2026-09-18 明说）。 -->
+     ⚠ POS 和报量查询**各是各的表**，不许混（用户 2026-09-18 明说）。 -->
 <section class="panel" id="panel-compliance">
+  <!-- ⚠ 介绍页已删（2026-09-19 用户：「B 吧，现在来看这个介绍页没用」）——
+     点一级标签直接进它第一个二级页，见 app.js 的 switchTab。 -->
+
     <!-- ───────────────────────────── POS 合规 ───────────────────────────── -->
     <div class="subpanel" id="subpanel-pos">
       <div class="cards" id="pos-cards"></div>
@@ -126,37 +471,51 @@
       <div class="card">
         <div class="card-head">
           <h2>月度 POS 合规率 <span class="hint" id="pos-meta"></span></h2>
-          <button class="btn ghost small" id="btn-refresh-pos">刷新</button>
+          <button class="btn ghost small" id="btn-refresh-pos" title="重新抓玲珑数据并重算 POS（约 1~2 分钟）"
+                  aria-label="刷新：重新抓玲珑数据并重算 POS（约 1~2 分钟）">刷新</button>
         </div>
         <div id="pos-table"></div>
+        <div class="hint" id="pos-note" style="margin-top:8px"></div>
+        <!-- ⚠ 2026-09-21：口径说明按**官方 PPT**（《POS合规：计算逻辑及方法》）重写。
+             原来那段写的是"我们自己的口径"（非现金/全部、扣退货、整月汇总），
+             而那个数**跟财经的成绩对不上**（返利是按官方算的）。 -->
         <div class="hint" style="margin-top:10px;line-height:1.7">
-          <b>口径</b>：分母 = 非国补、非即时零售、非 Care+ 的订单金额
-          （<b>团单保留</b>，它走单独申诉）；
-          分子 = 其中的<b>非现金</b>支付金额（微信/支付宝/花呗/刷卡…只要是现金以外都算）。<br>
-          <b>退货</b>：在<b>退货发生当月</b>扣减原单的金额与非现金部分。<br>
-          <b>两个口径并排</b>：「按标签」认 <code>orderLabelList</code>、「按备注」认 <code>remark == '国补'</code>
-          —— 实测两者会不一致，所以两个数都要看。<br>
-          ⚠ <b>暂定</b>：退货在退货当月扣减 ⇒ <b>上一个月的分数还会被这个月的退货改</b>，
-          所以最近两个月标暂定，等它过完才定稿。
+          <b>官方口径</b>（跟财经那份成绩同一个算法）：
+          <code>POS使用率 = 1 −（现金 + 记账）/ 总金额</code>，
+          <b>先按天算、再取统计期日均值</b>。<br>
+          「现金」= 开钱箱的收款方式；「记账」= 渠道名为「记账」的（如公对公打款）。<br>
+          官方的「<b>不含退货数据</b>」= <b>退货要扣掉</b>（算净额，在<b>退货发生当月</b>扣、
+          原单当月不动）—— <b>两个口径都扣</b>。<br>
+          <b>两个口径并排</b>：「按标签」认 <code>orderLabelList</code>、「按备注」认
+          <code>remark == '国补'</code> —— 实测两者会不一致，所以两个数都要看。<br>
+          <b>我们自己的口径</b>（表格里「我们」那两列，留着跟历史报表对账）：
+          分子 = 非现金支付、分母 = 全部金额，<b>退货在退货当月扣减</b>，<b>整月汇总</b>。<br>
+          ⚠ 两边都<b>排除国补 / 即时零售 / Care+</b>：那几类在我们库里<b>全走现金</b>，
+          不排除会被补贴砸掉几十分（实测国补占支付额 <b>54%</b>）。<br>
+          ⚠ 官方公式里的「<b>异常金额</b>」（成交价低于建议零售价 30% 以上的部分）
+          <b>暂时没有数据源</b>（要建议零售价，库里只有成交价）⇒ 按 0 计，
+          这一项会让官方分数比这里算的<b>略低</b>。<br>
+          ⚠ <b>暂定</b>：最近两个月 —— 上月成绩在下月 15 日内才定稿。
         </div>
       </div>
     </div>
 
     <!-- ─────────────────────────── 报量排查 ─────────────────────────── -->
-    <div class="subpanel active" id="subpanel-pools">
+    <div class="subpanel" id="subpanel-pools">
       <div class="cards" id="report-cards"></div>
 
       <div class="card">
         <div class="card-head">
-          <h2>四池比对记录 <span class="hint" id="report-count"></span></h2>
-          <button class="btn ghost small" id="btn-refresh-reports">刷新</button>
+          <h2>报量查询记录 <span class="hint" id="report-count"></span></h2>
+          <button class="btn ghost small" id="btn-refresh-reports" title="两边都重新抓一遍再做对比（约 1~2 分钟）"
+                  aria-label="刷新：两边都重新抓一遍再做对比（约 1~2 分钟）">刷新</button>
         </div>
         <div id="report-list"></div>
       </div>
 
       <div class="card" id="report-detail-card" hidden>
         <div class="card-head">
-          <h2 id="report-detail-title">四池比对明细</h2>
+          <h2 id="report-detail-title">报量查询明细</h2>
           <div>
             <a class="btn ghost small" id="btn-download" href="#" download>下载 xlsx</a>
             <button class="btn ghost small" id="btn-close-detail">关闭</button>
@@ -169,18 +528,49 @@
 
   <div class="subpanel" id="subpanel-compliance-settings">
     <div class="card">
-      <div class="card-head"><h2>合规推送</h2></div>
+      <div class="card-head"><h2>合规推送</h2>
+        <span class="hint">默认关闭 · 与「推送设置」同步</span></div>
+      <div id="notify-pref-list-compliance">加载中…</div>
       <p class="hint">
-        POS 合规和四池对账<b>各推各的</b>（两条推送、两套文案），
-        哪条跑不跑由「通用设置 → 定时执行 → 自动化跑什么」决定。<br>
-        ⚠ <b>推送开关挪到这里的活儿还没做</b>（3.0.0 的 M6）；
-        目前开关仍在「通用设置」的邮件 / 企微卡片里。
+        POS 合规和双平台数据对比<b>各推各的</b>（两条推送、两套文案）。<br>
+        邮件/企微通道在左下角「推送设置」里配。
       </p>
+    </div>
+
+    <!-- ⚠ 2026-09-21（用户：「**清除推送记忆这个放在报量查询那个设置里面吧**，
+         合作店用不上，而且**不用描述上报 bug 的事，只说这个什么时候用就行了**」）——
+         它是**双平台数据对比**这条推送自己的事 ⇒ 放这个模块的设置页。
+         合作店不看这一页（后端 `PAGE_RULES` 已经把 `pools` 挡在外面了）。
+         ⚠ 它是**平级的一张卡**，别嵌在「合规推送」里面（那会画成卡中卡）。 -->
+    <div class="card">
+      <div class="card-head"><h2>推送记忆</h2></div>
       <div class="form-row">
-        <button class="btn" id="btn-clear-pools-notify-2">清除推送记忆</button>
-        <span class="hint">四池推送的「★ 新」记忆 —— 说明见「通用设置 → 出问题了？」</span>
-        <span class="hint" id="clear-pools-notify-msg-2"></span>
+      <button class="btn" id="btn-clear-pools-notify">清除推送记忆</button>
+      <span class="hint" id="clear-pools-notify-msg"></span>
       </div>
+      <p class="hint" style="margin:10px 0 0 0">
+        双平台数据对比推送会记住"这个串号推过没有"：第一次出现标 <b>★ 新</b>，
+        之后再出现就弱化，并写上"已推 N 次、<b>首次</b>几号"。<br>
+        因为批发单那种情况（云商先报、玲珑过后才报）会<b>连着推好几天</b>，
+        全是重复的，门店看两天就麻木了。<br>
+        <b>什么时候用它</b>：想让清单里每一条都<b>重新醒目一次</b>的时候点一下 ——
+        <b>它不会让任何一条少被提醒</b>。<br>
+        ⚠ 一般用不着手动清：串号从清单里消失（报量了 / 出库了）时会自动忘掉。<br>
+      ⚠ 清空之后，下次推送会把当时清单里的每一条都重新当"新的"强调一遍。
+      </p>
+    </div>
+
+    <!-- ⭐ 本模块（POS 合规 / 双平台数据对比）**各自的唤醒时刻** —— 见上面那段说明 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>什么时候自动跑 <span class="hint" id="timer-meta-compliance"></span></h2>
+      </div>
+      <div id="timer-tasks-compliance">加载中…</div>
+      <p class="hint" style="margin:8px 0 0 0">
+        改完点那一行的「保存」，<b>立刻生效、不用重启</b>。<br>
+        整个系统的时间表（含数据抓取和系统兜底任务）在
+        <b>设置 › 定时器设置</b>。
+      </p>
     </div>
   </div>
 </section>
@@ -190,72 +580,472 @@
      界面上不显示。两个都没了，那一页就是空的。
      云商账号现在只在 `.secrets/erp.env`（或内置兜底）里，界面上没有入口。 -->
 
-
-<!-- ───────────────────────────── 设置 ───────────────────────────── -->
-<section class="panel" id="panel-settings">
-  <div class="subpanel active" id="subpanel-general">
+<!-- ─────────────────────────── 库存盘点（M16）───────────────────────────
+     ⚠ 这一页**已拆 iframe、并进同文档**（2026-09-22）—— markup 在
+       `#subpanel-inventory` 的 `.inv-root` 里，配色直接吃控制台主题。
+       历史：用户 2026-09-20 曾定「做嵌套进来」；外层控制台卡片已去掉；
+       扫码焦点靠 `mountInventory` / `focusInvScan`（同文档，不再 postMessage）。
+       脚本由 app.js 在**第一次切到这一页时**懒注入（不点不发请求）。
+       ⚠ 面板本身（`panel-` / `subpanel-`）**不能删** —— 切页签靠它，
+         `test_web_ia` 那几条也钉着。 -->
+<!-- ───────────────────── 增值 · 防护膜达成情况 ─────────────────────
+     本地 erp_sales 现算。口径定稿见倒推文档。 -->
+<section class="panel" id="panel-valueadd">
+  <div class="subpanel" id="subpanel-film">
     <div class="card">
-      <div class="card-head"><h2>门店</h2></div>
-      <p class="hint">部署到门店电脑，改这三行就够了。</p>
-      <div class="form-row"><label>华为门店编码</label>
-        <input id="cfg-store_code" placeholder="SCN231409（留空则按会话自身门店查）"></div>
-      <div class="form-row"><label>串号标识（本店码）</label>
-        <input id="cfg-marker" placeholder="Y">
-        <span class="hint">对照 <code>config/stores.yaml</code>；顺和汇在数据里是小写 <code>s</code></span></div>
-      <div class="form-row"><label>云商门店名</label>
-        <input id="cfg-erp_store_name" placeholder="青岛新业广场店"></div>
-      <div class="form-row">
-        <button class="btn primary" id="btn-save-store">保存门店配置</button>
-        <span class="hint" id="store-msg"></span>
+      <div class="card-head">
+        <h2 id="film-title">防护膜达成情况 <span class="hint" id="film-meta"></span></h2>
+        <div class="form-row" style="margin:0">
+          <button class="btn ghost small" id="btn-refresh-film"
+                  title="重新从本地销售明细计算"
+                  aria-label="刷新">刷新</button>
+          <button class="btn ghost small" id="btn-export-film"
+                  title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 版式同源表"
+                  aria-label="导出为 Excel">导出 Excel</button>
+        </div>
       </div>
-      <p class="hint">⚠ <b>改了华为门店编码要重新登录一次华为</b> —— 会话是按店存的
-        （<code>.secrets/cbg-&lt;门店码&gt;.json</code>），换店等于换一份会话，
-        到「会话」页用<b>那个店的账号</b>重新抓一次。</p>
+      <div id="film-warn"></div>
+      <div id="film-table"></div>
+      <div class="hint" id="film-export-result" hidden style="margin-top:10px"></div>
+      <div class="hint" id="film-legend" style="margin-top:8px"></div>
+      <div class="hint" style="margin-top:10px;line-height:1.7">
+        <b>新机</b> =（手机零售净台数 + 分销里备注含「美团」净台数）× 0.9；
+        京东分销、其它分销不算。<br>
+        <b>达成</b> = 贴膜去掉高透软膜，零售+分销（含退）净件数，<b>不含核销</b>。<br>
+        <b>目标</b> = 新机 ÷ 2；<b>跟机率</b> = 达成 ÷ 新机；
+        <b>毛利目标</b> = 新机 × 台均基线（25/30/35/40，按店）。<br>
+        <b>礼包</b>只算 9 个膜类礼包品名；<b>总达成率</b> = 毛利达成率×50% + 礼包达成率×50%。<br>
+        <b>点门店名</b>拆到个人：同一套公式按个人新机台量推目标（基线仍是本店档）；
+        人加总 = 店里那一行。
+      </div>
+    </div>
+  </div>
+  <!-- 无忧会员权益：门店 / 区域 / 人员 / 赛道一页（2026-09-22）。
+       口径见 metric.py（开发逆推稿不进正式包） -->
+  <div class="subpanel" id="subpanel-benefit">
+    <div class="card">
+      <div class="card-head">
+        <h2>无忧会员权益 <span class="hint" id="benefit-meta"></span></h2>
+        <div class="form-row" style="margin:0">
+          <button class="btn ghost small" id="btn-refresh-benefit"
+                  title="重新从本地销售明细计算"
+                  aria-label="刷新">刷新</button>
+          <button class="btn ghost small" id="btn-export-benefit"
+                  title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 四张表"
+                  aria-label="导出为 Excel">导出 Excel</button>
+        </div>
+      </div>
+      <div class="seg" id="benefit-seg" role="tablist" aria-label="无忧会员权益视图">
+        <button class="seg-btn active" data-bview="stores" type="button">门店达成</button>
+        <button class="seg-btn" data-bview="regions" type="button">区域达成</button>
+        <button class="seg-btn" data-bview="people" type="button">人员跟进</button>
+        <button class="seg-btn" data-bview="tracks" type="button">赛道奖金</button>
+      </div>
+      <div id="benefit-warn"></div>
+      <div id="benefit-table"></div>
+      <div class="hint" id="benefit-export-result" hidden style="margin-top:10px"></div>
+      <div class="hint" id="benefit-legend" style="margin-top:8px"></div>
+    </div>
+  </div>
+  <div class="subpanel" id="subpanel-valueadd-settings">
+    <div class="card">
+      <div class="card-head">
+        <h2>增值推送</h2>
+        <span class="hint">默认关闭 · 与「推送设置」同步</span>
+      </div>
+      <div id="notify-pref-list-valueadd">加载中…</div>
+      <p class="hint">邮件/企微通道在左下角「推送设置」里配。</p>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-inventory">
+  <div class="subpanel" id="subpanel-inventory">
+  <div class="inv-root" id="inv-root">
+    <div class="wrap">
+      <div class="topbar">
+        <h1>门店<span>库存盘点</span></h1>
+        <a class="ghost" id="btn-back" href="/">← 回控制台</a>
+        <div class="session" id="session-info"></div>
+        <button id="btn-settings" class="ghost">接口设置</button>
+      </div>
+
+      <!-- 设置 / 拉取 -->
+      <section class="card hidden" id="setup">
+        <h2>① 选择门店并拉取账面库存 <span class="sub">数据由控制台后端去云商实时拉取</span></h2>
+        <div class="row">
+          <div class="field">
+            <label>盘点日期（库存快照日）</label>
+            <input type="date" id="date" />
+          </div>
+          <div class="field">
+            <label>筛选仓库</label>
+            <input type="text" id="store-filter" placeholder="输入关键字过滤，如：万达" style="width: 150px" />
+          </div>
+          <div class="field" style="flex: 1; min-width: 260px">
+            <label>仓库（门店仓）</label>
+            <select id="store" style="width: 100%; max-width: none"></select>
+          </div>
+          <button id="btn-load-wh" class="ghost">刷新仓库列表</button>
+          <button id="btn-start" class="primary">开始拉取库存</button>
+          <button id="btn-load-backup" class="ghost" title="导入之前导出的「会话备份」JSON，接着上次没盘完的继续">加载未完成盘点</button>
+          <input type="file" id="backup-file" accept=".json,application/json" class="hidden" />
+        </div>
+        <div class="hint">
+          选择门店对应的<b>仓库</b>，点击开始拉取。拉取成功后进入扫码盘点界面。<br />
+          换电脑、清了浏览器数据、或者从别人那台机器接手时，用 <b>加载未完成盘点</b> 选之前导出的会话备份 JSON，
+          就能接着上次的进度继续盘（账面、扫码、手工确认、实盘数量、备注都会回来）。
+        </div>
+
+        <!-- ⚠ 2026-09-21（用户：「**接口设置这个页面就不要了**」）——
+             这里原来是一个折叠块「云商账号 / 接口设置」：账号只读信息（账号 / companycode）
+             + 一段"这一页不用登录"的说明 + 三个盘点偏好。账号早在控制台配了，
+             那个折叠块就只剩一段说明白占地方 ⇒ **摊平成两行**：
+             ① 后端读到的账号（一行字，不再是两个只读输入框）
+             ② 三个盘点偏好 + 「立即加载全库索引」。
+             ⚠ 三个勾选**一个都不能少**（提示音 / 全库索引 / 在途），它们是真设置。 -->
+        <div class="row" style="margin-top: 12px">
+          <div class="field" style="flex: 1; min-width: 260px">
+            <label>云商账号（控制台里配的那份，这一页不用登录）</label>
+            <div class="login-status" id="login-status"></div>
+          </div>
+          <button id="btn-relogin" class="ghost">重新读取</button>
+        </div>
+
+        <div class="row" style="margin-top: 6px">
+          <label class="chk"><input type="checkbox" id="opt-sound" /> 扫码提示音</label>
+          <label class="chk">
+            <input type="checkbox" id="opt-index" /> 拉取库存后自动建立全库串号索引（约 10~20 秒，用于识别非本店库存）
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="opt-transit" /> 拉取「在途（待入库）」清单（账面已挂到本店、货还没到的）
+          </label>
+          <button id="btn-gi" class="ghost">立即加载全库索引</button>
+        </div>
+        <div class="hint">
+          账号在控制台<b>左下角「通用设置 › 云商账号」</b>里配一次即可（跟别的功能共用同一份）；
+          这一页<b>不存任何账号、密码或 token</b>，账号过期时后端自己会重登一次。<br />
+          下面这三个偏好只保存在本机浏览器 localStorage；盘点进度（冻结账面 + 扫码记录）同样只在本机，
+          关掉页面再打开可以接着盘。
+        </div>
+      </section>
+
+      <!-- 扫码台 -->
+      <section class="card hidden" id="scan-card">
+        <h2>② 扫码盘点 <span class="sub" id="scan-store"></span></h2>
+        <div class="scan-grid">
+          <div>
+            <input
+              type="text"
+              id="scan-input"
+              class="scan-input"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="把光标放这里，扫码枪扫 SN / IMEI 条码（会自动回车提交）"
+            />
+            <div class="feedback" id="feedback"></div>
+            <div class="toolbar">
+              <button id="btn-undo">撤销上一扫</button>
+              <button id="btn-update-book" class="ghost" title="重新从云商拉取库存，先看差异再决定是否应用；旧账面会保留为上一版">更新账面</button>
+              <button id="btn-backup" class="ghost" title="把当前会话（账面 + 记录）导出成文件，保存失败时用它保命">下载会话备份</button>
+              <button id="btn-new" class="ghost">结束本次盘点</button>
+              <span class="save-status" id="save-status"></span>
+            </div>
+            <div class="recent" id="recent"></div>
+          </div>
+          <div>
+            <div class="stat-grid" id="stats"></div>
+            <div class="progress"><i id="progress-bar"></i></div>
+            <div class="progress-label"><span id="progress-text"></span><span id="progress-extra"></span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 账面更新差异评审 -->
+      <section class="card hidden" id="book-diff-card">
+        <h2>账面更新评审 <span class="sub">确认差异后再应用，旧账面会保留为上一版</span></h2>
+        <div id="book-diff-body"></div>
+        <div class="toolbar">
+          <button id="btn-apply-book" class="primary">应用新账面</button>
+          <button id="btn-cancel-book" class="ghost">取消，保持当前账面</button>
+        </div>
+      </section>
+
+      <!-- 结果 -->
+      <section class="card hidden" id="results-card">
+        <h2>③ 盘点结果 <span class="sub">扫完后在这里看未扫到 / 表外码</span></h2>
+        <div class="tabs" id="tabs"></div>
+        <div id="tab-body"></div>
+        <div class="toolbar export-bar">
+          <button id="btn-export" class="primary">导出完整 Excel</button>
+          <!-- ⭐ M16：同一个 xlsx，一条存本机、一条推出去（邮件带附件 + 企微汇总一条） -->
+          <button id="btn-push" title="把这份 7 张表的 xlsx 交给控制台推送：邮件带附件、企微群发一条汇总">导出并推送</button>
+          <button id="btn-export-csv">导出 CSV</button>
+          <button id="btn-print">打印</button>
+          <span class="spacer"></span>
+          <span class="hint" style="margin: 0">扫描记录实时保存在本机浏览器，关掉页面再打开可继续</span>
+        </div>
+      </section>
+    
+    <div class="foot-ver" id="foot-ver"></div>
+  </div>
+    <div class="toast" id="inv-toast"></div>
+    <div class="loading-mask hidden" id="loading">
+      <div class="loading-box">
+        <div class="spinner"></div>
+        <div class="msg" id="loading-msg">处理中…</div>
+        <div class="sub" id="loading-sub"></div>
+      </div>
+  </div>
+  </div>
+  <div class="subpanel" id="subpanel-inventory-settings">
+    <div class="card">
+      <div class="card-head">
+        <h2>库存盘点推送</h2>
+        <span class="hint">默认关闭 · 与「推送设置」同步</span>
+      </div>
+      <div id="notify-pref-list-inventory">加载中…</div>
+      <p class="hint">导出清单要不要发邮件/企微，在这里开；通道在「推送设置」。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ⚠ 小工具：**两个 iframe 各装一格**（用户 2026-09-22：「把 iframe 拆开」）。
+     iframe 必须在 subpanel **里面** —— 挂 panel 上、subpanel 全藏会「一闪即逝」。 -->
+<section class="panel" id="panel-tools">
+  <div class="subpanel" id="subpanel-pricetag">
+    <iframe id="pricetag-frame" class="tools-frame" title="价签工具"
+            src="about:blank" referrerpolicy="no-referrer"></iframe>
+  </div>
+  <div class="subpanel" id="subpanel-badge">
+    <iframe id="badge-frame" class="tools-frame" title="工牌工具"
+            src="about:blank" referrerpolicy="no-referrer"></iframe>
+  </div>
+
+  <div class="subpanel" id="subpanel-claim-pending">
+    <div class="card">
+      <div class="card-head">
+        <h2>权益领取 <span class="hint" id="claim-pending-meta"></span></h2>
+        <div class="form-row" style="margin:0">
+          <button class="btn ghost small" id="btn-open-claim-acts"
+                  title="查看本期赠送活动配置"
+                  aria-label="活动一览">活动一览</button>
+          <button class="btn ghost small" id="btn-refresh-claim-pending"
+                  title="先抓云商销售再重算待领"
+                  aria-label="刷新">刷新</button>
+        </div>
+      </div>
+      <div id="claim-pending-summary" class="hint" style="margin-bottom:4px"></div>
+      <div class="hint" id="claim-pending-scope" style="margin-bottom:8px"></div>
+      <div class="form-row" style="margin:0 0 8px;flex-wrap:wrap;gap:8px;align-items:center">
+        <div class="seg" id="claim-status-seg" role="tablist" aria-label="待领/已领">
+          <button type="button" class="seg-btn active" data-claim-view="pending">待领</button>
+          <button type="button" class="seg-btn" data-claim-view="claimed">已领取</button>
+        </div>
+        <div class="form-row" style="margin:0;gap:6px;margin-left:auto" id="claim-pager">
+          <button type="button" class="btn ghost small" id="claim-page-prev" aria-label="上一页">↑ 上一页</button>
+          <span class="hint" id="claim-page-info" style="min-width:5.5em;text-align:center">—</span>
+          <button type="button" class="btn ghost small" id="claim-page-next" aria-label="下一页">↓ 下一页</button>
+        </div>
+      </div>
+      <div class="form-row" style="margin:0 0 10px;flex-wrap:wrap;gap:8px;align-items:center">
+        <label class="hint" for="claim-filter-store" style="margin:0">门店</label>
+        <select id="claim-filter-store" style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:160px">
+          <option value="">全部门店</option>
+        </select>
+        <label class="hint" for="claim-filter-cat" style="margin:0">品类</label>
+        <select id="claim-filter-cat" style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+          <option value="">全部品类</option>
+        </select>
+        <label class="hint" for="claim-filter-model" style="margin:0">机型</label>
+        <input id="claim-filter-model" type="search" placeholder="如 Mate XTs / FreeClip / nova 16"
+               style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px;min-width:200px;flex:1;max-width:280px" />
+        <span class="hint" id="claim-filter-count"></span>
+      </div>
+      <div id="claim-pending-table">加载中…</div>
+      <div class="hint" id="claim-pending-legend" style="margin-top:8px">
+        匹配口径：商品名命中活动机型，且支付日在赠送期内；退货不进待领。
+        「手动领取」打开华为官方页；「在线领取」走接口直提。状态落 <code>out/claim-status.json</code>。
+      </div>
+    </div>
+  </div>
+
+  <!-- 串号追踪（2026-09-23）：86码/SN → 库存快照 + 销售全程；无定时 Step -->
+  <div class="subpanel" id="subpanel-sn-trace">
+    <div class="card">
+      <div class="card-head">
+        <h2>串号追踪 <span class="hint" id="sn-trace-meta"></span></h2>
+        <div class="form-row" style="margin:0">
+          <button class="btn ghost small" id="btn-refresh-sn-trace"
+                  title="先抓云商在库+销售再查"
+                  aria-label="刷新">刷新</button>
+        </div>
+      </div>
+      <div class="hint" id="sn-trace-scope" style="margin-bottom:8px"></div>
+      <form class="form-row" id="sn-trace-form"
+            style="margin:0 0 12px;gap:8px;align-items:center;flex-wrap:wrap"
+            autocomplete="off">
+        <label class="hint" for="sn-trace-input" style="margin:0">串号</label>
+        <input id="sn-trace-input" type="search"
+               placeholder="粘贴 86 码（IMEI）或设备 SN，回车查询"
+               style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:280px;flex:1;max-width:420px" />
+        <button type="submit" class="btn" id="btn-sn-trace">查询</button>
+      </form>
+      <div id="sn-trace-result" class="hint">输入串号后点「查询」——本地库串起库存快照与销售记录，并反查真 SN。</div>
+    </div>
+  </div>
+</section>
+
+
+
+<!-- ──────────────────── 数据上报（M20，每店一张卡）────────────────────
+     ⚠ 数据**全部来自邮件**（各店发来的 SQLite 附件，收在 `in/report.db`，
+    原件在 `in/packages/`）——
+       不是本机抓的。所以每张卡都要写清"这份是哪天哪封邮件来的"（四·八验收 6），
+       而且**收信失败时保持原样**：这里只读库，绝不因为"这次没收上来"清空。
+     ⚠ **没上报的店也要有卡**（写着"从来没收到过"）—— 不然"哪几家没报"就看不出来，
+       而那正是这个页面最该回答的问题。 -->
+
+
+<!-- ──────────────────────── 通用设置 ────────────────────────
+     ⚠ 2026-09-19（用户）：「把左边儿一级标签的设置去掉吧，给它弄成鼠标移动到
+       左下角门店那个页面的时候，向上出现设置里的那些东西」——
+       **这一块（通用设置）没有一级页签了**：三条全在左下角的 `#side-menu` 里
+       （鼠标移到门店那块，从下往上弹出来）。
+       ⇒ `switchTab('settings', '<二级>')` 只有"从浮层点过来"这一种入口，
+         所以**没有介绍页**（`subpanel-settings-home` 已删）——
+         有也是谁也到不了的死页。
+     ⚠ 但**模块自己的「设置」不在这儿**（用户随后补的范围：「各个模块的设置
+       还是要给模块，只把通用设置做下来就行了」）——
+       `sales-settings` 在 `#panel-sales`、`compliance-settings` 在 `#panel-compliance`。
+       判别标准：**跟业务有关**的留在模块里，**这台电脑本身**的才在这一块。 -->
+<section class="panel" id="panel-settings">
+<div class="subpanel" id="subpanel-stores">
+    <div class="card">
+      <div class="card-head">
+        <h2>数据交换 · 每店一张卡 <span class="hint" id="stores-meta"></span></h2>
+        <button class="btn ghost small" id="btn-fetch-inbox"
+                title="现在去邮箱收一次（区长/平台机器才配了收信）">收一次</button>
+        <button class="btn ghost small" id="btn-refresh-stores">刷新</button>
+      </div>
+      <p class="hint" id="stores-hint">
+        每张卡是<b>那家店发过来的邮件</b>里的数据（SQLite 附件），不是这台机器抓的 ——
+        卡上写着「这份是哪天、什么时候收的」。<br>
+        <b>没上报的店也会有一张卡</b>（写着「从来没收到过」），
+        不然「哪几家没报」就看不出来了。
+      </p>
+      <div class="store-cards" id="store-cards"><div class="hint">正在读取…</div></div>
     </div>
 
-  
+    <div class="card" id="store-detail-card" hidden>
+      <div class="card-head">
+        <h2 id="store-detail-title">门店明细</h2>
+        <button class="btn ghost small" id="btn-close-store-detail">关闭</button>
+      </div>
+      <div id="store-detail"></div>
+    </div>
+
+    <!-- 收不下的包 / 列集变化 —— ⚠ **必须看得见**（静默丢掉一封的表现是
+         "这家店今天好像没报"，而没有任何地方能看出是收信这一步丢的） -->
+    <div class="card" id="inbox-problems-card" hidden>
+      <div class="card-head"><h2>收信的问题 <span class="hint" id="inbox-problems-meta"></span></h2></div>
+      <div id="inbox-problems"></div>
+    </div>
+  </div>
+
+  <!-- 账号设置 —— 用户 2026-09-19：「门店&姓名这一行变成账号设置，
+       点了右边显示**云商账号状态和信息**，可以在里面选择**退出登录**或者**切换账号**」。
+       ⚠ 「退出登录」和「切换账号」都走 `/api/store-account/logout`（清掉登录数据）——
+         区别只在**之后**：退出是留着登录页（门禁本来就拦着），
+         切换是把光标直接放到账号框上，省得再点一下。 -->
+  <div class="subpanel" id="subpanel-account">
+    <div class="cards" id="account-cards"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>云商账号 <span class="hint" id="account-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-account">刷新</button>
+      </div>
+      <div id="account-box"></div>
+      <div class="form-row">
+        <button class="btn" id="btn-account-logout">退出登录</button>
+        <button class="btn primary" id="btn-account-switch">切换账号</button>
+        <span class="hint" id="account-msg"></span>
+      </div>
+      <p class="hint">
+        ⚠ <b>退出登录会清掉这台机器的登录数据</b>（门店账号凭据 + 门店身份），
+        之后控制台回到登录页 —— 不登录就用不了。<br>
+        邮件 / 企微 / 时区 / 抓取参数<b>不受影响</b> —— 那是门店自己配的，
+        不该被一次"退出登录"带走。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>门店</h2></div>
+      <div id="account-store-box"></div>
+    </div>
+
+
+      <div class="card">
+        <div class="card-head">
+          <h2>本店人员 <span class="hint" id="staff-meta"></span></h2>
+          <div>
+            <button class="btn ghost small" id="btn-staff-all">全选</button>
+            <button class="btn ghost small" id="btn-staff-none">全不选</button>
+            <button class="btn primary small" id="btn-staff-save">保存</button>
+          </div>
+        </div>
+        <p class="hint" id="staff-hint">
+          从云商「设置 → 用户」里读<b>挂在本店机构下的账号</b>（机构 Id
+          <code id="staff-branch">—</code>）。<br>
+          <b>去掉勾</b>的就是"已经离职、但云商里的状态还没更新"的人 ——
+          他们不会出现在以后的<b>目标拆分表</b>里。<br>
+          ⚠ 以后<b>入职的新人</b>默认是勾上的（存的是"被剔除的人"，
+          不是"在职的人"），不用回来改。<br>
+          <b>保存</b>之后 <b>5 分钟</b>会自动把这一份<b>上报</b>给区长和中台
+          （这期间再点保存也只会发一封；每天 21:15 那趟照旧也带）。<br>
+          ⚠ <b>区长 / 平台</b>看到的是<b>各店发过来的状态表</b>（上报包里带的）
+          —— 那是别家店的名单，<b>只能看，改不了</b>（只有门店能改自己店的）。
+        </p>
+        <div id="staff-list"><div class="hint">正在读取…</div></div>
+        <div class="hint" id="staff-msg"></div>
+      </div>
+  </div>
+
+  <div class="subpanel" id="subpanel-general">
+    <!-- 功能推送总览（2026-09-22）：和各模块「设置」里是**同一套开关**（notify.prefs）。
+         默认全关 —— 门店每天开控制台，日常达成不必推。 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>功能推送</h2>
+        <span class="hint">默认关闭 · 与各模块 › 设置同步</span>
+      </div>
+      <div id="notify-pref-list">加载中…</div>
+      <p class="hint" style="margin:8px 0 0 0">
+        这里能开/关<b>每条业务</b>推不推；邮件/企微通道在下面两张卡里配。
+        各一级模块的「设置」页也能改同一套开关。
+      </p>
+    </div>
+    <!-- ⚠ 2026-09-21（用户：「通用设置里第一块门店去掉」）—— 这块整块删了。
+         它原来只显示"门店身份认出来没"+ 一个「重新登录 / 换账号」按钮，
+         而**登录/换账号的动作本来就在登录页**（`#btn-open-setup-ll`），
+         左边「账号设置」那一页也看得到身份 —— 三处说同一件事。
+         ⚠ 删的时候把 JS 那两处（`renderProfile` 里的 `#store-summary`、
+         `#btn-open-setup` 的接线）一起清了：只删 HTML 会变成静默空转。 -->
 
     <div class="card">
       <div class="card-head">
         <h2>邮件推送</h2>
         <span class="hint" id="mail-status"></span>
       </div>
-      <div class="form-row">
-        <label style="min-width:0"><input type="checkbox" id="mail-enabled"> 每次跑完把差异清单发到邮箱</label>
-        <select id="mail-preset" style="min-width:200px">
-          <option value="">—— 常见邮箱快速填充 ——</option>
-        </select>
+      <div class="hint" style="margin:-4px 0 10px 0">
+        一条路径 = 一套 SMTP + 收件人。配几条就发几条；<b>列表空 = 不发邮件</b>。
+        存本机 <code>.secrets/push-paths.json</code>，界面不回显密码。
       </div>
-      <div class="form-row"><label>SMTP 服务器</label>
-        <input id="mail-host" placeholder="smtp.qq.com" autocomplete="off">
-        <label style="min-width:auto">端口</label>
-        <input type="number" id="mail-port" style="min-width:90px" placeholder="465">
-        <select id="mail-security" style="min-width:130px">
-          <option value="ssl">SSL</option>
-          <option value="starttls">STARTTLS</option>
-          <option value="none">不加密</option>
-        </select>
-      </div>
-      <div class="form-row"><label>账号</label>
-        <input id="mail-username" placeholder="发件邮箱地址" autocomplete="off">
-        <span class="hint" id="mail-hint"></span></div>
-      <div class="form-row"><label>密码 / 授权码</label>
-        <input type="password" id="mail-password" placeholder="多数邮箱要填「授权码」" autocomplete="new-password">
-        <span class="hint">只存本机 <code>.secrets/mail.env</code>，界面不回显</span></div>
-      <div class="form-row"><label>收件人</label>
-        <input id="mail-recipients" placeholder="多个用逗号分隔，例如 a@x.com, b@y.com"></div>
-      <div class="form-row"><label>发件人</label>
-        <input id="mail-sender" placeholder="留空 = 用账号" autocomplete="off">
-        <label style="min-width:auto">主题前缀</label>
-        <input id="mail-subject_prefix" style="min-width:130px" placeholder="[报量对账]"></div>
-      <div class="form-row"><label>发送时机</label>
-        <select id="mail-when" style="min-width:170px">
-          <option value="always">每次都发</option>
-          <option value="only_diff">只有差异才发</option>
-        </select></div>
+      <div id="mail-paths" class="path-list"></div>
       <div class="form-row">
-        <button class="btn primary" id="btn-mail-save">保存</button>
-        <button class="btn" id="btn-mail-test">发送测试邮件</button>
+        <button class="btn" id="btn-mail-add">＋ 新增邮件路径</button>
+        <button class="btn primary" id="btn-mail-save">保存全部</button>
         <span class="hint" id="mail-msg"></span>
       </div>
       <div class="hint" id="mail-warn"></div>
@@ -266,31 +1056,14 @@
         <h2>企微群推送</h2>
         <span class="hint" id="wecom-status"></span>
       </div>
-      <div class="form-row">
-        <label style="min-width:0"><input type="checkbox" id="wecom-enabled">
-          每次跑完推送到企业微信群</label>
-      </div>
-      <div class="form-row"><label>webhook 地址</label>
-        <input id="wecom-webhook" style="min-width:420px" autocomplete="off"
-               placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"></div>
       <div class="hint" style="margin:-4px 0 10px 0">
-        群里 → 右上角设置 → 群机器人 → 添加机器人 → 复制 webhook 地址。
-        <b>只存本机 <code>.secrets/wecom.env</code></b>，界面只回显打码后的 key。
+        一条路径 = 一个群机器人 webhook。配几条就往几个群各推一遍；
+        <b>列表空 = 不推企微</b>。存 <code>.secrets/push-paths.json</code>，界面只回显打码 key。
       </div>
+      <div id="wecom-paths" class="path-list"></div>
       <div class="form-row">
-        <label style="min-width:0"><input type="checkbox" id="wecom-mention_all">
-          有差异时 @所有人</label>
-        <label style="min-width:0"><input type="checkbox" id="wecom-send_file">
-          同时把差异清单 xlsx 传到群里</label>
-      </div>
-      <div class="form-row"><label>发送时机</label>
-        <select id="wecom-when" style="min-width:170px">
-          <option value="always">每次都推</option>
-          <option value="only_diff">只有差异才推</option>
-        </select></div>
-      <div class="form-row">
-        <button class="btn primary" id="btn-wecom-save">保存</button>
-        <button class="btn" id="btn-wecom-test">推送测试消息</button>
+        <button class="btn" id="btn-wecom-add">＋ 新增企微路径</button>
+        <button class="btn primary" id="btn-wecom-save">保存全部</button>
         <span class="hint" id="wecom-msg"></span>
       </div>
       <div class="hint" id="wecom-warn"></div>
@@ -301,9 +1074,15 @@
         <h2>后台服务</h2>
         <span class="hint" id="svc-status"></span>
       </div>
+      <!-- ⚠ 2026-09-21（用户：「后台服务只显示**是否开机自动启动**，
+           如果否就多显示一个**添加开机自动启动**，要 uac 的那种」）——
+           原来是"复选框 + 保存"，现在改成"状态 + 一个按钮"：
+           没开的时候才露按钮，开了就只是一行状态（不用先勾再存两步）。 -->
       <div class="form-row">
-        <label style="min-width:0"><input type="checkbox" id="svc-autostart">
-          <b>开机自动启动</b>（登录 Windows 后自动在后台跑起来，不弹窗、<b>不需要管理员</b>）</label>
+        <b>开机自动启动</b>
+        <span class="hint" id="svc-autostart-state">读取中…</span>
+        <button class="btn primary" id="btn-autostart-add" hidden>添加开机自动启动</button>
+        <span class="hint" id="svc-msg"></span>
       </div>
       <!-- ⚠ 这里原来有一个「启动方式」下拉：普通权限 / 以管理员身份。
            2026-09-16 拿掉了，两个原因：
@@ -320,16 +1099,314 @@
         <button class="btn" id="btn-svc-repair">以管理员身份修复</button>
         <span class="hint">只弹这一次 UAC，删掉旧版本留下的提权任务；装依赖、跑对账都不提权</span>
       </div>
-      <div class="form-row">
-        <button class="btn primary" id="btn-svc-save">保存</button>
-        <span class="hint" id="svc-msg"></span>
-      </div>
+
       <p class="hint">
         <code>start.bat</code> 会把服务放后台跑，前台窗口报完「启动成功」按任意键就关掉，<b>不影响后台</b>。
         停止服务：双击 <code>stop.bat</code>（或 <code>python -m src.cli stop</code>）。
       </p>
     </div>
 
+    <!-- ⚠ 2026-09-21：「出问题了？/ 清除推送记忆」已经不在这儿了 ——
+         它挪进了「**报量查询 › 设置**」（那是这条推送自己的模块，
+         合作店也看不到那一页）；「上报 bug」在右下角状态抽屉里。 -->
+    <p class="hint">
+      定时执行、检查更新、主题风格都在<b>左下角菜单</b>里单独成页
+      （定时器设置 / 检查更新 / 主题设置），不在本页。
+    </p>
+  </div>
+
+  <!-- ⭐ 主题设置（用户 2026-09-22：「左下角加个主题设置，单独设置个主题风格的设置页面」）
+       色值**只在** `web/themes/<名>.css`（一主题一文件）；这一页只负责选。 -->
+  <div class="subpanel" id="subpanel-theme">
+    <div class="card">
+      <div class="card-head">
+        <h2>主题风格</h2>
+        <span class="hint">只影响这台电脑的浏览器 · 切换即时生效，刷新后保留</span>
+      </div>
+      <div class="theme-picks" id="theme-picks" role="radiogroup" aria-label="主题风格">
+        <button type="button" class="theme-pick is-on" data-theme-pick="default"
+                role="radio" aria-checked="true">
+          <span class="theme-swatch theme-swatch-light" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">默认（浅色）</b>
+            <span class="theme-pick-desc">日常亮度，和改造前一致</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="dark"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-dark" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">深色</b>
+            <span class="theme-pick-desc">夜间/暗环境，整站令牌切换</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="celadon"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-celadon" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">青瓷绿</b>
+            <span class="theme-pick-desc">温润清雅 · 柔和治愈</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="dusk"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-dusk" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">暮山蓝 × 晚桃粉</b>
+            <span class="theme-pick-desc">深色模式 · 沉静蓝底 + 桃粉点缀</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="pome"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-pome" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">石榴红</b>
+            <span class="theme-pick-desc">温暖浓郁 · 优雅有力</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="pine"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-pine" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">松针绿</b>
+            <span class="theme-pick-desc">自然沉静 · 琥珀点缀</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="mist"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-mist" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">雾霭紫</b>
+            <span class="theme-pick-desc">温柔浪漫 · 高级滤镜</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="bean"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-bean" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">豆沙粉</b>
+            <span class="theme-pick-desc">温柔耐看 · 墨青压阵</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="butter"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-butter" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">酪黄</b>
+            <span class="theme-pick-desc">温暖明亮 · 远山平衡</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="shiqing"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-shiqing" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">石青</b>
+            <span class="theme-pick-desc">冷静清爽 · 工具感</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="daiqiu"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-daiqiu" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">黛秋</b>
+            <span class="theme-pick-desc">文人书卷 · 冷暖平衡</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="zhusha"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-zhusha" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">朱砂</b>
+            <span class="theme-pick-desc">印泥暖红 · 有力克制</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="zhuqing"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-zhuqing" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">竹青</b>
+            <span class="theme-pick-desc">轻盈植物 · 素绢压阵</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="taotu"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-taotu" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">陶土</b>
+            <span class="theme-pick-desc">大地低饱和 · 耐看</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="dianye"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-dianye" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">靛夜</b>
+            <span class="theme-pick-desc">深色模式 · 冷静靛蓝</span>
+          </span>
+        </button>
+        <button type="button" class="theme-pick" data-theme-pick="photo"
+                role="radio" aria-checked="false">
+          <span class="theme-swatch theme-swatch-photo" aria-hidden="true">
+            <i class="sw-side"></i><i class="sw-main"></i><i class="sw-accent"></i>
+          </span>
+          <span class="theme-pick-body">
+            <b class="theme-pick-name">自定义照片主题</b>
+            <span class="theme-pick-desc">用自己上传的照片当背景</span>
+          </span>
+        </button>
+      </div>
+      <!-- 兜底下拉：和风格卡同步（键盘/读屏也能选；值走 localStorage） -->
+      <div class="form-row" style="margin-top:14px">
+        <label for="theme-select">主题</label>
+        <select id="theme-select">
+          <option value="default">默认（浅色）</option>
+          <option value="dark">深色</option>
+          <option value="celadon">青瓷绿</option>
+          <option value="dusk">暮山蓝 × 晚桃粉（深色）</option>
+          <option value="pome">石榴红</option>
+          <option value="pine">松针绿</option>
+          <option value="mist">雾霭紫</option>
+          <option value="bean">豆沙粉</option>
+          <option value="butter">酪黄</option>
+          <option value="shiqing">石青</option>
+          <option value="daiqiu">黛秋</option>
+          <option value="zhusha">朱砂</option>
+          <option value="zhuqing">竹青</option>
+          <option value="taotu">陶土</option>
+          <option value="dianye">靛夜（深色）</option>
+          <option value="photo">自定义照片主题</option>
+        </select>
+        <span class="hint" id="theme-hint">色值在 web/themes/ 下一主题一文件，本页不改业务代码</span>
+      </div>
+    </div>
+
+    <!-- ⭐ 自定义壁纸（2026-09-22）：文件进 web/wallpaper/；**选中只记 localStorage
+         cbg-wallpaper**；接口只管文件（GET/POST/DELETE /api/wallpaper），不碰主题名。 -->
+    <div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <h2>自定义照片壁纸</h2>
+        <span class="hint">仅「自定义照片主题」显示 · 选中记在本机浏览器</span>
+      </div>
+      <p class="hint">
+        支持 <code>.png</code> <code>.jpg</code> <code>.jpeg</code> <code>.webp</code> <code>.gif</code>
+        ，单张不超过 5MB。图片存在这台电脑的 <code>web/wallpaper/</code>，升级不会带走。
+      </p>
+      <div class="form-row">
+        <input type="file" id="wallpaper-file" accept=".png,.jpg,.jpeg,.webp,.gif,image/png,image/jpeg,image/webp,image/gif">
+        <button type="button" class="btn" id="btn-wallpaper-upload">上传</button>
+        <button type="button" class="btn ghost" id="btn-wallpaper-clear">不用壁纸</button>
+      </div>
+      <div class="form-row" style="margin-top:8px;align-items:center">
+        <label for="wallpaper-fit" style="min-width:auto">显示方式</label>
+        <select id="wallpaper-fit" style="min-width:160px">
+          <option value="cover">铺满裁切（默认）</option>
+          <option value="contain">完整显示（留边）</option>
+          <option value="repeat">平铺</option>
+        </select>
+        <span class="hint">不拉伸变形；换档立刻生效</span>
+      </div>
+      <div class="hint" id="wallpaper-status">加载中…</div>
+      <div class="wallpaper-grid" id="wallpaper-grid" role="list"></div>
+    </div>
+
+    <!-- ⭐ 日夜自动切换（2026-09-22 用户）：白天/夜晚各用哪套**门店自己选**；
+         存 localStorage（与 cbg-theme 同一套机制，不加后端接口）。
+         检查间隔刻意放宽到约 15 分钟 —— 用户：「每分钟检查有点狠了」。 -->
+    <div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <h2>日夜自动切换</h2>
+        <span class="hint">按日出日落切换 · 约 15 分钟检查一次</span>
+      </div>
+      <label class="switch" title="开启后：白天用「白天用」那套，夜晚用「夜晚用」那套">
+        <input type="checkbox" id="theme-auto">
+        <span class="switch-track"><span class="switch-knob"></span></span>
+        <span>开启自动切换</span>
+      </label>
+      <div class="form-row" style="margin-top:14px">
+        <label for="theme-day">白天用</label>
+        <select id="theme-day">
+          <option value="default">默认（浅色）</option>
+          <option value="dark">深色</option>
+          <option value="celadon">青瓷绿</option>
+          <option value="dusk">暮山蓝 × 晚桃粉（深色）</option>
+          <option value="pome">石榴红</option>
+          <option value="pine">松针绿</option>
+          <option value="mist">雾霭紫</option>
+          <option value="bean">豆沙粉</option>
+          <option value="butter">酪黄</option>
+          <option value="shiqing">石青</option>
+          <option value="daiqiu">黛秋</option>
+          <option value="zhusha">朱砂</option>
+          <option value="zhuqing">竹青</option>
+          <option value="taotu">陶土</option>
+          <option value="dianye">靛夜（深色）</option>
+          <option value="photo">自定义照片主题</option>
+        </select>
+        <span class="hint">日出～日落之间生效</span>
+      </div>
+      <div class="form-row">
+        <label for="theme-night">夜晚用</label>
+        <select id="theme-night">
+          <option value="default">默认（浅色）</option>
+          <option value="dark">深色</option>
+          <option value="celadon">青瓷绿</option>
+          <option value="dusk">暮山蓝 × 晚桃粉（深色）</option>
+          <option value="pome">石榴红</option>
+          <option value="pine">松针绿</option>
+          <option value="mist">雾霭紫</option>
+          <option value="bean">豆沙粉</option>
+          <option value="butter">酪黄</option>
+          <option value="shiqing">石青</option>
+          <option value="daiqiu">黛秋</option>
+          <option value="zhusha">朱砂</option>
+          <option value="zhuqing">竹青</option>
+          <option value="taotu">陶土</option>
+          <option value="dianye">靛夜（深色）</option>
+          <option value="photo">自定义照片主题</option>
+        </select>
+        <span class="hint">日落后～次日日出前生效</span>
+      </div>
+      <div class="hint" id="theme-auto-status">自动切换已关闭。</div>
+    </div>
+  </div>
+
+  <!-- ⚠ 2026-09-21（用户：「**检查更新单独做一个页面**」）——
+       它以前是"通用页里的一张卡"（左下角那一行跳过去、再滚到那张卡）。
+       现在是**真的一页**（`subpanel-update`），在左下角菜单里自己占一行，
+       跟「定时器设置」一个待遇。
+       ⚠ 「上报 bug」2026-09-21 挪进了右下角那个状态悬浮窗；
+         「清除推送记忆」挪进了「报量查询 › 设置」（那条推送自己的模块）。 -->
+  <div class="subpanel" id="subpanel-update">
     <div class="card">
       <div class="card-head">
         <h2>检查更新</h2>
@@ -340,7 +1417,7 @@
       <div id="upgrade-history" style="margin:8px 0"></div>
       <!-- ⚠ 这个按钮是 2026-09-18 加的：弹窗改成"弹出来就算看过"之后，
            没细看就关掉的话就再也见不着了 —— 所以得留个能翻回来的口子。
-           取的是**升级那天弹的那一份存档**，不是现算的（见 web/app.js 的注释）。 -->
+           取的是**升级那天弹的那一份存档**，不是现算的。 -->
       <div class="form-row">
         <button class="btn ghost small" id="btn-whatsnew-show">看这一版的更新说明</button>
         <span class="hint">就是升级后弹出来的那一份 —— 随时能翻回来看</span>
@@ -356,149 +1433,151 @@
         <code>out\</code>（历史报告）<b>一根手指都不碰</b>。更新完服务会自动重启。
       </p>
 
-      <details id="history-wrap" style="margin-top:10px">
-        <summary style="cursor:pointer;font-size:13px">历史版本 / 回退</summary>
-        <p class="hint" style="margin:8px 0">
-          升级出问题时可以退回以前的版本。<b>回退同样只覆盖代码</b>，
-          门店配置、账号会话、历史报告都不会动。回退完服务会自动重启。
-        </p>
-        <div class="form-row">
-          <button class="btn" id="btn-history-load">读取历史版本</button>
-          <span class="hint" id="history-msg"></span>
-        </div>
-        <div id="history-list"></div>
-      </details>
     </div>
 
-    <!-- ⚠ 2026-09-17（用户定）：这两件事原来挂在「定时执行」下面，
-         「出问题了？」和"每天几点跑"完全没关系。挪到「检查更新」旁边 ——
-         它们都是**出问题时才点**的维护动作。 -->
-    <div class="card">
-      <div class="card-head"><h2>出问题了？</h2></div>
-      <div class="form-row">
-        <button class="btn" id="btn-report-bug">上报 bug</button>
-        <button class="btn" id="btn-clear-pools-notify">清除推送记忆</button>
-        <span class="hint" id="report-bug-msg"></span>
-        <span class="hint" id="clear-pools-notify-msg"></span>
+  </div>
+
+  <!-- ⭐ 2026-09-20（用户：「**定时器设置单独出来一页**」）——
+       原来它是"通用"页里的一张卡，现在是一页（左下角菜单里自己一行）。 -->
+  <div class="subpanel" id="subpanel-timer">
+    <div class="card" id="card-scheduler">
+      <div class="card-head">
+        <!-- ⚠ `#timer-meta`（"下次 2026-09-20 21:00"）2026-09-20 **去掉了** ——
+             顶上那块大字已经写了"下一次什么时候、跑什么"，
+             标题上再挂一条就是同一件事写两遍（而且小字更容易被忽略）。 -->
+        <h2>定时器设置</h2>
+        <button class="btn ghost small" id="btn-refresh-timer">刷新</button>
       </div>
-      <div id="report-bug-result"></div>
-      <!-- ⚠ 说明的顺序**跟着按钮走**（上报 bug 在前）—— 原来两段是反的，
-           而「点一下会把现场日志打包」这句没有主语，紧跟在按钮后面才读得通。 -->
-      <p class="hint" style="margin:10px 0 0 0">
-        <b>上报 bug</b>：点一下会把<b>现场日志</b>打包（执行日志 / 定时任务 / 配置 / 环境），
-        然后<b>试着</b>发到邮箱和企业微信。<br>
-        ⚠ <b>包里没有任何能拿去登录的凭据</b>（<code>.secrets\</code> 整个不进包），
-        但有业务数据（门店名 / 串号 / 金额），发之前确认收件人是自己人。<br>
-        ⚠ 发不出去也<b>不影响</b> —— 包会留在 <code>out\report-bug-时间.zip</code>，
-        界面上会把路径写出来，直接把这个文件发出去就行。
-        <b>「推送失败」本身就是最常见的 bug，用它来上报它自己当然也不行。</b>
-      </p>
-      <p class="hint" style="margin:10px 0 0 0">
-        <b>清除推送记忆</b>：四池对账推送会记住"这个串号推过没有" ——
-        第一次出现标 <b>★ 新</b>，之后再出现就弱化并写上"已推 N 次、<b>首次</b>几号"。<br>
-        原因是批发单那种情况（云商先报、玲珑过后才报）会<b>连着推好几天</b>，
-        全是重复的，门店看两天就麻木了。<br>
-        ⚠ 清空之后，<b>下次推送会把当时清单里的每一条都重新当"新的"强调一遍</b>。
-        串号从清单里消失（报量了 / 出库了）时会自动忘掉，一般用不着手动清。<br>
-        <b>所以它是"反过来"用的</b>：想让清单里每一条都<b>重新醒目一次</b>时才点 ——
-        它<b>不会</b>让任何一条少被提醒。
-      </p>
-    </div>
 
-    <div class="card">
-      <div class="card-head"><h2>定时执行</h2></div>
+      <!-- ⭐ **内置定时器**（用户 2026-09-20）：
+           「要给个接口，让**各个模块设置什么时间点唤醒**、以及唤醒做什么。
+             然后定时器看到到点了就做这个。设置要可以设置**日期、时间，每周几，
+             每个月几号**这种」
+           ⚠ 「做什么」和默认时间来自**功能模块自己的声明**（`Step.whens`）——
+             这张表是**读出来的**，不是在这儿手写一份；改过的存在这台机器上。
+           ⚠ 2026-09-20 起**不再用 Windows 计划任务**（用户：「把兜底去掉吧」）——
+             服务靠开机自启常驻，到点叫醒由它自己负责。 -->
+      <!-- ⭐ 用户 2026-09-20：「定时器设置页面**最上面大字**写着**下一次执行的是啥、
+           什么时间**」。⚠ 内容和措辞**全部来自后端**（`/api/timer` 的 `next_run`）——
+           前端只排版，不自己判断"下一步是哪个"（那是定时器算的，两处各算一遍必然分叉）。 -->
+      <div class="timer-hero" id="timer-hero">加载中…</div>
+      <div class="timer-head" id="timer-state">加载中…</div>
+      <div id="timer-tasks">加载中…</div>
+      <p class="hint" style="margin:8px 0 0 0">
+        每一行是<b>一个功能模块</b>声明的一件事：<b>什么时候</b>（每天 / 工作日 / 每周几 /
+        每月几号 / 指定日期 / 每小时）叫醒它、醒来<b>做什么</b>。改完点那一行的「保存」。<br>
+        ⚠ <b>错过了不补</b>：比如设了 21:00 而那会儿机器关着，那今天就不跑了，等下一个时间点；
+        到点后只等 <b id="timer-window">30</b> 分钟（服务正好在重启也能赶上）。<br>
+        ⚠ 时间是<b>本机时间</b>；改了立刻算下一趟，不用重启服务。
+      </p>
+
+      <!-- ⚠ 2026-09-20（用户：「**把兜底去掉吧，不用系统的计划任务**」）：
+           原来这儿有一块「系统计划任务」——注册一条 Windows 计划任务当兜底。
+           现在**整套去掉**：到点由服务里的定时器跑，服务靠**开机自启**常驻。
+           ⚠ 但**老门店机器上可能还留着**当年注册的那条任务 —— 那一块由
+             `#schedule-box` 渲染（有才显示，一句话 + 一个「删除」）。
+           ⚠ 这个容器必须留着：`renderSchedule()` 找的就是它。 -->
       <div id="schedule-box"></div>
 
-      <div class="form-row" style="margin-top:12px">
-        <label style="min-width:auto"><b>自动化跑什么</b></label>
-        <span id="automation-box"></span>
-        <button class="btn small primary" id="btn-automation-save">保存</button>
-        <span class="hint" id="automation-msg"></span>
+      <!-- ⭐ 执行日志（用户 2026-09-20：「记录**什么时间唤醒了什么，成功了没**」）。
+           ⚠ 数据来自 `run_record(kind="wake")` —— 由**真跑那一步的进程**写的。
+           ⚠ 内部步骤（自动更新）**不进这张表**（用户 2026-09-21：「自动更新不进入
+             计时器前端显示，前端日志也不显示」）—— 它每小时都跑，会把真活淹掉。 -->
+      <div class="card" id="card-wake-log">
+        <div class="card-head">
+          <h2>执行日志 <span class="hint" id="wake-log-meta"></span></h2>
+        </div>
+        <div id="wake-log">加载中…</div>
+        <p class="hint" style="margin:8px 0 0 0">
+          每次到点唤醒都会记一条：<b>什么时间</b>、<b>唤醒了哪几件事</b>、<b>成功没</b>。<br>
+          ⚠ 手动起的（点各页「刷新」那种）**不进这张表** —— 它记的是"定时器叫醒的那几趟"。
+        </p>
       </div>
-      <p class="hint" style="margin:6px 0 0 0">
-        <b>「抓四池数据」每次都会跑</b>，不用选、也取消不掉 ——
-        不抓的话本地库永远是旧的，POS 和四池对账都只是拿旧数据在算，
-        而界面上只会显示"跑完了"。<br>
-        <b>「四池对账」</b>要勾着才会算 AD/BC 并推送 —— 它读的是云商和玲珑两边的快照，
-        不勾的话那两份清单永远不会出来。<br>
-        <b>「POS 合规」</b>不勾就不算当月的合规率，「POS 合规」页会停在上次算出来的数。<br>
-        两个都<b>不勾也允许</b>：那就是「每天只抓数据，不算也不推」。<br>
-        改这里<b>不用重新注册任务</b>，也不用弹 UAC：计划任务跑的是 <code>run.bat</code>，
-        改的是它的内容，任务本身没变。
-      </p>
 
-      <div class="form-row">
-        <label>每天</label><input type="time" id="sched-time" value="21:00">
-        <label>任务名</label>
-        <input type="text" id="sched-name" placeholder="留空 = CBG报量对账-21点00" size="30">
-        <button class="btn primary" id="btn-sched-install">添加定时任务</button>
-      </div>
-      <p class="hint">建议设在店里<b>肯定开着机</b>的时候（比如关门前）——
-        Windows 计划任务错过时间<b>不会补跑</b>。<br>
-        每行右边的「执行」会<b>立刻按这条任务跑一次</b>（跟到点自动跑走的是同一条路，
-        所以顺手能验证任务配得对不对）；「删除」只删那一行。<br>
-        开机自启那个任务不在这张表里，在「后台服务」卡片管。</p>
+      <!-- 删旧任务以后的结果提示（成功/失败各一句）—— 见 `renderSchedule()` -->
       <div id="sched-result"></div>
     </div>
   </div>
 
+  <!-- ⚠ 「人员设置」2026-09-21 **并进「账号与人员」**了（用户：「账号设置和人员设置
+       合并到一起吧」）—— 两张卡（云商账号 / 门店）和「本店人员」本来就是一件事：
+       **这台机器是谁、这店里有哪些人**。左下角菜单也少一行。
+       ⚠ 原来那段"人员设置"的注释留在 `#subpanel-account` 里（见下面）。 -->
+
     <div class="subpanel" id="subpanel-linglong">
-      <div class="card">
-        <div class="card-head">
-          <h2>自动抓取 <span class="hint">（推荐，不用手抄）</span></h2>
-          <button class="btn ghost small" id="btn-ping">会话自检</button>
-        </div>
-        <p class="hint" id="browser-line">正在检测浏览器…</p>
-
-        <div class="form-row"><label>华为账号</label>
-          <input id="hw-username" placeholder="账号名 / 邮箱 / 手机号 / W3账号" autocomplete="off">
-          <span class="hint" id="hw-status"></span></div>
-        <div class="form-row"><label>密码</label>
-          <input type="password" id="hw-password" placeholder="华为账号密码" autocomplete="new-password">
-          <span class="hint">只存本机 <code>.secrets/huawei.env</code>，界面不回显</span></div>
-        <div class="form-row">
-          <button class="btn small" id="btn-hw-save">保存账号</button>
-          <span class="hint">配了账号密码，抓取时会<b>自动填表登录</b>，不用手点</span>
-        </div>
-        <div class="hint" id="hw-warn" style="margin:-4px 0 10px 0"></div>
-
-        <div class="form-row">
-          <button class="btn primary" id="btn-auto-login">打开浏览器抓取</button>
-          <button class="btn" id="btn-auto-refresh">静默续期</button>
-        </div>
-        <p class="hint">
-          用<b>自己的浏览器 profile</b>（不碰你日常用的那个）打开
-          <span class="mono">#/group/smart-store/homepage</span>，未登录会自动跳到华为 SSO。
-          配了账号密码就自动登录；<b>没配、或遇到图形验证码</b>时窗口会留着让你手动登。
-          之后会话失效会<b>自动无头续期</b>，日常完全不用管。
-        </p>
-        <pre class="log" id="auto-log" hidden></pre>
-        <div id="auto-result"></div>
-      </div>
-
       <div class="card">
         <div class="card-head"><h2>当前会话</h2></div>
         <div id="session-box"></div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><h2>退路：手抄 curl</h2></div>
-        <p class="hint">自动抓取用不了时（比如浏览器装在不常见的位置）才需要这个。</p>
-        <ol class="steps">
-          <li>浏览器打开 <code>https://cbg.huawei.com/</code>，进新零售/报量页面</li>
-          <li>按 <kbd>F12</kbd> → <b>Network</b> → 刷新页面</li>
-          <li>找任意一条发往 <code>cbg.huawei.com</code>、返回 JSON 的请求</li>
-          <li>右键 → <b>Copy</b> → <b>Copy as cURL (cmd)</b></li>
-          <li>粘到下面，点「导入」</li>
-        </ol>
-        <textarea id="curl-input" rows="5"
-          placeholder="curl --url ^&quot;https://cbg.huawei.com/isrp/...^&quot; ^&#10;  -b ^&quot;JSESSIONID=...; hwssot3=...^&quot; ^&#10;  -H ^&quot;x-csrf-token: ...^&quot;"></textarea>
-        <div class="form-row">
-          <button class="btn" id="btn-import">导入并自检</button>
-          <button class="btn ghost" id="btn-clear-curl">清空</button>
-          <span class="hint">只要 cookie 和 x-csrf-token，两者必须来自同一份 curl。</span>
+      <!-- ⚠ 玲珑那套抓取控件的**家在这儿**。
+           用户 2026-09-19：「玲珑授权页面显示不全，输入账密和打开浏览器登录和静默登录那个没了」——
+           做登录门禁时把这些控件**只搬去了登录页**，这一页就只剩一句状态。
+           现在改成**一份 DOM、两个宿主**：平时住 `#ll-home`，
+           门禁打开且这家店要走玲珑时，整块搬进登录页的 `#ll-host`。
+           ⚠ 是**搬移**不是复制：复制会让 id 重复，`$('#hw-username')` 只命中第一个，
+             另一处永远读不到值。搬移逻辑见 `app.js` 的 `mountLinglong()`。
+           ⚠ `#ll-home` 是"搬回来的锚点"，`#ll-panel` 才是被搬走的那一块。 -->
+      <div id="ll-home">
+        <div id="ll-panel">
+        <div class="card">
+          <div class="card-head">
+            <h2>自动抓取 <span class="hint">（推荐，不用手抄）</span></h2>
+            <button class="btn ghost small" id="btn-ping">会话自检</button>
+          </div>
+          <p class="hint" id="browser-line">正在检测浏览器…</p>
+
+          <div class="form-row"><label>华为账号</label>
+            <input id="hw-username" placeholder="账号名 / 邮箱 / 手机号 / W3账号" autocomplete="off">
+            <span class="hint" id="hw-status"></span></div>
+          <div class="form-row"><label>密码</label>
+            <input type="password" id="hw-password" placeholder="华为账号密码" autocomplete="new-password">
+            <span class="hint">只存本机 <code>.secrets/huawei.env</code>，界面不回显</span></div>
+          <div class="form-row">
+            <button class="btn small" id="btn-hw-save">保存账号</button>
+            <span class="hint">配了账号密码，抓取时会<b>自动填表登录</b>，不用手点</span>
+          </div>
+          <div class="hint" id="hw-warn" style="margin:-4px 0 10px 0"></div>
+
+          <div class="form-row">
+            <button class="btn primary" id="btn-auto-login">打开浏览器抓取</button>
+            <button class="btn" id="btn-auto-refresh">静默续期</button>
+          </div>
+          <p class="hint">
+            用<b>自己的浏览器 profile</b>（不碰你日常用的那个）打开
+            <span class="mono">#/group/smart-store/homepage</span>，未登录会自动跳到华为 SSO。
+            配了账号密码就自动登录；<b>没配、或遇到图形验证码</b>时窗口会留着让你手动登。
+            之后会话失效会<b>自动无头续期</b>，日常完全不用管。
+          </p>
+          <pre class="log" id="auto-log" hidden></pre>
+          <div id="auto-result"></div>
         </div>
-        <div id="import-result"></div>
+
+        <div class="card">
+          <div class="card-head"><h2>退路：手抄 curl</h2></div>
+          <p class="hint">自动抓取用不了时（比如浏览器装在不常见的位置）才需要这个。</p>
+          <ol class="steps">
+            <li>浏览器打开 <code>https://cbg.huawei.com/</code>，进新零售/报量页面</li>
+            <li>按 <kbd>F12</kbd> → <b>Network</b> → 刷新页面</li>
+            <li>找任意一条发往 <code>cbg.huawei.com</code>、返回 JSON 的请求</li>
+            <li>右键 → <b>Copy</b> → <b>Copy as cURL (cmd)</b></li>
+            <li>粘到下面，点「导入」</li>
+          </ol>
+          <textarea id="curl-input" rows="5"
+            placeholder="curl --url ^&quot;https://cbg.huawei.com/isrp/...^&quot; ^&#10;  -b ^&quot;JSESSIONID=...; hwssot3=...^&quot; ^&#10;  -H ^&quot;x-csrf-token: ...^&quot;"></textarea>
+          <div class="form-row">
+            <button class="btn" id="btn-import">导入并自检</button>
+            <button class="btn ghost" id="btn-clear-curl">清空</button>
+            <span class="hint">只要 cookie 和 x-csrf-token，两者必须来自同一份 curl。</span>
+          </div>
+          <div id="import-result"></div>
+        </div>
+        </div>
+      </div>
+
+      <!-- 门禁做完之后想重新抓一次 —— 这条路仍然留着（点了会打开登录页） -->
+      <div class="form-row">
+        <button class="btn ghost small" id="btn-open-setup-ll">重新登录 / 换账号</button>
       </div>
     </div>
 
@@ -509,7 +1588,7 @@
 
 <!-- ─────────────────── 运行抽屉（常驻，任何页都能拉开）───────────────────
      用户 2026-09-18：「运行日志要一直在、且好找」。
-     它**不是一个页签** —— 右下角一个把手，点开从右侧滑出，日志和「跑一次」都在里面。 -->
+     它**不是一个页签** —— 右下角一个把手，点开从右侧滑出，日志和「出问题了？」都在里面。 -->
 <!-- 右下角把手：用户 2026-09-18 给的图（蓝色 info 圆标），点了开状态抽屉。
      ⚠ 用**内联 SVG**，不是图片文件 —— 项目没有构建步骤、也不该为它多一个静态资源；
        而且 SVG 能跟着 CSS 缩放，`aria-label` 也写得清（原来那个字按钮
@@ -551,40 +1630,152 @@
 
     <!-- 原来的一级「运行」页 —— 2026-09-18 搬进常驻抽屉。 -->
     <div id="panel-run">
-      <div class="card">
-        <div class="card-head"><h2>跑一次</h2>
-          <span class="hint">跟每天定时跑的是同一条路，只是手动跑一遍</span></div>
-        <!-- ⚠ 2026-09-17（用户定）：**「目标日」和「高级（时间窗容差）」整块拿掉了**。
-             报量排查并进四池对账之后，三步里没有任何一步会读它们 ——
-             留着比删掉更糟：门店会以为"选今天就是只算今天"。
-             后端一并拿掉了（`/api/run` 不再收 mode/date/lookback/lookahead，
-             `runner.start` 也不再往命令后面拼它们）。
-             ⚠ 但 `daily` **命令行上**那四个参数必须留着：run.bat / 计划任务里
-             写死的 `--days-ago N` 删掉会以 `unrecognized arguments` 收场。 -->
-        <div class="form-row">
-          <!-- ⚠ 按钮只剩一个，但仍然走 `data-what` —— 有哪几个预设由后端那张表
-               （src/run_daily.py 的 BUTTON_STEPS）说了算，前端不另写一份，
-               以后要加按钮只改这行 HTML。走 `daily` 这一个入口是为了让
-               「第 1 步失败就不发报告」「库里没有就抓全量」「会话失效先静默续期」
-               这些行为和定时任务完全一致（各走各的命令迟早就分叉）。 -->
-          <button class="btn primary" data-what="all">整个项目</button>
-          <button class="btn ghost" id="btn-stop" disabled>停止</button>
-          <span class="hint" id="run-status"></span>
-        </div>
-        <p class="hint" style="margin:8px 0 0 0">
-          <b>整个项目</b> = 抓四池数据 → POS 合规 → <b>四池对账</b>，跟每天定时跑的一模一样。<br>
-          抓数据要一两分钟起；<b>第一次跑</b>会把今年至今的全量补上，更久，跑完下面有完整日志。<br>
-          只想看四池结果、不想再抓一遍：命令行 <code>python -m src.cli pools</code> 单独跑。
-        </p>
-      </div>
-
+      <!-- ⚠ 2026-09-21（用户：「**右下角的跑一次可以去掉了**」）——
+           手动"跑一遍"那张卡**整个删掉**了。要跑就走命令行（`python -m src.cli daily`）
+           或者等它自己的时间（各步都有）—— 界面上不再给"手动跑一趟"这个按钮。
+           ⚠ 「运行日志」那张卡**留着**（用户 2026-09-18：「运行日志要一直在、且好找」）。 -->
       <div class="card">
         <div class="card-head"><h2>运行日志</h2></div>
         <pre class="log" id="run-log">（还没有运行记录）</pre>
       </div>
+
+      <!-- ⚠ 2026-09-21（用户：「出问题上报 bug 做到右下角的状态悬浮窗里」）——
+           出问题时人第一反应是点右下角这个悬浮窗，而不是翻到设置页里找按钮。 -->
+      <div class="card">
+        <div class="card-head"><h2>出问题了？</h2></div>
+        <div class="form-row">
+          <button class="btn" id="btn-report-bug">上报 bug</button>
+          <span class="hint" id="report-bug-msg"></span>
+        </div>
+        <div id="report-bug-result"></div>
+        <p class="hint" style="margin:10px 0 0 0">
+          <b>上报 bug</b>：点一下会把<b>现场日志</b>打包（执行日志 / 定时任务 / 配置 / 环境），
+          然后<b>试着</b>发到邮箱和企业微信。<br>
+          ⚠ <b>包里没有任何能拿去登录的凭据</b>（<code>.secrets\</code> 整个不进包），
+          但有业务数据（门店名 / 串号 / 金额），发之前确认收件人是自己人。<br>
+          ⚠ 发不出去也<b>不影响</b> —— 包会留在 <code>out\report-bug-时间.zip</code>，
+          界面上会把路径写出来，直接把这个文件发出去就行。
+          <b>「推送失败」本身就是最常见的 bug，用它来上报它自己当然也不行。</b>
+        </p>
+      </div>
     </div>
   </div>
 </aside>
+
+<!-- ═════════════════ 登录门禁（第一次安装 / 用不了的时候）═════════════════
+
+     用户 2026-09-18：「我打算做个登录机制，门店鉴权。第一次安装会进入登录页面，
+     需要先登录云商再登录玲珑才可以进入正式页面。不登录或者登录失败不给用」。
+     随后：「云商登录成功之后看是哪个店，**如果是我们串号标识里有的那十四家店
+     需要登录玲珑，其余店不需要**。但是他们的控制台也不会显示玲珑相关的内容。
+     这就是做的账号、门店权限与内容的划分」。
+
+     ⚠ **挡是后端挡的**（`web.setup_state` + `SETUP_ALLOW` 白名单），
+       这个遮罩只是把"该干什么"摆出来 —— 前端挡的话，别的程序照样能调接口。
+     ⚠ 登录动作**只在这一个地方**：设置页那边只有状态和「重新登录」按钮。
+       同一套表单写两份，改一处漏一处是迟早的事。
+
+     ⚠ 第 ② 步（玲珑）**只有要玲珑的店才出现** —— 合作店不显示它，
+       不要求它，登录页上连提都不提。 -->
+<div class="setup-mask" id="setup-mask" hidden>
+  <div class="setup-card">
+    <div class="setup-head">
+      <h2>先把登录做完</h2>
+      <span class="hint" id="setup-sub"></span>
+    </div>
+    <p class="hint" id="setup-lead">
+      这台电脑要先把<b>门店的云商账号</b>登录好，才能进主界面。
+      <b>不登录、或者登录了但用不了，都不给用。</b>
+    </p>
+
+    <section class="setup-step" id="setup-step-erp">
+      <div class="setup-step-head">
+        <span class="setup-num" id="setup-erp-num">1</span>
+        <b>登录云商</b>
+        <span class="hint" id="setup-erp-why">等待…</span>
+      </div>
+      <p class="hint">
+        用<b>门店自己的云商账号</b>登录 —— 云商只会返回<b>本店</b>那一家门店的档案，
+        拿去门店名单里匹配，把门店名、华为编码、串号标识一起写好。
+      </p>
+        <div class="form-row"><label>云商账号</label>
+          <input id="sa-username" placeholder="门店自己的云商登录账号" autocomplete="off">
+          <span class="hint" id="sa-status"></span></div>
+        <div class="form-row"><label>密码</label>
+          <input type="password" id="sa-password" placeholder="门店自己的云商登录密码"
+                 autocomplete="new-password"></div>
+        <div class="form-row">
+          <button class="btn primary" id="btn-sa-save">确认登录</button>
+          <button class="btn" id="btn-sa-quit">退出</button>
+          <span class="hint" id="sa-msg"></span>
+        </div>
+        <div id="sa-captcha" hidden>
+          <div class="banner warn" style="margin-bottom:8px">
+            云商要<b>图形验证码</b> —— 照着下图填一下即可（这是云商的，不是华为的）
+          </div>
+          <div class="form-row">
+            <img id="sa-captcha-img" alt="验证码"
+                 style="height:40px;border:1px solid var(--line);border-radius:6px;background:#fff">
+            <input id="sa-captcha-code" style="min-width:130px" placeholder="填图上的字"
+                   autocomplete="off" maxlength="10">
+            <button class="btn primary" id="btn-sa-captcha">提交验证码</button>
+            <span class="hint" id="sa-captcha-msg"></span>
+          </div>
+        </div>
+      <div class="hint" id="sa-warn"></div>
+    </section>
+
+    <section class="setup-step" id="setup-step-linglong" hidden>
+      <div class="setup-step-head">
+        <span class="setup-num" id="setup-linglong-num">2</span>
+        <b>登录玲珑</b>
+        <span class="hint" id="setup-linglong-why">等待…</span>
+      </div>
+      <p class="hint">
+        这家店在名单里<b>有串号标识</b> —— 报量查询和 POS 合规读的都是玲珑数据，
+        所以要先登录一次。<br>
+        ⚠ 会话过期了也会回到这一页：<b>那是故意的</b>，过期了后面全是错的数。
+      </p>
+      <!-- ⚠ 这几件控件**平时住在「通用设置 › 玲珑授权」页**里，
+           走到这一步时由 `mountLinglong()` 整块搬进来 ——
+           这里只是它临时的住处，别在这儿再抄一份（id 会重复）。 -->
+      <div id="ll-host"></div>
+    </section>
+
+    <!-- ⚠ 2026-09-21（用户：「先把**体验店登录需要玲珑**这个跳过一下，我测试电脑上
+         没有玲珑，但是我想看看**体验店的界面**」）——
+         玲珑那一步没备好时，多给一个「先看看界面」。
+         ⚠ 它**只放行界面**：抓数/对比/POS 该失败还是失败（没有会话就是没有），
+           而且进来之后**顶上一直挂着一条横幅**说清这是预览 ——
+           绝不能让"预览"看起来像"能用"。 -->
+    <section class="setup-step" id="setup-step-preview" hidden>
+      <div class="setup-step-head">
+        <span class="setup-num">·</span>
+        <b>先看看界面</b>
+        <span class="hint">玲珑没备好也能进去看（数据类功能仍然不可用）</span>
+      </div>
+      <div class="form-row">
+        <button class="btn" id="btn-setup-preview">跳过玲珑，先看界面</button>
+        <span class="hint" id="setup-preview-msg"></span>
+      </div>
+      <p class="hint">
+        适合<b>测试机 / 只想看看界面</b>的情况。<br>
+        ⚠ <b>抓取玲珑数据、双平台数据对比、POS 合规</b>这几件<b>仍然要会话</b> ——
+        点了会照常报"没会话"，不会给你一份假的数。<br>
+        ⚠ 店里正常使用<b>不要</b>开它：会让人以为已经登录好了。进去之后
+        顶上那条横幅上有「退出预览」。
+      </p>
+    </section>
+
+    <div class="setup-foot">
+      <span class="hint" id="setup-msg"></span>
+      <!-- ⚠ 原来这里有「收起」和「我已登录完，重新检查」—— 用户 2026-09-19
+           说都不要：状态由「确认登录」成功后**自动往下走**，不用手动"重新检查"；
+           想走就点上面的「退出」。 -->
+      <span></span>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast" hidden></div>
 
@@ -599,6 +1790,53 @@
      光在设置页列出来没用（门店不会主动去点），所以主动弹一次 + 一键处理。
      ⚠ 顺序是「**先建新的、建成了再删老的**」（`src/schedule.replace_legacy`）——
      反过来的话中间失败会落到"门店再也不会自动跑"，而**当天没人会发现**。 -->
+<div class="modal-mask" id="claim-acts-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="claim-acts-title"
+       style="max-width:min(960px,94vw);width:960px">
+    <div class="modal-head">
+      <h2 id="claim-acts-title">权益活动一览 <span class="hint" id="claim-act-meta"></span></h2>
+      <label class="hint" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0">
+        <input type="checkbox" id="claim-act-show-expired" />
+        显示已过期
+      </label>
+    </div>
+    <div class="modal-body" style="max-height:70vh;overflow:auto">
+      <div id="claim-act-table">加载中…</div>
+      <div class="hint" id="claim-act-legend" style="margin-top:8px">
+        活动配置：<code>config/benefit-claim.yaml</code>（缺文件时用内置 9 月数据）。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn ghost" id="claim-acts-close">关闭</button>
+    </div>
+  </div>
+</div>
+<div class="modal-mask" id="claim-online-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="claim-online-title">
+    <div class="modal-head">
+      <h2 id="claim-online-title">确认在线领取</h2>
+    </div>
+    <div class="modal-body">
+      <div class="modal-sec">
+        <h3>请核对机型与序列号</h3>
+        <ul>
+          <li><b>机型 / 商品：</b><span id="claim-online-name">—</span></li>
+          <li><b>设备号：</b><code id="claim-online-sn">—</code></li>
+          <li><b>活动：</b><span id="claim-online-act">—</span></li>
+          <li><b>门店：</b><span id="claim-online-store">—</span></li>
+        </ul>
+        <p class="hint" id="claim-online-hint" style="margin-top:8px">
+          确认无误后点「确认领取」，将直接调用华为接口提交，<b>不会跳转网页</b>。
+        </p>
+        <div id="claim-online-result"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn ghost" id="claim-online-cancel">取消</button>
+      <button type="button" class="btn" id="claim-online-ok">确认领取</button>
+    </div>
+  </div>
+</div>
 <div class="modal-mask" id="legacy-mask" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="lg-head">
     <div class="modal-head">
@@ -637,6 +1875,35 @@
     </div>
   </div>
 </div>
-<script src="/app.js"></script>
+
+<!-- 彩蛋五子棋：右下角状态窗「门店名称」3 秒内连点 10 次弹出。非功能页、不进菜单。 -->
+<div class="gomoku-mask" id="gomoku-mask" hidden>
+  <div class="gomoku-card" role="dialog" aria-modal="true" aria-labelledby="gomoku-title">
+    <div class="gomoku-head">
+      <h2 id="gomoku-title">五子棋</h2>
+      <button class="btn ghost" id="btn-gomoku-close" type="button">关闭</button>
+    </div>
+    <div class="gomoku-status">
+      <span id="current-player">黑棋</span>
+      <span>回合</span>
+      <small id="learn-info"></small>
+    </div>
+    <div id="board" class="board"></div>
+    <div class="gomoku-foot">
+      <button class="btn" id="restart" type="button">重新开始</button>
+      <button class="btn" id="ai-toggle" type="button">AI 对战: 关</button>
+    </div>
+    <div id="gomoku-win" class="gomoku-win hidden">
+      <div class="gomoku-win-card">
+        <h2 id="winner-text">黑棋获胜!</h2>
+        <button class="btn primary" id="modal-restart" type="button">再来一局</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- ⚠ `?v=` 里那个数字不是装饰：前端**没有构建步骤**，浏览器对 .js/.css 会有内存缓存。
+     每次改动前端资源就 +1。game.js 必须在 app.js **之前**（连点时要 mountGomoku）。 -->
+<script src="/gomoku/game.js?v=1"></script>
+<script src="/app.js?v=175"></script>
 </body>
 </html>

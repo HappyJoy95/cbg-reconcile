@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import pathlib
+from pathlib import Path
 import sys
 import tempfile
 import types
@@ -614,9 +615,13 @@ class TestEnsureLayout(unittest.TestCase):
         self._ns()["ensure_layout"]()
         self.assertTrue((self.root / ".secrets").is_dir())
         self.assertTrue((self.root / "out").is_dir())
+        # ⚠ 2026-09-21 晚（用户：「收取的文件应该放在 in 文件夹里吧」）——
+        #   `in/`（收进来的）跟 `out/`（这台机器产出的）是一对，也由这里声明。
+        self.assertTrue((self.root / "in").is_dir())
         self.assertTrue((self.root / ".secrets" / "erp.env").is_file())
         self.assertTrue((self.root / ".secrets" / "README.txt").is_file())
         self.assertTrue((self.root / "out" / "README.txt").is_file())
+        self.assertTrue((self.root / "in" / "README.txt").is_file())
         self.assertTrue((self.root / "config" / "store-SCN231409.yaml").is_file())
 
     def test_never_overwrites_credentials(self):
@@ -968,9 +973,20 @@ class TestServicePanelHasNoPrivilegeChoice(unittest.TestCase):
                           "前端不该再往 /api/autostart 传 elevated")
         self.assertIn("self_elevated", code, "但**读**它是对的，别一起删了")
 
-    def test_save_only_sends_enabled(self):
-        """保存开机自启时**只发 enabled** —— 让后端用它的默认（普通权限）。"""
-        self.assertIn("body: { enabled }", _js_code())
+    def test_只发_enabled_让后端用普通权限(self):
+        """注册开机自启时**只发 enabled** —— 让后端用它的默认（普通权限）。
+
+        ⚠ 2026-09-21（用户：「后台服务只显示**是否开机自动启动**，如果否就多显示一个
+          **添加开机自动启动**，要 uac 的那种」）——
+          面板从"复选框 + 保存"改成了"状态 + 一个按钮"，所以这里断的是**新写法**：
+          普通权限先试，失败了才走**按需提权**（`/api/elevate {what:'autostart'}`）——
+          那条路上才弹 UAC，而且不经过 `/api/autostart` 的 `elevated` 参数。
+        """
+        code = _js_code()
+        self.assertIn("body: { enabled: true }", code, "添加按钮要显式要 enabled")
+        self.assertIn("what: 'autostart'", code, "失败时要能走按需提权那条路")
+        self.assertIn('id="btn-autostart-add"', (ROOT / "web" / "index.html")
+                      .read_text(encoding="utf-8"))
 
     def test_app_js_does_not_claim_capture_still_works(self):
         """⚠ 那句「自动抓会话不受影响」是**错的**，别再写回去。
@@ -1395,3 +1411,172 @@ class TestNoRealSideEffects(unittest.TestCase):
         tree = ast.parse(SRC)
         tops = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
         self.assertFalse(any("autostart" in ast.dump(n) for n in tops))
+
+
+class Test中台邮箱随包播种(unittest.TestCase):
+    """用户 2026-09-19：「能不能在 **3.0.0 安装时**把授权码给门店，
+    然后后续**仓库里就不带这个**，以后一直默认？」
+
+    ⇒ 打包时注入（`tools/build_package.sh`）+ 安装时播种（`bootstrap._seed_central_mail`）
+      + `.secrets/` 在自更新的 `NEVER_TOUCH` 里 ⇒ 装一次之后**一直默认**。
+    ⚠ 仓库和 git 里**始终没有**这个码（`.gitignore` 排掉 `central-mail.env`）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _seed(self, pack_body, mail_body=None):
+        (self.root / "central-mail.env").write_text(pack_body, encoding="utf-8")
+        if mail_body is not None:
+            (self.root / ".secrets").mkdir(parents=True, exist_ok=True)
+            (self.root / ".secrets" / "mail.env").write_text(mail_body, encoding="utf-8")
+        import bootstrap
+        old_root = bootstrap.ROOT
+        bootstrap.ROOT = self.root
+        try:
+            bootstrap._seed_central_mail()
+        finally:
+            bootstrap.ROOT = old_root
+        p = self.root / ".secrets" / "mail.env"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    def test_装的时候播进_secrets(self):
+        got = self._seed("MAIL_CENTRAL_PASSWORD=abc123\n")
+        self.assertIn("MAIL_CENTRAL_PASSWORD=abc123", got)
+        self.assertIn(".secrets/mail.env", str(self.root / ".secrets" / "mail.env"))
+
+    def test_门店自己配过的不许覆盖(self):
+        """⚠ 门店改过授权码/邮箱，那是他的设置 —— 装包不该把它冲掉。"""
+        got = self._seed("MAIL_CENTRAL_PASSWORD=abc123\n",
+                         "MAIL_CENTRAL_PASSWORD=mine\nMAIL_HOST=smtp.store.com\n")
+        self.assertIn("MAIL_CENTRAL_PASSWORD=mine", got)
+        self.assertNotIn("abc123", got)
+
+    def test_只补缺的键(self):
+        got = self._seed("MAIL_CENTRAL_PASSWORD=abc123\nMAIL_CENTRAL=other@x.com\n",
+                         "MAIL_HOST=smtp.store.com\n")
+        self.assertIn("MAIL_CENTRAL_PASSWORD=abc123", got)
+        self.assertIn("MAIL_CENTRAL=other@x.com", got)
+        self.assertIn("MAIL_HOST=smtp.store.com", got, "原有内容不许丢")
+
+    def test_包里没带就什么都不做(self):
+        self.assertEqual(self._seed(""), "")
+
+    def test_仓库里不许有它(self):
+        gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("central-mail.env", gi, "打包产出的授权码文件绝不能进 git")
+
+
+class Test邮件密钥随包播种(unittest.TestCase):
+    """用户 2026-09-21：「解密密钥**随着大版本的安装包走，不进入小版本推包**」。
+
+    ⇒ 跟上面那个中台授权码是**同一条链**（打包注入 → 安装时播种 →
+      `.secrets/` 在 `selfupdate.NEVER_TOUCH` 里 ⇒ 之后一直有效），
+      但**有一处实质差别，照抄那句话会踩坑**：
+
+    | | 中台授权码 | 邮件密钥 |
+    |---|---|---|
+    | 已有内容怎么办 | **绝不覆盖**（门店自己配的邮箱是他的设置） | **current 跟着包走、老 key 留着** |
+
+    * 不更新 current ⇒ **换了密钥等于没换**（门店还在用旧的那把发）；
+    * 不留老 key ⇒ `pending/` 里压着的历史包、邮箱里的老邮件**永久解不开**。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _seed(self):
+        """跑一次 `bootstrap._seed_mail_key()`（ROOT 指向临时目录）。"""
+        import bootstrap
+        old = bootstrap.ROOT
+        bootstrap.ROOT = self.root
+        try:
+            bootstrap._seed_mail_key()
+        finally:
+            bootstrap.ROOT = old
+
+    def _pack(self, src_root):
+        """模拟 `tools/build_package.sh`：把打包机的密钥拷到包根。"""
+        import shutil
+        from src import mailcrypto
+        shutil.copy(str(src_root / mailcrypto.KEY_REL),
+                    str(self.root / mailcrypto.PACK_NAME))
+
+    def test_装包的时候播进_secrets(self):
+        from src import mailcrypto
+        packer = self.root / "packer"
+        mailcrypto.new_key(packer, note="3.0.0 随包")
+        self._pack(packer)
+
+        self._seed()
+        d = mailcrypto.describe(self.root)
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["key_id"], "m1")
+        # ⚠ 播进 `.secrets/`（`NEVER_TOUCH` 里的）—— 这是"之后升级不动它"的前提
+        self.assertTrue((self.root / mailcrypto.KEY_REL).is_file())
+
+    def test_包里没带就什么都不做(self):
+        self._seed()
+        from src import mailcrypto
+        self.assertFalse((self.root / mailcrypto.KEY_REL).exists(),
+                         "包里没密钥时不该凭空造一个出来")
+
+    def test_换密钥时_current_跟着包走_老_key_留着(self):
+        """⚠⚠ 这一条就是跟中台授权码的差别所在，两个方向都要钉住。"""
+        from src import mailcrypto
+        packer = self.root / "packer"
+        mailcrypto.new_key(packer)                 # m1（老的大版本）
+        self._pack(packer)
+        self._seed()
+        old_ct, _ = mailcrypto.seal(b"old-payload", root=packer)
+
+        mailcrypto.new_key(packer, note="换的")     # m2（新的大版本）
+        self._pack(packer)
+        self._seed()
+
+        d = mailcrypto.describe(self.root)
+        self.assertEqual(d["key_id"], "m2", "current 必须跟着包更新")
+        self.assertEqual(d["keys"], ["m1", "m2"], "老 key 必须留着")
+        # 老包（m1 加的）在新密钥装进来之后**照样解不开才怪**
+        got, how = mailcrypto.unseal(old_ct, root=self.root)
+        self.assertEqual(how["state"], "opened", "换了密钥之后老包必须还能解")
+        self.assertEqual(got, b"old-payload")
+
+    def test_重复装同一个包不会把老_key_弄丢(self):
+        from src import mailcrypto
+        packer = self.root / "packer"
+        mailcrypto.new_key(packer)
+        mailcrypto.new_key(packer)                 # m1 + m2 都在包里
+        self._pack(packer)
+        self._seed()
+        self._seed()                               # 再装一次
+        self.assertEqual(mailcrypto.describe(self.root)["keys"], ["m1", "m2"])
+
+    def test_包里的密钥文件坏了也不许抛(self):
+        """⚠ 这是启动路径（`ensure_layout` 里调的）—— 抛出去服务就起不来。"""
+        (self.root / "mail-key.json").write_text("{不是 json", encoding="utf-8")
+        self._seed()                               # 不抛就算过
+        from src import mailcrypto
+        self.assertFalse(mailcrypto.describe(self.root)["ok"])
+
+    def test_没带密钥的机器照常跑_只是不加密(self):
+        """⭐ 靠自更新升上来的机器就是这一档：**没有密钥，但业务不许断**。"""
+        from src import mailcrypto
+        self._seed()
+        data, how = mailcrypto.seal(b"payload", root=self.root)
+        self.assertEqual(how["state"], "plain")
+        self.assertEqual(data, b"payload", "没密钥也得发得出去")
+        self.assertIn("完整安装包", mailcrypto.note_for(how), "并且要告诉人怎么办")
+
+    def test_仓库里不许有密钥(self):
+        """⚠ 仓库是**公开**的（自更新匿名读 api.github.com，实测 200）——
+        密钥进去一次，附件加密就当场归零。三道：`.gitignore` + 打包脚本反查 + 这条。"""
+        from src import mailcrypto
+        gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(mailcrypto.PACK_NAME, gi, "打包注入的密钥文件绝不能进 git")
+        self.assertFalse((ROOT / mailcrypto.PACK_NAME).exists(),
+                         "仓库根出现了 %s —— 删掉它" % mailcrypto.PACK_NAME)

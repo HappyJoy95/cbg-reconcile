@@ -36,8 +36,10 @@ class TestPosTabWiring(unittest.TestCase):
 
     def test_nav_里有_pos_按钮(self):
         # ⚠ 2026-09-18 前端融合改版：POS 从**一级页签**降到
-        #   「合规」页下的**二级标签**（和四池比对并列，但各是各的表）。
-        self.assertIn('data-subtab="pos">POS 合规', self.html)
+        #   「合规」页下的**二级标签**（和报量查询并列，但各是各的表）。
+        # ⚠ 用正则而不是全等：标签上还可能挂着别的属性（`hidden` / 无障碍那几个），
+        #   以后再加一个也不该因为"多一个属性"就红。
+        self.assertRegex(self.html, r'data-subtab="pos"[^>]*>POS 合规')
 
     def test_panel_id_和_data_tab_对得上(self):
         self.assertIn('id="subpanel-pos"', self.html)
@@ -126,6 +128,12 @@ class TestPosDataIsProtected(unittest.TestCase):
 
     自更新**不能碰**、打包**不能发**。碰了就是把门店几个月的抓取结果洗掉。
     """
+
+    def test_in_也在_NEVER_TOUCH_里(self):
+        """⚠ `in/` 是**收进来的东西**（各店发来的上报包 / 收信库，2026-09-21 晚加的）——
+        跟 `out/` 一样是"这台电脑自己的"，自更新一根手指都不许碰。"""
+        self.assertIn("in", selfupdate.NEVER_TOUCH,
+                      "自更新会去动 in/ ⇒ 收到的上报数据可能在升级时被覆盖")
 
     def test_out_在_NEVER_TOUCH_里(self):
         self.assertIn("out", selfupdate.NEVER_TOUCH,

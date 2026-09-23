@@ -195,9 +195,10 @@ class TestInstall(_WinCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["mode"], "task")
         self.assertTrue(res["elevated"])
-        self.assertEqual(len(calls), 2)
-        self.assertIn("onlogon", calls[1])
-        self.assertIn("HIGHEST", calls[1])
+        creates = [c for c in calls if "/create" in c]
+        self.assertEqual(len(creates), 2, "两条创建路都该试一遍")
+        self.assertIn("onlogon", creates[1])
+        self.assertIn("HIGHEST", creates[1])
 
     def test_explicit_normal_mode_skips_the_task_entirely(self):
         """用户明确选了「普通权限」—— 就**别再去碰计划任务**了。
@@ -245,7 +246,13 @@ class TestInstall(_WinCase):
         下次登录却照样以管理员把服务拉起来，抓会话的报错又说是"管理员" ——
         比不切还难查。
         """
-        calls = self._schtasks([_ok(), _fail(stderr="错误: 拒绝访问。")])
+        # ⚠ 按**命令**判断，不按调用顺序 —— 改名迁移会多出 `/query`、
+        #   `/delete` 几次调用，按顺序写的脚本一加调用就错位（实测踩到）。
+        def script(args):
+            if "/delete" in args:
+                return _fail(stderr="错误: 拒绝访问。")
+            return _ok()
+        calls = self._schtasks([script])
         res = autostart._win_install(self.root, elevated=False)
         self.assertTrue(res["ok"], "注册表那条本身还是成功的")
         self.assertTrue(res.get("task_leftover"), "要标记出来，界面才提示得到")
@@ -269,7 +276,9 @@ class TestInstall(_WinCase):
         self.assertFalse(res["elevated"])
         self.assertIn("管理员", res["message"])
         self.assertIn("install.bat", res["message"])
-        self.assertEqual(len(calls), 2)
+        # ⚠ 只数 `/create` —— 改名迁移（`_drop_legacy`）会额外发 `/query`、`/delete`，
+        #   数总次数的话加一次迁移就红（实测踩到）。
+        self.assertEqual(len([c for c in calls if "/create" in c]), 2, "创建只该试两次")
         self.assertIn(autostart.APP_NAME, self.reg.store)
 
     def test_switching_modes_cleans_up_the_other_one(self):
@@ -456,3 +465,24 @@ class TestTaskNameIsDistinct(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTaskXmlPathIsPerProcess(unittest.TestCase):
+    """⚠ 任务 XML 的路径**必须带进程号**。
+
+    2026-09-19 实测：原来是系统临时目录里一个**固定名字**
+    （`cbg-reconcile-autostart-task.xml`），两个进程同时跑就互相覆盖 ——
+    并行跑两套测试时 `test_xml_round_trips_through_our_own_parser` 假红了一条
+    （读到的是另一个进程刚写进去的、或者写了一半的 UTF-16 文件）。
+    生产上同一时刻只有一个安装动作，但开发机上并行跑是常态。
+    """
+
+    def test_路径里带进程号(self):
+        import os
+        import tempfile as _tf
+        tmp = _tf.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        p = autostart._write_task_xml(Path(tmp))
+        self.assertIn(str(os.getpid()), p.name,
+                      "XML 文件名里没有进程号 —— 两个进程会写同一个文件")
+        self.assertTrue(p.is_file())

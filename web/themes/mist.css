@@ -1,0 +1,69 @@
+/* 5 · 雾霭紫 × 燕麦白 —— 温柔浪漫
+   主色 雾霭紫 #8877C7 · 辅色 燕麦白 #F0E7DB · 突出色 深紫 #6B5BB5
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 雾霭紫 × 燕麦白 */
+body[data-theme="mist"] {
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 底：燕麦白 + 一丝紫雾 */
+  --bg: #f6f4f8;
+  --card: #fffefc;
+  --line: #e6e0ee;
+  --text: #201c2a;
+  --muted: #75708a;
+  --muted-2: #524e66;
+  --text-2: #403a52;
+
+  /* 主色：雾霭紫（略压深保证按钮对比） */
+  --brand: #7566bc;
+  --brand-dark: #6354a8;
+  --on-brand: #ffffff;
+  --brand-wash: rgba(136, 119, 199, .13);
+  --focus-ring: #d8c8f0;
+  --glow-fab: drop-shadow(0 5px 14px rgba(136, 119, 199, .40));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(136, 119, 199, .52));
+
+  /* 辅色：燕麦白 —— 表头 / hover / 信息底 / logo 第二端偏暖 */
+  --brand-2: #d4b896;
+  --info-bg: #f3efe6;
+  --on-info: #544838;
+  --th-bg: #f7f3ec;
+  --row-alt: #f9f6f1;
+  --hover: #f1eef6;
+  --field: #fffefc;
+  --code-bg: #ece8f2;
+  --idle: #75708a;
+  --idle-bg: #ebe7f2;
+  --icon-muted: #a8a0bc;
+  --line-strong: #ccc4dc;
+
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --on-ok: #14532d;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --on-bad: #7f1d1d;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --on-warn: #78350f;
+  --on-warn-strong: #7c2d12;
+  --warn-line: #fcd34d;
+  /* 突出色：深紫 */
+  --hot: #6b5bb5;
+  --log-ok: #4ade80;
+  --log-bad: #fca5a5;
+  --log-dim: #75708a;
+
+  --film-lo: #fce4e4;
+  --film-hi: #e4ddf0;
+  --film-sum: #b54850;
+  --on-film-sum: #fff;
+
+  --ink: #16121f;
+  --ink-2: #100c18;
+  --ink-text: #d4cce8;
+  --overlay: rgba(22, 18, 31, .48);
+}

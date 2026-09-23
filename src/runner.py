@@ -28,7 +28,6 @@ import time
 import uuid
 from pathlib import Path
 
-from . import run_daily
 from .winutil import quiet_kwargs
 
 MAX_LINES = 2000          # 日志上限，防止一个跑飞的进程把内存吃光
@@ -74,6 +73,27 @@ class RunJob:
             self._proc.terminate()
 
 
+#: **内部步骤** —— 跑了、也记日志，但**不进前端**（用户 2026-09-21 明说）。
+#: ⚠ 这些名字是**步骤的 cmd**（`features/registry.py`）；加新的一条要想清楚
+#:   "门店需不需要在界面上看见它"。
+INTERNAL_STEPS = ("autoupdate",)
+
+
+def is_internal_job(job) -> bool:
+    """这趟是不是**内部步骤**（自动更新）—— 看命令行里的 `--steps`。
+
+    ⚠ 认的是 `--steps` 的值，不是 `what`：定时器派发的所有任务 `what` 都是 `"wake"`
+      （`what_label` 也是），区分不出来。看 `--steps` 是唯一稳的判据。
+    """
+    argv = list(getattr(job, "argv", None) or [])
+    try:
+        steps = argv[argv.index("--steps") + 1]
+    except (ValueError, IndexError):
+        return False
+    got = [s for s in str(steps).split(",") if s]
+    return bool(got) and all(s in INTERNAL_STEPS for s in got)
+
+
 class RunManager:
     def __init__(self):
         self.jobs: dict[str, RunJob] = {}
@@ -87,29 +107,65 @@ class RunManager:
     def latest(self) -> RunJob | None:
         return self.jobs[self.order[-1]] if self.order else None
 
+    def latest_visible(self) -> RunJob | None:
+        """**最近一趟"该给人看的"任务** —— 跳过内部步骤（自动更新）。
+
+        ⚠ 用户 2026-09-21：「自动更新**不进入计时器前端显示，前端日志也不显示**」。
+          自动更新每小时都跑一趟，`latest()` 拿到的基本永远是它 ⇒
+          抽屉里的「运行日志」天天显示一行"已经是最新版"，
+          而门店真正关心的那趟对账日志被顶掉了。
+        ⚠ 它**照样记进 runlog**（排查要用），只是**不往前端露**。
+        """
+        for jid in reversed(self.order):
+            job = self.jobs.get(jid)
+            if job is not None and not is_internal_job(job):
+                return job
+        return None
+
     def current(self) -> RunJob | None:
         j = self.latest()
         return j if (j and j.running) else None
 
     # ---------------------------------------------------------------- 启动
-    def start(self, root: Path, config: str, *,
-              what: str = run_daily.DEFAULT_WHAT) -> RunJob:
-        # ⚠ 先算 flags —— `what` 认不出来要**在起进程之前**就炸（`flags_for` 会抛）。
-        #   起完再炸的话会留一个半死的 job，界面上一直显示"在跑"。
-        flags = run_daily.flags_for(what)
+    # ⚠ 2026-09-21 晚：**`start(what=…)` 那套"预设"删了** —— 界面上那个
+    #   「跑一次」的卡没有了，"整个项目 / 抓华为数据 / POS 合规"三个 what 也就
+    #   没有调用方了（`BUTTON_STEPS` / `flags_for` 一起删）。
+    #   现在起一趟只有两条路，**都必须点名跑哪几步**：
+    #     * `start_steps()` —— 各页「刷新」（先抓一次新数据）；
+    #     * `start_argv()`  —— 内置定时器（`timer.wake_argv` 拼好的 `daily --steps …`）。
+    #   ⚠ 别再往回加"不给步骤就跑一大套"的默认：那正是"三处各说一套"的来源。
+    def start_steps(self, root, config: str, steps, *,
+                    what_label: str = "抓新数据") -> RunJob:
+        """**按指定的几步**跑一趟 `daily` —— 「刷新」按钮先抓新数据走这条。
+
+        ⚠ 用 `--steps`（**就这几步**）而不是 `--skip-*`：后者会被
+          `ALWAYS_STEPS`（dump/attain）补回来，于是"只抓云商 + 算达成"
+          会变成"整批都跑"，而界面上写着"正在抓新数据"。
+        ⚠ 跟手动「跑一次」、跟内置定时器**同一条路**（同一把锁、日志进同一个抽屉、
+          退出码有人收）—— 各起各的进程迟早就分叉。
+        """
+        argv = [sys.executable or "python", "-u", "-m", "src.cli", "-c", config,
+                "daily", "--steps", ",".join(str(x) for x in steps)]
+        return self._spawn(root, argv, what="refresh", what_label=what_label)
+
+    def start_argv(self, root, argv, *, what: str = "wake",
+                   what_label: str = "内置定时器") -> RunJob:
+        """**按现成的命令**起一趟 —— 内置定时器（`timer.tick`）走这条。
+
+        ⚠ 为什么不让定时器自己 `subprocess.Popen`：控制台里的每一趟都该是
+          **同一条路** —— 右下角抽屉能看到日志、`RunManager` 会把并发挡住、
+          退出码有人收。定时器绕过去的话，门店会遇到"它自己跑了一趟，
+          界面上什么都没有"，而那种时候正是要去看日志的时候。
+        """
+        return self._spawn(root, list(argv), what=what, what_label=what_label)
+
+    def _spawn(self, root, argv, *, what: str, what_label: str) -> RunJob:
         with self._lock:
             if self.current():
                 raise RuntimeError("已经有一个任务在跑了，等它结束")
-            # ⚠ 2026-09-17：`--days-ago` / `--date` / `--lookback` / `--lookahead`
-            #   **不再往命令后面拼**。`daily` 的命令行还认这四个参数（老 run.bat /
-            #   计划任务里写死着，删了会 unrecognized arguments），但它们现在
-            #   一个都不影响结果 —— 拼上去只会让日志里的命令看着像"有个目标日"。
-            argv = [sys.executable or "python", "-u", "-m", "src.cli", "-c", config,
-                    "daily", *flags]
-
             job = RunJob(uuid.uuid4().hex[:12], argv, str(root))
             job.what = what
-            job.what_label = run_daily.BUTTON_LABELS.get(what, what)
+            job.what_label = what_label
             self.jobs[job.id] = job
             self.order.append(job.id)
             while len(self.order) > KEEP_JOBS:

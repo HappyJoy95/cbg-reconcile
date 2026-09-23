@@ -1,0 +1,69 @@
+/* 3 · 石榴红 × 奶杏白 —— 温暖浓郁
+   主色 石榴红 #B5485D · 辅色 奶杏白 #F3E2D1 · 突出色 酒红 #8B2E42
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 石榴红 × 奶杏白 */
+body[data-theme="pome"] {
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 底：奶杏白铺开的暖米 */
+  --bg: #f7f3ef;
+  --card: #fffdfb;
+  --line: #ebe2da;
+  --text: #26181c;
+  --muted: #8a7276;
+  --muted-2: #5e484c;
+  --text-2: #4a3438;
+
+  /* 主色：石榴红 */
+  --brand: #b5485d;
+  --brand-dark: #9a3a4e;
+  --on-brand: #ffffff;
+  --brand-wash: rgba(181, 72, 93, .11);
+  --focus-ring: #f0b8c0;
+  --glow-fab: drop-shadow(0 5px 14px rgba(181, 72, 93, .40));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(181, 72, 93, .52));
+
+  /* 辅色：奶杏白 —— 表头 / hover / 信息底 / logo 第二端 */
+  --brand-2: #e8c4a8;
+  --info-bg: #f6efe6;
+  --on-info: #5a4038;
+  --th-bg: #faf4ee;
+  --row-alt: #fbf7f3;
+  --hover: #f5ebe4;
+  --field: #fffdfb;
+  --code-bg: #f3ebe4;
+  --idle: #8a7276;
+  --idle-bg: #f0e8e2;
+  --icon-muted: #b4a0a4;
+  --line-strong: #d4c4bc;
+
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --on-ok: #14532d;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --on-bad: #7f1d1d;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --on-warn: #78350f;
+  --on-warn-strong: #7c2d12;
+  --warn-line: #fcd34d;
+  /* 突出色：酒红 */
+  --hot: #8b2e42;
+  --log-ok: #4ade80;
+  --log-bad: #fca5a5;
+  --log-dim: #8a7276;
+
+  --film-lo: #fce4e4;
+  --film-hi: #f3e8dc;
+  --film-sum: #b5485d;
+  --on-film-sum: #fff;
+
+  --ink: #1c1014;
+  --ink-2: #140c10;
+  --ink-text: #e8d0d4;
+  --overlay: rgba(28, 16, 20, .48);
+}

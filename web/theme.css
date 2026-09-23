@@ -1,0 +1,64 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   theme.css —— **非配色共享令牌 / 动效总开关**（配色在 web/themes/）
+
+   用户 2026-09-22：**一套主题 = 一个文件**里的完整配色。
+   ⭐ 2026-09-22 再拆：每个主题自己的配色放 `web/themes/<名>.css`，
+     这份只留「跟主题无关」的东西（动效 / 圆角 / 侧栏与把手尺寸 / 等宽字体）。
+
+   目录约定：
+     web/theme.css         共享非配色 + 动效总开关（本文件）
+     web/themes/default.css  浅色基线（:root）—— 状态色 / 阴影 / 光晕
+     web/themes/<名>.css     每套主题自己的覆盖色值（body[data-theme="名"]）
+     web/style.css         组件规则（只许 var(--…)，不许写死视觉值）
+
+   加一套主题 = 在 `web/themes/` 丢一个 CSS + `index.html` 链一行 + LABELS 一行。
+   清单由 `modules/theme` 从目录扫，**不另建注册表**。
+
+   ⚠ 组件规则里不许写死颜色 / 阴影 / 时长 / 缓动（tests/test_theme.py 盯着）。
+   ⚠ 本文件 + themes/*.css 必须排在 `style.css` **前面** ——
+     主题块靠层叠顺序压过组件规则。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* 等宽字体栈（跟主题无关） */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+
+  /* ── 尺寸 / 间距（精简模式改这组）── */
+  /* 侧栏宽度 —— **只有这一处定义**（折叠开关靠它算位置） */
+  --side-w: 214px;
+  --fab-size: 46px;
+  --fab-gap: 18px;
+  /* 把手圆心 = 算出来的，别写死 */
+  --fab-center: calc(var(--fab-gap) + var(--fab-size) / 2);
+
+  /* ── 圆角 ── */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 14px;
+
+  /* ── 动效（要停全站动画就改这一组）──
+     ⚠ 组件里一律 var(--motion-*)，别写死时长/缓动。 */
+  --motion-fast: .16s;
+  --motion-normal: .2s;
+  /* 慢一档：列多的表用它（弱机器上 200ms 看着像跳过去的） */
+  --motion-slow: .34s;
+  --ease-out: ease;
+  --ease-pop: cubic-bezier(.2, .9, .3, 1.04);
+}
+
+/* ═══════════════════ 动效总开关（全站唯一一处）═══════════════════
+   ⚠ 令牌归零，不是逐个选择器 transition: none。
+   ⚠ 0s 而不是删掉 transition：状态切换仍瞬时，且不引起布局抖动。 */
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0s; --motion-normal: 0s; --motion-slow: 0s; }
+}
+body[data-motion="off"] { --motion-fast: 0s; --motion-normal: 0s; --motion-slow: 0s; }
+
+/* ═══════════════════════ 精简模式（还没做）═══════════════════════
+
+   body[data-density="compact"] {
+     --side-w: 176px;
+     --r-md: 8px;
+   }
+   ⚠ 精简模式本版不做（开发目标边界）。
+   ═══════════════════════════════════════════════════════════════════════ */

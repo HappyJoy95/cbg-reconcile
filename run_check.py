@@ -30,7 +30,16 @@ ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 
-LOG = ROOT / "out" / "run.log"
+#: 日志路径的**测试旁路** —— 设了就写它，不设就是 `out/run.log`（门店那一份）。
+#
+# ⚠ 2026-09-19 加：以前 `tests/test_run_check.py` 靠"快照 + 还原项目根的
+#   `out/run.log`"来验证日志，后果有两个 ——
+#     ① **两套全量测试不能同时跑**（另一进程往同一个文件里追加的行会被当成
+#        "本次新增"，假红；实际踩过两次）；
+#     ② 项目根只读时那条测试直接失败（阶段 1.3 想达到的效果是"只读也能过"）。
+#   子进程会继承环境变量，所以测试设一下就能完全绕开真实文件。
+LOG_ENV = "CBG_RUN_LOG"
+LOG = Path(os.environ.get(LOG_ENV) or (ROOT / "out" / "run.log"))
 
 
 class _Sink:
@@ -144,7 +153,15 @@ def rewrite_legacy_check(argv, ap):
             continue
         # 第一个非选项 token 就是子命令
         if tok == "check":
-            return argv[:i] + ["daily"] + argv[i + 1:], True
+            # ⚠⚠ 2026-09-21 晚：`daily` 现在**必须点名**（`--steps`，"整批"那个模式删了）
+            #   ⇒ 垫片得把点名那几步补上。不补的话，那份老 bat 会在这一层直接报
+            #   "现在必须点名跑"，而那台机器**从此再也不会对账** ——
+            #   正是这个垫片当年要解决的那个问题，换了个形状又来一次。
+            #   ⚠ import 放函数里、**在 `open_log()` 之后**（本模块的规矩：先开日志再 import，
+            #     启动阶段的失败才留得下 traceback）。
+            from src import run_daily
+            steps = ",".join(run_daily.MANUAL_STEPS)
+            return argv[:i] + ["daily", "--steps", steps] + argv[i + 1:], True
         return argv, False                           # 别的子命令，不碰
     return argv, False
 

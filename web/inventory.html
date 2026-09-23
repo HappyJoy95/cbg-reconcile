@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>库存盘点 · 门店数据平台</title>
+    <!--
+      库存盘点（扫码核对）—— cbg-reconcile 的**一整页**（M16）。
+
+      ⚠ 这一页**故意不是控制台里的一个子面板**（不嵌 iframe、不并进 app.js）：
+        扫码枪是"键盘模拟"，输入必须落在**这一页**的焦点上。嵌在控制台里的话，
+        用户在别处点一下焦点就跑了 —— 表现就是"扫了没反应"，
+        而这正是最难查的一类故障（上游 README 的 FAQ 第一条就是这个）。
+
+      ⚠ **无构建步骤**：`/inventory/*.js|css` 直接由后端 `_static()` 发（跟控制台一个路子）。
+        上游那份 `build.mjs`（把五个文件内联成一个单文件 HTML）没有搬进来 ——
+        搬进来就等于多一个"发版前必须先跑 node"的隐性步骤。
+        脚本顺序有依赖（每个文件在加载时就解引用 `IC.xxx`），**别调**：
+        core → api → store → xlsx → ui。
+
+      ⚠ 口径（归一化 / uid / 在途拆分 / 匹配引擎）全在 `core.js` 里，
+        跟上游逐字节一致；`api.js` 是唯一改成"调本项目后端"的那个文件。
+    -->
+    <!-- ⚠⚠ `?v=` 不是装饰（2026-09-21 补的）：前端**没有构建步骤**，
+         浏览器对 .js/.css 有内存缓存 —— 门店/用户那边「改了、刷新了、还是老样子」
+         就是这么来的。改这儿任何一个前端文件，都要把这个数字 +1。
+
+    ⚠ 2026-09-22 用户「库存盘点页面颜色不对，没完整接入」——
+       盘点是独立 iframe（CSS 变量**不会**从父页穿进来）⇒ 自己也要先加载
+       `theme.css` + `themes/*.css`，再加载盘点自己的组件样式。
+       顺序同控制台：**主题在前、组件在后**（主题块靠层叠压过组件规则）。 -->
+    <link rel="stylesheet" href="/theme.css?v=148">
+    <link rel="stylesheet" href="/themes/default.css?v=148">
+    <link rel="stylesheet" href="/themes/dark.css?v=148">
+    <link rel="stylesheet" href="/themes/celadon.css?v=148">
+    <link rel="stylesheet" href="/themes/dusk.css?v=148">
+    <link rel="stylesheet" href="/themes/pome.css?v=148">
+    <link rel="stylesheet" href="/themes/pine.css?v=148">
+    <link rel="stylesheet" href="/themes/mist.css?v=148">
+    <link rel="stylesheet" href="/themes/bean.css?v=148">
+    <link rel="stylesheet" href="/themes/butter.css?v=148">
+    <link rel="stylesheet" href="/themes/shiqing.css?v=148">
+    <link rel="stylesheet" href="/themes/daiqiu.css?v=148">
+    <link rel="stylesheet" href="/themes/zhusha.css?v=148">
+    <link rel="stylesheet" href="/themes/zhuqing.css?v=148">
+    <link rel="stylesheet" href="/themes/taotu.css?v=148">
+    <link rel="stylesheet" href="/themes/dianye.css?v=148">
+    <link rel="stylesheet" href="/themes/photo.css?v=148">
+    <link rel="stylesheet" href="/inventory/style.css?v=148" />
+    <!-- ⚠ 下面那行 `.foot-ver` 是**给用户自查用的**（2026-09-21）：
+         用户为「你确定我看到的是新的？」问过两次 —— 有了它，页脚一眼就能看出来，
+         不用再来回猜。内容由 ui.js 从**自己的 `?v=`** 里读出来填（同源，不会不同步）。 -->
+  </head>
+  <body>
+    <!-- 首屏就套上控制台存的那套主题（同源 localStorage：`cbg-theme`）——
+         不等 ui.js，否则深色下会先闪一屏浅色。默认/空 = 不设属性（走 :root）。 -->
+    <script>
+      try {
+        var __t = localStorage.getItem('cbg-theme');
+        if (__t) document.body.setAttribute('data-theme', __t);
+      } catch (e) {}
+    </script>
+    <div class="wrap">
+      <div class="topbar">
+        <h1>门店<span>库存盘点</span></h1>
+        <a class="ghost" id="btn-back" href="/">← 回控制台</a>
+        <div class="session" id="session-info"></div>
+        <button id="btn-settings" class="ghost">接口设置</button>
+      </div>
+
+      <!-- 设置 / 拉取 -->
+      <section class="card hidden" id="setup">
+        <h2>① 选择门店并拉取账面库存 <span class="sub">数据由控制台后端去云商实时拉取</span></h2>
+        <div class="row">
+          <div class="field">
+            <label>盘点日期（库存快照日）</label>
+            <input type="date" id="date" />
+          </div>
+          <div class="field">
+            <label>筛选仓库</label>
+            <input type="text" id="store-filter" placeholder="输入关键字过滤，如：万达" style="width: 150px" />
+          </div>
+          <div class="field" style="flex: 1; min-width: 260px">
+            <label>仓库（门店仓）</label>
+            <select id="store" style="width: 100%; max-width: none"></select>
+          </div>
+          <button id="btn-load-wh" class="ghost">刷新仓库列表</button>
+          <button id="btn-start" class="primary">开始拉取库存</button>
+          <button id="btn-load-backup" class="ghost" title="导入之前导出的「会话备份」JSON，接着上次没盘完的继续">加载未完成盘点</button>
+          <input type="file" id="backup-file" accept=".json,application/json" class="hidden" />
+        </div>
+        <div class="hint">
+          选择门店对应的<b>仓库</b>，点击开始拉取。拉取成功后进入扫码盘点界面。<br />
+          换电脑、清了浏览器数据、或者从别人那台机器接手时，用 <b>加载未完成盘点</b> 选之前导出的会话备份 JSON，
+          就能接着上次的进度继续盘（账面、扫码、手工确认、实盘数量、备注都会回来）。
+        </div>
+
+        <!-- ⚠ 2026-09-21（用户：「**接口设置这个页面就不要了**」）——
+             这里原来是一个折叠块「云商账号 / 接口设置」：账号只读信息（账号 / companycode）
+             + 一段"这一页不用登录"的说明 + 三个盘点偏好。账号早在控制台配了，
+             那个折叠块就只剩一段说明白占地方 ⇒ **摊平成两行**：
+             ① 后端读到的账号（一行字，不再是两个只读输入框）
+             ② 三个盘点偏好 + 「立即加载全库索引」。
+             ⚠ 三个勾选**一个都不能少**（提示音 / 全库索引 / 在途），它们是真设置。 -->
+        <div class="row" style="margin-top: 12px">
+          <div class="field" style="flex: 1; min-width: 260px">
+            <label>云商账号（控制台里配的那份，这一页不用登录）</label>
+            <div class="login-status" id="login-status"></div>
+          </div>
+          <button id="btn-relogin" class="ghost">重新读取</button>
+        </div>
+
+        <div class="row" style="margin-top: 6px">
+          <label class="chk"><input type="checkbox" id="opt-sound" /> 扫码提示音</label>
+          <label class="chk">
+            <input type="checkbox" id="opt-index" /> 拉取库存后自动建立全库串号索引（约 10~20 秒，用于识别非本店库存）
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="opt-transit" /> 拉取「在途（待入库）」清单（账面已挂到本店、货还没到的）
+          </label>
+          <button id="btn-gi" class="ghost">立即加载全库索引</button>
+        </div>
+        <div class="hint">
+          账号在控制台<b>左下角「通用设置 › 云商账号」</b>里配一次即可（跟别的功能共用同一份）；
+          这一页<b>不存任何账号、密码或 token</b>，账号过期时后端自己会重登一次。<br />
+          下面这三个偏好只保存在本机浏览器 localStorage；盘点进度（冻结账面 + 扫码记录）同样只在本机，
+          关掉页面再打开可以接着盘。
+        </div>
+      </section>
+
+      <!-- 扫码台 -->
+      <section class="card hidden" id="scan-card">
+        <h2>② 扫码盘点 <span class="sub" id="scan-store"></span></h2>
+        <div class="scan-grid">
+          <div>
+            <input
+              type="text"
+              id="scan-input"
+              class="scan-input"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="把光标放这里，扫码枪扫 SN / IMEI 条码（会自动回车提交）"
+            />
+            <div class="feedback" id="feedback"></div>
+            <div class="toolbar">
+              <button id="btn-undo">撤销上一扫</button>
+              <button id="btn-update-book" class="ghost" title="重新从云商拉取库存，先看差异再决定是否应用；旧账面会保留为上一版">更新账面</button>
+              <button id="btn-backup" class="ghost" title="把当前会话（账面 + 记录）导出成文件，保存失败时用它保命">下载会话备份</button>
+              <button id="btn-new" class="ghost">结束本次盘点</button>
+              <span class="save-status" id="save-status"></span>
+            </div>
+            <div class="recent" id="recent"></div>
+          </div>
+          <div>
+            <div class="stat-grid" id="stats"></div>
+            <div class="progress"><i id="progress-bar"></i></div>
+            <div class="progress-label"><span id="progress-text"></span><span id="progress-extra"></span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 账面更新差异评审 -->
+      <section class="card hidden" id="book-diff-card">
+        <h2>账面更新评审 <span class="sub">确认差异后再应用，旧账面会保留为上一版</span></h2>
+        <div id="book-diff-body"></div>
+        <div class="toolbar">
+          <button id="btn-apply-book" class="primary">应用新账面</button>
+          <button id="btn-cancel-book" class="ghost">取消，保持当前账面</button>
+        </div>
+      </section>
+
+      <!-- 结果 -->
+      <section class="card hidden" id="results-card">
+        <h2>③ 盘点结果 <span class="sub">扫完后在这里看未扫到 / 表外码</span></h2>
+        <div class="tabs" id="tabs"></div>
+        <div id="tab-body"></div>
+        <div class="toolbar export-bar">
+          <button id="btn-export" class="primary">导出完整 Excel</button>
+          <!-- ⭐ M16：同一个 xlsx，一条存本机、一条推出去（邮件带附件 + 企微汇总一条） -->
+          <button id="btn-push" title="把这份 7 张表的 xlsx 交给控制台推送：邮件带附件、企微群发一条汇总">导出并推送</button>
+          <button id="btn-export-csv">导出 CSV</button>
+          <button id="btn-print">打印</button>
+          <span class="spacer"></span>
+          <span class="hint" style="margin: 0">扫描记录实时保存在本机浏览器，关掉页面再打开可继续</span>
+        </div>
+      </section>
+    
+    <div class="foot-ver" id="foot-ver"></div>
+  </div>
+
+    <div class="toast" id="inv-toast"></div>
+    <div class="loading-mask hidden" id="loading">
+      <div class="loading-box">
+        <div class="spinner"></div>
+        <div class="msg" id="loading-msg">处理中…</div>
+        <div class="sub" id="loading-sub"></div>
+      </div>
+    </div>
+
+    <script src="/inventory/core.js?v=148"></script>
+    <script src="/inventory/api.js?v=148"></script>
+    <script src="/inventory/store.js?v=148"></script>
+    <script src="/inventory/xlsx.js?v=148"></script>
+    <script src="/inventory/ui.js?v=148"></script>
+  </body>
+</html>

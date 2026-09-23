@@ -1,0 +1,34 @@
+# 权益领取 —— 华为服务产品赠送活动（**只配活动，不配销售**）
+#
+# 换月 / 改活动：改这份 yaml 即可（缺文件时程序用内置 9 月那份）。
+# 字段：
+#   id           稳定键（状态跟 id 关联，别随意改已用过的 id）
+#   category     品类：手机 / 平板 / PC / 音频 / 穿戴
+#   title        展示标题
+#   match        商品名**包含其一**即命中（大小写不敏感；长的放前面）
+#   start / end  赠送时间（YYYY-MM-DD，含首尾）；都空 = 不限日期
+#   benefit      赠送权益名
+#   content      赠送权益内容
+#   value        权益价值
+#   fee          出险收费
+#   url          领取链接
+#   after_claim  领取后还可办理
+#   details      权益详情
+#
+# activities: []   ← 取消注释并填入即可覆盖内置默认（注意 YAML 缩进）
+
+# 示例（覆盖时取消注释）：
+# activities:
+#   - id: care-xt-202609
+#     category: 手机
+#     title: 金秋礼遇限时赠送Care+
+#     match: [Mate XTs, Pura X Max]
+#     start: 2026-09-01
+#     end: 2026-09-30
+#     benefit: HUAWEI Care+（一年期）
+#     content: 内外屏各1次屏幕保障
+#     value: 至高2699元
+#     fee: 其余免费
+#     url: https://consumer.huawei.com/cn/support/receive-huawei-care/
+#     after_claim: 支持办理延长服务宝
+#     details: 见华为官网

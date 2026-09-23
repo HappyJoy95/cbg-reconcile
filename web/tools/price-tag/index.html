@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>价签与工牌工具</title>
+    <!-- ⚠ 接控制台主题（2026-09-22 用户：「接入 themes」）—— 盘点同款：
+         独立 iframe 穿不到父页 CSS 变量 ⇒ 自己先链 theme + 全部 themes，再链组件。
+         ⚠ 主题清单必须和 `web/inventory.html` 对齐（少链一个 = 那套主题下这页不跟色）。 -->
+    <link rel="stylesheet" href="/theme.css?v=148">
+    <link rel="stylesheet" href="/themes/default.css?v=148">
+    <link rel="stylesheet" href="/themes/dark.css?v=148">
+    <link rel="stylesheet" href="/themes/celadon.css?v=148">
+    <link rel="stylesheet" href="/themes/dusk.css?v=148">
+    <link rel="stylesheet" href="/themes/pome.css?v=148">
+    <link rel="stylesheet" href="/themes/pine.css?v=148">
+    <link rel="stylesheet" href="/themes/mist.css?v=148">
+    <link rel="stylesheet" href="/themes/bean.css?v=148">
+    <link rel="stylesheet" href="/themes/butter.css?v=148">
+    <link rel="stylesheet" href="/themes/shiqing.css?v=148">
+    <link rel="stylesheet" href="/themes/daiqiu.css?v=148">
+    <link rel="stylesheet" href="/themes/zhusha.css?v=148">
+    <link rel="stylesheet" href="/themes/zhuqing.css?v=148">
+    <link rel="stylesheet" href="/themes/taotu.css?v=148">
+    <link rel="stylesheet" href="/themes/dianye.css?v=148">
+    <link rel="stylesheet" href="/themes/photo.css?v=148">
+    <!-- 组件样式放最后：只许 var(--…)，值由上面的主题文件提供。 -->
+    <link rel="stylesheet" href="css/style.css" id="tool-css">
+</head>
+<body>
+    <!-- 首屏就套上控制台存的那套主题（同源 localStorage：`cbg-theme`）——
+         不等脚本，否则深色下会先闪一屏浅色。默认/空 = 不设属性（走 :root）。 -->
+    <script>
+      try {
+        var __t = localStorage.getItem('cbg-theme');
+        if (__t) document.body.setAttribute('data-theme', __t);
+      } catch (e) {}
+    </script>
+    <div class="app-layout">
+        <!-- Sidebar —— embed=1 时藏掉（控制台已有「小工具」菜单） -->
+        <nav class="sidebar" id="tool-sidebar">
+            <div class="sidebar-header">
+                <h1>工具箱</h1>
+                <div class="version">v1.3</div>
+            </div>
+            <div class="sidebar-nav">
+                <button class="active" data-tab="pricetag">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/>
+                        <rect x="9" y="3" width="6" height="4" rx="1"/>
+                        <path d="M9 14l2 2 4-4"/>
+                    </svg>
+                    <span>价签工具</span>
+                </button>
+                <button data-tab="badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="3" y="4" width="18" height="16" rx="2"/>
+                        <circle cx="12" cy="10" r="3"/>
+                        <path d="M7 18c0-2.8 2.2-5 5-5s5 2.2 5 5"/>
+                    </svg>
+                    <span>工牌设计与排版</span>
+                </button>
+            </div>
+            <div class="sidebar-footer">
+                山东盛联-赵海培
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <div class="tab-panels-wrapper">
+            <!-- Price Tag Panel -->
+            <div class="tab-panel active" id="pricetagPanel">
+                <h2 class="section-title">排版工具</h2>
+                <p class="section-subtitle">将PDF或图片拼成A4图片，支持大/小/工牌尺寸自动识别</p>
+
+                <div class="hint-box">
+                    建议批量使用前先处理一张打印出来看一下缩放比例是否合适，不同门店打印机、价签尺寸可能有差别。
+                    本工具基于小价签 7.5cm × 12.5cm、大价签 15.0cm × 12.5cm 设计。
+                </div>
+
+                <div class="card">
+                    <div class="card-header">上传文件</div>
+                    <div class="drop-zone" id="dropZone">
+                        <svg class="drop-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M28 8H12a4 4 0 00-4 4v24a4 4 0 004 4h24a4 4 0 004-4V20L28 8z"/>
+                            <path d="M28 8v12h12"/>
+                            <path d="M24 26v10M19 31l5 5 5-5"/>
+                        </svg>
+                        <span class="drop-text">拖拽PDF或图片(JPG/PNG)或点击选择，可一次选择多个</span>
+                        <input type="file" accept=".pdf,.jpg,.jpeg,.png" id="fileInput" class="file-input" multiple>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">参数设置</div>
+                    <div class="settings-grid">
+                        <div class="settings-row">
+                            <span class="settings-label">间距 (mm)</span>
+                            <div class="gap-inputs">
+                                <div class="gap-item">
+                                    <label>上下</label>
+                                    <input type="number" id="gapY" class="gap-input" value="0.2" min="-5" max="10" step="0.1">
+                                </div>
+                                <div class="gap-item">
+                                    <label>左右</label>
+                                    <input type="number" id="gapX" class="gap-input" value="0.2" min="-5" max="10" step="0.1">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-label">缩放比例</span>
+                            <div class="scale-control">
+                                <input type="range" id="scaleRange" min="80" max="120" value="100" step="1">
+                                <span class="scale-value" id="scaleValue">100%</span>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-label">描边样式</span>
+                            <div class="radio-group">
+                                <label class="radio-label"><input type="radio" name="lineStyle" value="dashed" checked> 虚线</label>
+                                <label class="radio-label"><input type="radio" name="lineStyle" value="solid"> 实线</label>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-label">导出格式</span>
+                            <div class="radio-group">
+                                <label class="radio-label"><input type="radio" name="exportFormat" value="jpg" checked> JPG</label>
+                                <label class="radio-label"><input type="radio" name="exportFormat" value="png"> PNG</label>
+                            </div>
+                        </div>
+                        <div class="settings-hint">负值不建议小于-0.2，否则价签尺寸会变小</div>
+                    </div>
+                </div>
+
+                <div class="batch-quantity" id="batchQuantity" style="display:none;">
+                    <span class="batch-label">批量设置数量</span>
+                    <button type="button" class="batch-btn" data-qty="1">全部×1</button>
+                    <button type="button" class="batch-btn" data-qty="2">全部×2</button>
+                    <button type="button" class="batch-btn" data-qty="3">全部×3</button>
+                    <button type="button" class="batch-btn" data-qty="5">全部×5</button>
+                </div>
+
+                <div class="file-list" id="fileList"></div>
+
+                <div class="actions">
+                    <button id="processBtn" class="btn btn-primary" disabled>排版</button>
+                    <button id="clearBtn" class="btn btn-secondary">清空</button>
+                </div>
+            </div>
+
+            <!-- Badge Panel -->
+            <div class="tab-panel" id="badgePanel">
+                <h2 class="section-title">工牌设计与排版</h2>
+                <p class="section-subtitle">生成54mm × 86mm工牌内纸页，A4纸打印后剪裁放入工牌壳</p>
+
+                <div class="card">
+                    <div class="card-header">添加人员</div>
+                    <div class="badge-person-list" id="badgePersonList"></div>
+                    <button type="button" class="btn btn-secondary btn-small" id="addPersonBtn">+ 添加人员</button>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">工牌设置</div>
+                    <div class="settings-grid">
+                        <div class="settings-row">
+                            <span class="settings-label">导出格式</span>
+                            <div class="radio-group">
+                                <label class="radio-label"><input type="radio" name="badgeExportFormat" value="jpg" checked> JPG</label>
+                                <label class="radio-label"><input type="radio" name="badgeExportFormat" value="png"> PNG</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button id="generateBadgeBtn" class="btn btn-primary" disabled>生成工牌</button>
+                    <button id="layoutBadgeBtn" class="btn btn-primary" disabled>排版到A4</button>
+                    <button id="importToLayoutBtn" class="btn btn-secondary" disabled>一键导入排版工具</button>
+                    <button id="clearBadgeBtn" class="btn btn-secondary">清空</button>
+                </div>
+            </div>
+
+            <!-- Right Preview Panel -->
+            <div class="preview-panel" id="previewPanel" style="display:none;">
+                <!-- 排版工具预览 -->
+                <section class="preview-content" id="ptPreviewSection" style="display:none;">
+                    <h3 class="section-title" style="font-size: 24px;">预览结果</h3>
+                    <div class="preview-container">
+                        <canvas id="previewContentCanvas"></canvas>
+                        <canvas id="previewCutLineCanvas" class="cutline-overlay"></canvas>
+                    </div>
+                    <div class="preview-pagination" id="previewPagination" style="display:none;">
+                        <button type="button" class="page-btn" id="prevPage">上一页</button>
+                        <span class="page-info" id="pageInfo">1 / 1</span>
+                        <button type="button" class="page-btn" id="nextPage">下一页</button>
+                    </div>
+                    <div class="result-info" id="resultInfo"></div>
+                    <div class="actions">
+                        <button id="downloadBtn" class="btn btn-primary">下载</button>
+                    </div>
+                </section>
+                <!-- 工牌预览 -->
+                <section class="preview-content" id="bdPreviewSection" style="display:none;">
+                    <h3 class="section-title" style="font-size: 24px;">预览结果</h3>
+                    <div class="preview-container">
+                        <canvas id="badgePreviewCanvas"></canvas>
+                    </div>
+                    <div class="preview-pagination" id="badgePreviewPagination" style="display:none;">
+                        <button type="button" class="page-btn" id="badgePrevPage">上一页</button>
+                        <span class="page-info" id="badgePageInfo">1 / 1</span>
+                        <button type="button" class="page-btn" id="badgeNextPage">下一页</button>
+                    </div>
+                    <div class="result-info" id="badgeResultInfo"></div>
+                    <div class="actions">
+                        <button id="badgeDownloadBtn" class="btn btn-primary">下载</button>
+                    </div>
+                </section>
+                <!-- 加载状态 -->
+                <section class="loading-section" id="loadingSection" style="display: none;">
+                    <div class="spinner"></div>
+                    <p id="loadingText">正在处理...</p>
+                </section>
+                <section class="loading-section" id="badgeLoadingSection" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>正在生成工牌...</p>
+                </section>
+            </div>
+            </div><!-- /tab-panels-wrapper -->
+        </div>
+    </div>
+
+    <script>
+      (function () {
+        try {
+          var q = new URLSearchParams(location.search);
+          if (q.get('embed') === '1') document.documentElement.classList.add('embed');
+          var tab = q.get('tab');
+          if (tab === 'badge' || tab === 'pricetag') document.documentElement.dataset.toolTab = tab;
+        } catch (e) {}
+
+        // 主题：父页 setTheme postMessage；同源别的标签页写 localStorage 也会跟上
+        // （盘点页 ui.js 同款 —— CSS 变量穿不过 iframe 边界，必须自己认这两条）。
+        function applyThemeName(name) {
+          if (name) document.body.setAttribute('data-theme', String(name));
+          else document.body.removeAttribute('data-theme');
+        }
+        window.addEventListener('message', function (e) {
+          if (e.origin && e.origin !== location.origin) return;
+          var d = e.data || {};
+          if (!d || d.ic !== 'theme') return;
+          applyThemeName(d.name || '');
+        });
+        window.addEventListener('storage', function (ev) {
+          if (ev.key === 'cbg-theme') applyThemeName(ev.newValue || '');
+        });
+      })();
+    </script>
+    <script src="lib/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+    </script>
+    <script src="js/layoutEngine.js"></script>
+    <script src="js/pdfParser.js"></script>
+    <script src="js/imageProcessor.js"></script>
+    <script src="js/exporter.js"></script>
+    <script src="lib/jszip.min.js"></script>
+    <script src="js/badgeGenerator.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

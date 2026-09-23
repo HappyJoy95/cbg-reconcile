@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src import cli, schedule, winutil
+from src import cli, run_daily, schedule, winutil
 
 
 class TestRunnerScript(unittest.TestCase):
@@ -30,19 +30,21 @@ class TestRunnerScript(unittest.TestCase):
     def test_unix_script(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(schedule, "kind", lambda: "unix"):
-                p = schedule.write_runner_script(Path(d), "config/store-X.yaml", days_ago=1)
+                p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = p.read_text(encoding="utf-8")
             self.assertEqual(p.name, "run.sh")
             self.assertTrue(body.startswith("#!/bin/sh"))
             self.assertIn('cd "$(dirname "$0")"', body)
-            self.assertIn("daily --days-ago 1", body)
-            self.assertIn('--log-file "out/run.log"', body)
+            # ⚠ v6（2026-09-20）起计划任务**不再自己跑 daily** ——
+            #   它只"确保服务在跑"，到点干活的是服务里的内置定时器（`modules/timer`）。
+            self.assertIn("ensure-service", body)
+            self.assertNotIn("daily", body, "计划任务那份不许再直接跑 daily（会一天两遍）")
             self.assertTrue(p.stat().st_mode & 0o111, "run.sh 必须可执行")
 
     def test_windows_script(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(schedule, "kind", lambda: "windows"):
-                p = schedule.write_runner_script(Path(d), "config/store-X.yaml", days_ago=1)
+                p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             raw = p.read_bytes()
             body = raw.decode("ascii")           # ← 顺便断言纯 ASCII
             self.assertEqual(p.name, "run.bat")
@@ -53,7 +55,10 @@ class TestRunnerScript(unittest.TestCase):
             #   run_check.py —— 它先开日志再 import，启动阶段的失败才留得下 traceback
             #   （pythonw 连 stderr 都没有）。
             self.assertIn("run_check.py", body)
-            self.assertIn("daily --days-ago 1", body, "参数还是要原样传过去")
+            # ⚠ v6：计划任务只把服务拉起来（判断"在不在跑"要读状态文件 + 探接口，
+            #   bat 干不了），所以还是经 run_check.py 走一趟。
+            self.assertIn("ensure-service", body)
+            self.assertNotIn("daily", body, "计划任务那份不许再直接跑 daily（会一天两遍）")
             # 退出码**不由 bat 透出**：它用 start 起进程后立刻退出，拿不到。
             # 真实的退出码由启动器写进日志（"结束 exit=N"那行）。
             self.assertNotIn("%ERRORLEVEL%", body)
@@ -71,8 +76,11 @@ class TestRunnerScript(unittest.TestCase):
             with mock.patch.object(schedule, "kind", lambda: "windows"):
                 p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = p.read_bytes().decode("ascii")
-        check_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
-        self.assertTrue(check_lines, "没找到跑对账那一行")
+        # ⚠ 只看**真跑东西**的行（含 run_check.py）；`echo …>> out\run.log`
+        #   那行是故意重定向的痕迹（好区分"bat 没跑"和"python 没起来"）。
+        check_lines = [ln for ln in body.splitlines()
+                       if "run_check.py" in ln or "src.cli" in ln]
+        self.assertTrue(check_lines, "没找到跑东西那一行")
         for ln in check_lines:
             self.assertNotIn(">>", ln, f"跑对账的输出被重定向走了：{ln.strip()}")
             self.assertNotIn("2>&1", ln, f"跑对账的输出被重定向走了：{ln.strip()}")
@@ -103,7 +111,7 @@ class TestRunnerScript(unittest.TestCase):
                 mock.patch.object(schedule, "_pythonw", lambda: r"C:\py\pythonw.exe"):
             p = schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = p.read_bytes().decode("ascii")
-        run_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
+        run_lines = [ln for ln in body.splitlines() if "run_check.py" in ln]
         self.assertTrue(run_lines)
         self.assertTrue(run_lines[0].startswith("start "),
                         f"计划任务那行没用 start，黑窗会挂满整个过程：{run_lines[0]}")
@@ -120,7 +128,8 @@ class TestRunnerScript(unittest.TestCase):
                 mock.patch.object(schedule, "_python", lambda: r"C:\py\python.exe"):
             schedule.write_runner_script(Path(d), "config/store-X.yaml")
             body = schedule.manual_script_path(Path(d)).read_bytes().decode("ascii")
-        run_lines = [ln for ln in body.splitlines() if "daily --days-ago" in ln]
+        # ⚠ 2026-09-21 晚：手动那份**点名**跑（`daily --steps …`），不再写 `--days-ago`。
+        run_lines = [ln for ln in body.splitlines() if "daily --steps" in ln]
         self.assertTrue(run_lines, "run-now.bat 里没有跑对账那行")
         self.assertFalse(run_lines[0].startswith("start "),
                          "手动跑不该用 start —— 那样跑完立刻 pause，看不到结果")
@@ -168,7 +177,8 @@ class TestRunnerScript(unittest.TestCase):
             m = schedule.manual_script_path(Path(d))
             self.assertTrue(m.exists(), "没生成 run-now")
             # 手动那个是**自己同步跑**，不是转调 run.sh（run.sh 不等进程）
-            self.assertIn("daily --days-ago", m.read_text(encoding="utf-8"))
+            body = m.read_text(encoding="utf-8")
+            self.assertIn("daily --steps " + ",".join(run_daily.MANUAL_STEPS), body)
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"):
@@ -177,9 +187,19 @@ class TestRunnerScript(unittest.TestCase):
             self.assertEqual(m.name, "run-now.bat")
             self.assertIn("pause", m.read_bytes().decode("ascii"))
 
-    def test_default_days_ago_is_yesterday(self):
-        """次日早上跑昨天 —— 当天晚上跑的话晚班报量还没发生，必然全是差异。"""
-        self.assertEqual(schedule.DEFAULT_DAYS_AGO, 1)
+    def test_手动那份点名跑每天那趟(self):
+        """⭐ 手动那份脚本**枚举**要跑的几步（`daily --steps …`），不写"整批"那种隐式说法。
+
+        ⚠ 名单来自**注册表**（`run_daily.MANUAL_STEPS`）—— 以后加一步，
+          门店那份脚本会跟着变（前提是它会自愈，见下面那组测试）。
+        """
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(schedule, "kind", lambda: "windows"):
+            schedule.write_runner_script(Path(d), "config/store-X.yaml")
+            body = schedule.manual_script_path(Path(d)).read_text(encoding="utf-8")
+        self.assertIn("--steps " + ",".join(run_daily.MANUAL_STEPS), body)
+        self.assertNotIn("--skip-", body, "老的跳过开关不该再出现在新脚本里")
+        self.assertNotIn("--days-ago", body, "目标日早就废弃了，别写进脚本")
 
 
 class TestRunnerScriptSelfHeals(unittest.TestCase):
@@ -218,11 +238,17 @@ class TestRunnerScriptSelfHeals(unittest.TestCase):
                 f.write("@echo off\r\nrem 老版本\r\n"
                         '"py" -m src.cli check --days-ago 0\r\n')
             schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml")
-            body = p.read_text(encoding="utf-8")
-        self.assertIn("--days-ago 0", body, "用户的「今天」被改掉了")
+            # ⚠ v6 起 `--days-ago` 只写进**手动那份**脚本（计划任务那份不跑 daily）。
+            body = schedule.manual_script_path(Path(d)).read_text(encoding="utf-8")
+        # ⚠ 2026-09-21 晚：`--days-ago` **不再写进脚本**了（那个参数早就废弃，
+        #   留着只会让看脚本的人以为"这里可以调目标日"）⇒ 这条改成钉"重建之后
+        #   是新模板"（旧值"0"当然也不会回来了）。
+        self.assertIn("daily --steps " + ",".join(run_daily.MANUAL_STEPS), body)
+        self.assertNotIn("--days-ago", body)
 
     # --------------------------------------------------- v5：check → daily
-    def test_重建会把老脚本里的_check_换成_daily(self):
+    # --------------------------------------------------- v6：daily → ensure-service
+    def test_重建会把老脚本换成_ensure_service(self):
         """⚠ **发版阻断的解法**（方案 B 那一半）。
 
         老门店的 `run.bat` 里是 `check`（安装时生成的，不进版本库，
@@ -244,39 +270,44 @@ class TestRunnerScriptSelfHeals(unittest.TestCase):
                             "v4 的脚本必须被判为过时，否则永远不会重建")
             self.assertTrue(schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml"))
             body = p.read_text(encoding="utf-8")
-        self.assertIn("daily --days-ago 1", body, "命令没换成 daily")
+        self.assertIn("ensure-service", body, "命令没换成 ensure-service")
         self.assertNotIn("check --days-ago", body, "老的 check 命令还在")
+        self.assertNotIn("daily --days-ago", body, "老的 daily 还在 ⇒ 会和定时器撞成一天两遍")
         self.assertIn(schedule.RUNNER_MARK, body, "没写上当前标记，下次还会重建")
 
     def test_当前标记的脚本不会被反复重建(self):
         """重建要**幂等** —— 否则每次开界面都写一遍 bat（正跑着任务时还去覆盖它）。"""
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"):
-            schedule.write_runner_script(Path(d), "config/store-X.yaml", 1)
+            schedule.write_runner_script(Path(d), "config/store-X.yaml")
             self.assertFalse(schedule.runner_outdated(Path(d)))
             self.assertFalse(schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml"))
 
-    def test_v5_生成的脚本里没有残留的_check(self):
-        """整份脚本里都不该再有裸的 `check` 子命令 —— 漏一处就等于没改。"""
+    def test_生成的脚本里没有残留的_check(self):
+        """两份脚本里都不该再有裸的 `check` 子命令 —— 漏一处就等于没改。"""
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"):
-            schedule.write_runner_script(Path(d), "config/store-X.yaml", 1)
+            schedule.write_runner_script(Path(d), "config/store-X.yaml")
             run = schedule.script_path(Path(d)).read_text(encoding="utf-8")
             now = schedule.manual_script_path(Path(d)).read_text(encoding="utf-8")
+        # ⚠ 两份脚本的**分工不一样**（v6/v7 起）：
+        #   计划任务 = 只确保服务在跑；手动双击 = 同步点名跑一次"每天那趟"。
         for name, body in (("run.bat", run), ("run-now.bat", now)):
             with self.subTest(f=name):
                 # `run_check.py`（启动器名）里含 "check"，所以按子命令的写法找
                 self.assertNotIn(" check --days-ago", body,
                                  "还有一行在跑老的 check 子命令")
-                self.assertIn(" daily --days-ago", body)
+        self.assertIn("ensure-service", run)
+        self.assertIn("daily --steps " + ",".join(run_daily.MANUAL_STEPS), now,
+                      "手动那份要**点名**跑每天那趟")
 
-    def test_missing_script_uses_the_default(self):
+    def test_脚本不在就按当前模板生成(self):
+        """脚本被删了 / 第一次装：自愈要把它补出来（内容跟正常生成的一模一样）。"""
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"):
-            self.assertIsNone(schedule.existing_days_ago(Path(d)))
             schedule.refresh_runner_scripts(Path(d), "config/store-X.yaml")
-            body = (Path(d) / "run.bat").read_text(encoding="utf-8")
-        self.assertIn(f"--days-ago {schedule.DEFAULT_DAYS_AGO}", body)
+            body = schedule.manual_script_path(Path(d)).read_text(encoding="utf-8")
+        self.assertIn("daily --steps " + ",".join(run_daily.MANUAL_STEPS), body)
 
     def test_up_to_date_script_is_not_rewritten(self):
         """幂等：已经是最新版就只读一个文件，别每次刷页面都写盘。"""
@@ -385,10 +416,15 @@ class TestNoConsoleWindows(unittest.TestCase):
         self.assertIn("quiet_kwargs", inspect.getsource(service.pid_alive))
 
     def test_runner_hides_the_child_console(self):
-        """界面上点「运行」起的是 python.exe —— 不处理就是一个满屏黑窗。"""
+        """界面上点「运行」起的是 python.exe —— 不处理就是一个满屏黑窗。
+
+        ⚠ 2026-09-20：真正 `Popen` 的那段搬进了 `RunManager._spawn`
+          （内置定时器也要走同一条路：`start_argv` → `_spawn`），
+          所以钉的是 **_spawn**，不是 `start`。
+        """
         import inspect
         from src import runner
-        self.assertIn("quiet_kwargs", inspect.getsource(runner.RunManager.start))
+        self.assertIn("quiet_kwargs", inspect.getsource(runner.RunManager._spawn))
 
 
 class TestTimeValidation(unittest.TestCase):

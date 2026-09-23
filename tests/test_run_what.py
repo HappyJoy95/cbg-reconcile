@@ -1,18 +1,21 @@
-"""「跑什么」（`what`）这条线的测试 —— 界面按钮 / 定时任务勾选 / run.bat。
+"""「跑什么」这条线的测试 —— **点名跑**（`--steps`）。
 
-**为什么单独钉**：`what` 从界面一路穿到 `run.bat`，中间隔了四跳
-（`/api/run` → `runner.start` → `daily` 子命令 → `run_daily.main`）。
-任何一跳漏转发，表现都是**静默跑错东西** —— 勾了"只算 POS"结果把数据也抓了。
-这种错不会报错，只会让人某天觉得"怎么这么慢"。
+**为什么单独钉**：跑错东西是**静默**的 —— 少点一步，那天就少跑一件事，
+日志里看着还挺正常；多点一步，可能真发了一封不该发的邮件（发出去收不回来）。
 
-用户 2026-09-16 定的：
-* 运行页四个按钮：整个项目 / 抓四池数据 / 报量排查 / POS 合规；
-* 单独执行的按钮**不顺手抓数据**（抓数据要一两分钟起）；
-* 设置里勾「自动化跑什么」，两个都不勾是**错的**（不许静默当成"都跑"）。
+⭐ 这一段的口径被改过三次，现在是**第三版**（2026-09-21 晚，用户：
+「**现在不需要 run daily 吧，按定时器运行就行了**」）：
 
-⚠ 用户 2026-09-17 实测后又定：**运行页只留「整个项目」一个按钮**，
-「目标日」「高级（时间窗容差）」整块删掉（`dump` / `pos` 两个预设的定义留着，
-`/api/run` 和老记录还认它们）。
+| | 跑什么由谁定 |
+|---|---|
+| 1️⃣ 2026-09-16 | 界面四个按钮（整个项目 / 抓取玲珑数据 / 报量排查 / POS 合规）|
+| 2️⃣ 2026-09-17 → 09-21 | 只剩「整个项目」；`/api/run` 的 `what` 预设 + `--skip-*` 组合出"整批" |
+| 3️⃣ **现在** | **一律点名**：`daily --steps …`。到点由内置定时器按每一步自己的时刻派发，各页「刷新」按页点名，门店双击的 `run-now.bat` 也点名 |
+
+* `BUTTON_STEPS` / `BUTTON_LABELS` / `flags_for` / `run_one` / `DEFAULT_WHAT`
+  和 `runner.start()`、`POST /api/run` **全删了** —— "整批"这个模式不存在了；
+* `--skip-*` 参数**还收**（老脚本兼容），但只剩"提醒一句它没用了"的作用；
+* ⚠ 别再往回加"不给 `--steps` 就跑一大套"的默认：那正是"三处各说一套"的来源。
 """
 
 import re
@@ -21,52 +24,68 @@ from pathlib import Path
 from unittest import mock
 
 from src import cli, run_daily, runner, schedule
+from src.app.pos import PosRun
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 
 
-class TestWhatFlags(unittest.TestCase):
-    def test_三个预设都在(self):
-        # ⚠ 四池**故意不给单独按钮** —— 前端 index.html 里没有 data-what="pools"，
-        #   它是「整个项目」的第 3 步（`STEPS` 里有，`BUTTON_STEPS` 里没有）。
-        #   `dump` / `pos` 也没有按钮了，但**预设本身留着** ——
-        #   `/api/run` 还认，老 `.secrets/schedule.json` 里 `what: "pos"` 也靠它。
-        self.assertEqual(set(run_daily.BUTTON_STEPS), {"all", "dump", "pos"})
+class Test预设层已经删掉(unittest.TestCase):
+    """⚠ 2026-09-21 晚：**"手动跑整批"这一层整个删了**。
 
-    def test_整个项目不加任何跳过开关(self):
-        self.assertEqual(run_daily.flags_for("all"), [])
+    它由三块拼出来：界面上那张「跑一次」的卡（先删）、`/api/run` 的 `what` 预设
+    （`BUTTON_STEPS` / `BUTTON_LABELS` / `flags_for` / `run_one`），
+    以及 `runner.start()`。三块是**一件事的三个入口** ——
+    留一个没删，下一个人就会照着它把另外两个加回来。
 
-    def test_每个单独执行都跳过另外两件事(self):
-        """⚠ 「单独执行」的语义就是**只做那一件** —— 不许顺手把别的也跑了。"""
-        want = {
-            "dump": {"--skip-pos", "--skip-pools"},
-            "pos": {"--skip-dump", "--skip-pools"},
-        }
-        for what, flags in want.items():
-            with self.subTest(what=what):
-                self.assertEqual(set(run_daily.flags_for(what)), flags)
+    这条类就是那把锁：**谁把它们加回来，这里当场红**。
+    """
 
-    def test_认不出来的_what_要抛而不是回落(self):
-        """⚠ 回落成默认值的后果是"勾了只算 POS，结果数据也抓了、推送也发了"，
-        而**日志里一个字都不会说**。宁可当场炸。"""
-        with self.assertRaises(ValueError):
-            run_daily.flags_for("nonsense")
-        with self.assertRaises(ValueError):
-            run_daily.flags_for("")
+    def test_run_daily_里的预设函数都没了(self):
+        for gone in ("BUTTON_STEPS", "BUTTON_LABELS", "DEFAULT_WHAT",
+                     "flags_for", "flags_for_steps", "run_one",
+                     "with_always", "ALWAYS_STEPS", "AUTOMATION_DEFAULT_STEPS"):
+            with self.subTest(gone=gone):
+                self.assertFalse(hasattr(run_daily, gone),
+                                 "%s 又回来了？" % gone)
 
-    def test_每个预设都有给人看的名字(self):
-        for what in run_daily.BUTTON_STEPS:
-            with self.subTest(what=what):
-                self.assertTrue(run_daily.BUTTON_LABELS.get(what))
+    def test_runner_的预设入口也没了(self):
+        self.assertFalse(hasattr(runner.RunManager, "start"),
+                         "`runner.start(what=…)` 又回来了？（现在只有 start_steps / start_argv）")
+        self.assertTrue(hasattr(runner.RunManager, "start_steps"))
+        self.assertTrue(hasattr(runner.RunManager, "start_argv"))
+
+    def test_手动那份脚本点名的是每天那趟(self):
+        """⭐ `MANUAL_STEPS` = 注册表里 `default=True` 的那几步 ——
+        "双击手动跑"跑的就是定时器到点会跑的那一套（不多不少）。
+        """
+        from src.features import registry
+        self.assertEqual(tuple(run_daily.MANUAL_STEPS), registry.default_steps())
+        self.assertNotIn("autoupdate", run_daily.MANUAL_STEPS,
+                         "自动更新按小时自己跑，不该被手动那一份捎上")
+        self.assertIn("dump", run_daily.MANUAL_STEPS,
+                      "不抓数的话后面全是拿旧数据在算（用户定的红线）")
 
 
 class TestDailySkipFlags(unittest.TestCase):
-    """`daily` 的三个跳过开关 —— 跑哪几件事由它们组合出来。"""
+    """`daily --steps` —— **点名跑哪几件**（这是唯一的入口）。
+
+    ⚠ 这一类的名字和历史都跟 `--skip-*` 有关（那时是"整批里跳过谁"）——
+      口径 2026-09-21 晚改了：**点名**，没点名的就是不跑。
+      老用例里"跳过某步"的意思现在写成"不点某步"，用 `_steps_except()`。
+    """
+
+    @staticmethod
+    def _steps_except(*skip):
+        """点名跑"每天那趟"里除了这几步之外的 —— 代替原来的 `--skip-xxx`。"""
+        return ["--steps", ",".join(x for x in run_daily.MANUAL_STEPS if x not in skip)]
 
     def _run(self, extra):
-        calls, codes = [], {"dump": 0, "check": 0, "pos": 0}
+        # ⚠ 2026-09-20 加了 `erp-dump`（抓云商数据）—— **也要有桩**，
+        #   不挡的话这条链会真去登云商拉明细（网络！）。
+        calls, codes = [], {"dump": 0, "check": 0, "pos": 0, "pools": 0, "attain": 0,
+                            "erp-dump": 0}
 
         def mk(k):
             def f(_a):
@@ -76,41 +95,86 @@ class TestDailySkipFlags(unittest.TestCase):
         import contextlib
         import io
         buf = io.StringIO()
-        with mock.patch.object(cli, "cmd_dump", mk("dump")), \
+
+        # ⚠ 2026-09-19 起 POS 走**执行模块**（`app.pos.run`），不再经 CLI ——
+        #   桩要按新契约回 `PosRun`（返回整数会让 `res.ok` 直接炸）。
+        #   ⚠ 这个定义**必须放在 with 之前**：`with A, \` 续行链里插注释是语法错。
+        def mk_attain():
+            def fn(**_kw):
+                calls.append("attain")
+                return {"ok": True}
+            return fn
+
+        def mk_pos():
+            def fn(**_kw):
+                calls.append("pos")
+                return PosRun(ok=True)
+            return fn
+
+        def mk_kw(k, res):
+            """给**执行模块**那几步用的桩（它们收关键字，不是 `args`）。"""
+            def fn(**_kw):
+                calls.append(k)
+                return res
+            return fn
+
+        # ⚠ 本店必须是**要走玲珑**的那一类（名单里有串号标识），否则 `daily`
+        #   会正确地早退成"没有可跑的步骤" —— 那是 2026-09-18 加的门店权限划分。
+        #   以前这些测试读的是开发机上那份真配置，本店换成合作店之后集体变红。
+        with mock.patch.object(cli, "load_config",
+                               lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
+                                                "store_code": "SCN328987",
+                                                "marker": "C"}), \
+             mock.patch.object(cli, "cmd_dump", mk("dump")), \
              mock.patch.object(cli, "cmd_check", mk("check")), \
-             mock.patch.object(cli, "cmd_pos", mk("pos")), \
+             mock.patch.object(run_daily, "pos_run", mk_pos()), \
+             mock.patch.object(cli, "cmd_pools", mk("pools")), \
+             mock.patch.object(cli, "cmd_erp_dump", mk("erp-dump")), \
+             mock.patch.object(run_daily, "attain_run", mk_attain()), \
+             mock.patch.object(run_daily, "report_run",
+                               mk_kw("report", {"ok": True})), \
+             mock.patch.object(run_daily, "inbox_run",
+                               mk_kw("report-inbox", {"ok": True, "skipped": "没配收信"})), \
              contextlib.redirect_stdout(buf), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")):
             rc = run_daily.main(extra)
         return rc, calls, buf.getvalue()
 
-    def test_整个项目三步都跑(self):
-        rc, calls, _ = self._run([])
-        self.assertEqual(calls, ["dump", "pos"])
+    def test_每天那趟五步都跑(self):
+        rc, calls, _ = self._run(self._steps_except())
+        # ⚠ `report`（上报数据）/`report-inbox`（收上报）**不在这一套里** ——
+        #   它们各有自己的时刻（21:15 / 21:30，见 `registry.BUILTIN_STEPS`）。
+        self.assertEqual(calls, ["dump", "erp-dump", "pos", "pools", "attain"])
         self.assertEqual(rc, 0)
 
     def test_只抓数据(self):
-        rc, calls, _ = self._run(["--skip-check", "--skip-pos", "--skip-pools"])
+        """点名只有 `dump` ⇒ **别的都不跑**（哪怕它们本来在"每天那趟"里）。"""
+        rc, calls, _ = self._run(["--steps", "dump"])
         self.assertEqual(calls, ["dump"])
 
-    def test_只报量排查(self):
-        rc, calls, _ = self._run(["--skip-dump", "--skip-pos", "--skip-pools"])
+    def test_点名点空等于命令写错(self):
+        """⚠ `--steps` 给了个空串 / 全是不认识的名字 —— **报错，别静默跑一大套**。"""
+        rc, calls, _ = self._run(["--steps", " "])
         self.assertEqual(calls, [])
+        self.assertEqual(rc, cli.EXIT_USAGE)
 
     def test_只算_POS(self):
-        rc, calls, _ = self._run(["--skip-dump", "--skip-check"])
+        rc, calls, _ = self._run(["--steps", "pos"])
         self.assertEqual(calls, ["pos"])
 
-    def test_全跳过什么都不做也不报错(self):
-        rc, calls, _ = self._run(["--skip-dump", "--skip-check", "--skip-pos", "--skip-pools"])
-        self.assertEqual(calls, [])
+    def test_少点几步就只跑那几步(self):
+        rc, calls, _ = self._run(self._steps_except("dump", "erp-dump"))
+        self.assertEqual(calls, ["pos", "pools", "attain"])
         self.assertEqual(rc, 0)
 
     def test_表头写清这次要跑哪几件(self):
-        _, _, out = self._run(["--skip-dump"])
-        self.assertIn("四池对账", out)
+        _, _, out = self._run(self._steps_except("dump"))
+        self.assertIn("双平台数据对比", out)
         self.assertIn("POS 合规", out)
+        head = out.split("这趟跑的：")[1].split("\n")[0]
+        self.assertNotIn("抓取玲珑数据", head,
+                         "没点名的步骤不该出现在「这趟跑的」那一行里")
 
     # ------------------------------------------------ 退出码：跳过的步骤不许参与
     def test_只算_POS_时退出码只看_POS(self):
@@ -121,19 +185,26 @@ class TestDailySkipFlags(unittest.TestCase):
         import io
         seen = {}
 
-        def fake_pos(_a):
+        def fake_pos(**_kw):
             seen["pos"] = True
-            return 0
+            return PosRun(ok=True)
 
         def boom(_a):
             raise AssertionError("只算 POS 时不该跑报量排查")
 
         buf = io.StringIO()
-        with mock.patch.object(cli, "cmd_pos", fake_pos), \
+        with mock.patch.object(cli, "load_config",
+                               lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
+                                                "store_code": "SCN328987",
+                                                "marker": "C"}), \
+             mock.patch.object(run_daily, "pos_run", fake_pos), \
              mock.patch.object(cli, "cmd_check", boom), \
              mock.patch.object(cli, "cmd_dump", boom), \
+             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
+             mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
+             mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
              contextlib.redirect_stdout(buf):
-            rc = run_daily.main(["--skip-dump", "--skip-check"])
+            rc = run_daily.main(["--steps", "pos"])
         self.assertTrue(seen.get("pos"))
         self.assertEqual(rc, 0)
 
@@ -141,68 +212,79 @@ class TestDailySkipFlags(unittest.TestCase):
         import contextlib
         import io
         buf = io.StringIO()
-        with mock.patch.object(cli, "cmd_dump", lambda a: 99), \
-             mock.patch.object(cli, "cmd_check", lambda a: 0), \
-             mock.patch.object(cli, "cmd_pos", lambda a: 0), \
+        with mock.patch.object(cli, "load_config",
+                               lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
+                                                "store_code": "SCN328987",
+                                                "marker": "C"}), \
+             mock.patch.object(cli, "cmd_dump", lambda a: 99), \
+             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
+             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
+             mock.patch.object(run_daily, "pos_run",
+                               lambda **k: PosRun(ok=True)), \
              contextlib.redirect_stdout(buf):
-            rc = run_daily.main(["--skip-dump"])
-        self.assertEqual(rc, 0, "跳过的步骤不该把退出码带坏")
+            # ⚠ `dump` 会回 99（失败），但它**没被点名** ⇒ 不该把退出码带坏
+            #   （⚠ `cmd_erp_dump` 必须挡：不挡的话这条会**真去登云商**拉数据）
+            rc = run_daily.main(["--steps", "erp-dump,pos,pools"])
+        self.assertEqual(rc, 0, "没点名的步骤不该把退出码带坏")
 
-    def _argv(self, what):
+    def _argv(self, steps):
         m = runner.RunManager()
-        d = Path("/tmp/x")
-        j = m.start(d, "config/store-X.yaml", what=what)
+        j = m.start_steps(Path("/tmp/x"), "config/store-X.yaml", steps)
         j.kill()
         j.running = False
         return " ".join(j.argv[j.argv.index("daily") + 1:])
 
-    def test_每个_what_都走_daily_这一个入口(self):
-        """⚠ 各按钮走不同命令的话，`daily` 那些行为
-        （第 1 步失败就不发、库里没有就抓全量、会话失效先静默续期）
-        在界面上就全都享受不到了，而且"界面跑的"和"定时任务跑的"迟早分叉。"""
-        for what in run_daily.BUTTON_STEPS:
-            with self.subTest(what=what):
-                m = runner.RunManager()
-                j = m.start(Path("/tmp/x"), "c.yaml", what=what)
-                self.assertIn("daily", j.argv)
-                j.kill()
-                j.running = False
+    def test_每条路都走_daily_这一个入口(self):
+        """⚠ 各入口走不同命令的话，`daily` 那些行为（第 1 步失败就不发、
+        库里没有就抓全量、会话失效先静默续期）在别处就全都享受不到了，
+        而且"各页刷新跑的"和"定时任务跑的"迟早分叉。
 
-    def test_argv_里的开关跟_BUTTON_STEPS_一致(self):
-        # ⚠ `--skip-check` 没了：报量排查整步拿掉，那个开关已废弃。
-        # ⚠ `--days-ago` 也不再拼了（2026-09-17）：它不影响任何一步，
-        #   拼上去只会让日志里那条命令看着像"界面上有个目标日"。
-        self.assertEqual(self._argv("dump"), "--skip-pos --skip-pools")
-        self.assertEqual(self._argv("pos"), "--skip-dump --skip-pools")
-        self.assertEqual(self._argv("all"), "")
-
-    def test_乱传_what_不会留下半死的_job(self):
-        """⚠ 必须在**起进程之前**炸 —— 起完再炸会留一个 running=True 的 job，
-        界面上一直显示"在跑"，而实际上什么都没跑。"""
+        ⚠ 2026-09-21 晚起 `daily` 后面**必须**跟 `--steps`（点名）——
+        这正好是这条测试能钉住的东西：漏了 `--steps` 的那条路会**当场报错**，
+        而不是"悄悄跑了一大套"。
+        """
         m = runner.RunManager()
-        with self.assertRaises(ValueError):
-            m.start(Path("/tmp/x"), "c.yaml", what="bogus")
-        self.assertEqual(len(m.jobs), 0)
-        self.assertIsNone(m.current())
-
-    def test_job_里带着_what_给界面用(self):
-        m = runner.RunManager()
-        j = m.start(Path("/tmp/x"), "c.yaml", what="pos")
-        self.assertEqual(j.snapshot(0)["what"], "pos")
-        self.assertEqual(j.snapshot(0)["what_label"], "POS 合规")
+        j = m.start_steps(Path("/tmp/x"), "config/store-X.yaml", ("erp-dump", "attain"))
+        self.assertIn("daily", j.argv)
+        self.assertIn("--steps", j.argv)
+        self.assertIn("erp-dump,attain", j.argv)
         j.kill()
         j.running = False
 
+    def test_argv_里点名的是那几步(self):
+        # ⚠ 不拼 `--days-ago` / `--date`（2026-09-17 起就不拼了）：它们不影响
+        #   任何一步，拼上去只会让日志里那条命令看着像"有个目标日可以调"。
+        # ⚠ 也不拼 `--skip-*`（2026-09-21 晚）：那套"整批里跳过谁"的语义没了，
+        #   点名就是全部信息。
+        self.assertEqual(self._argv(("dump",)),
+                         "--steps dump")
+        self.assertEqual(self._argv(("dump", "erp-dump", "pos", "pools", "attain")),
+                         "--steps dump,erp-dump,pos,pools,attain")
+        self.assertNotIn("--skip-", self._argv(("pos",)))
 
-class TestScheduleAutomation(unittest.TestCase):
-    """设置里「自动化跑什么」—— 存 `.secrets/schedule.json` + 重写 run.bat。
+    def test_定时器派发的那条命令也点名(self):
+        """内置定时器那条路（`start_argv`）拿的就是 `daily --steps …` ——
+        它跟各页「刷新」走**同一把锁、同一个抽屉、同一个退出码出口**。"""
+        from src.modules import timer
+        argv = timer.wake_argv("/tmp/x", "c.yaml", ["dump", "pos"], "2026-09-21 21:00")
+        self.assertIn("daily", argv)
+        self.assertIn("--steps", argv)
+        self.assertIn("dump,pos", argv)
 
-    ⚠ **可选项只有两项**：POS 合规 / 四池对账 —— 用户 2026-09-17 把
-    「抓四池数据」的复选框**拿掉了**（「默认执行这个。不可选」），
-    它由 `run_daily.ALWAYS_STEPS` 无条件补上，谁取消都补回来。
 
-    复选框列表必须和旁边那列「跑什么」对得上 —— 否则用户看到"只勾了两项"、
-    实际跑了三件，会以为程序乱来。
+class Test跑哪几步已经不是设置(unittest.TestCase):
+    """⚠⚠ 用户 2026-09-20：「**自动化跑什么 … 这些去掉吧，也不用设置了**」；
+    2026-09-21 晚又删掉了"手动整批"。
+
+    ⇒ 现在**没有任何地方**能限制"跑哪几步"：
+      * 到点跑什么 = 每一步自己的唤醒时刻（注册表）；
+      * 手动双击那份脚本 = `run_daily.MANUAL_STEPS`（也是注册表派生的）；
+      * 各页「刷新」= `web.REFRESH_STEPS`。
+
+    ⚠ 这条类的要害不是"少了个界面"，而是**别留下一个"设不了、却还在悄悄
+      限制范围"的东西**：老门店的 `.secrets/schedule.json` 里记着 `["pos"]`
+      那种老勾选，它**必须完全失效** —— 否则 pools / attain 会永远不跑，
+      而界面上一个字都不说。
     """
 
     def setUp(self):
@@ -214,201 +296,39 @@ class TestScheduleAutomation(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def test_两项可选_抓数据是必做(self):
-        self.assertEqual(tuple(schedule.AUTOMATION_CHOICES), ("pos", "pools"))
-        self.assertIn("dump", run_daily.ALWAYS_STEPS)
-        self.assertEqual(tuple(run_daily.AUTOMATION_DEFAULT_STEPS),
-                         ("dump", "pos", "pools"))
+    def test_那两个函数已经删了(self):
+        for gone in ("automation_steps", "set_automation_steps", "existing_steps",
+                     "existing_days_ago"):
+            with self.subTest(gone=gone):
+                self.assertFalse(hasattr(schedule, gone), "%s 又回来了？" % gone)
 
-    def test_抓数据任何组合下都要执行(self):
-        """⚠ 用户 2026-09-16 要求"默认执行抓数据"，2026-09-17 更进一步：**不可选**。
-
-        不抓的话库永远是旧的，POS 和四池对账都只是**拿旧数据在算** ——
-        而日志只会说"跑完了"，这是最难发现的一类错。
-
-        遍历**所有**可选项组合（含一个都不勾），断言生成的 run.bat 里
-        **永远不出现 `--skip-dump`**。
-        """
-        import itertools
-        picks = [()]
-        for n in range(1, len(schedule.AUTOMATION_CHOICES) + 1):
-            picks += list(itertools.combinations(schedule.AUTOMATION_CHOICES, n))
-        for picked in picks:
-            with self.subTest(picked=picked):
-                schedule.write_runner_script(self.root, "c.yaml", 1, steps=picked)
-                body = schedule.script_path(self.root).read_text(encoding="utf-8")
-                self.assertNotIn("--skip-dump", body,
-                                 "抓数据被跳过了（picked=%r）" % (picked,))
-
-    def test_两个都不勾就是只抓数据(self):
-        """⚠ 用户 2026-09-17 定的：**允许**两个都不勾 ——
-        含义是「每天只抓数据，不算也不推」。
-
-        原来那条"至少勾一项"防的是"取消了勾选、结果照样推"；
-        现在的行为严格照着勾选走（**空 + 必做**），不会静默扩大。
-        """
-        self.assertEqual(schedule.steps_from_choices([]), ("dump",))
-        self.assertEqual(schedule.steps_from_choices(None), ("dump",))
-        # 界面上两个框都不点亮 —— 这是对的，不是 bug
-        self.assertEqual(schedule.choices_from_steps(("dump",)), [])
-
-    def test_乱勾要抛(self):
-        with self.assertRaises(ValueError):
-            schedule.steps_from_choices(["nonsense"])
-
-    def test_顺序不同算同一种(self):
-        self.assertEqual(schedule.steps_from_choices(["pos", "dump"]),
-                         ("dump", "pos"))
-
-    def test_所有组合生成的开关都对(self):
-        """遍历**全部可选项**子集，断言写进脚本的开关 = `flags_for_steps` 的输出。
-
-        ⚠ 原来手写 7 个组合 —— 加一件就得回来补一倍的行，迟早漏。
-        ⚠ 遍历的是 `AUTOMATION_CHOICES`（**可选项**）而不是 `STEPS`：
-          `dump` 取消不掉（`ALWAYS_STEPS`），把它算进组合里去试
-          `--skip-dump` 是在测一个**不存在**的状态。
-        """
-        import itertools
-        for n in range(0, len(schedule.AUTOMATION_CHOICES) + 1):
-            for picked in itertools.combinations(schedule.AUTOMATION_CHOICES, n):
-                with self.subTest(picked=picked):
-                    schedule.write_runner_script(self.root, "c.yaml", 1, steps=picked)
-                    body = schedule.script_path(self.root).read_text(encoding="utf-8")
-                    line = [x for x in body.splitlines() if "daily" in x][0]
-                    rest = line.split("daily", 1)[1]
-                    want = run_daily.flags_for_steps(run_daily.with_always(picked))
-                    for flag in want:
-                        self.assertIn(flag, rest)
-                    for flag in ("--skip-dump", "--skip-check",
-                                 "--skip-pos", "--skip-pools"):
-                        if flag not in want:
-                            self.assertNotIn(flag, rest)
-
-    def test_步骤定义被钉住(self):
-        """步骤是**全项目唯一的定义**，加一件必须是有意识的决定。
-
-        这条**故意硬编码** —— 改它就意味着"确实要加一步"。
-        """
-        self.assertEqual(run_daily.STEPS, ("dump", "pos", "pools"))
-
-    def test_反推能读回来(self):
-        """重建脚本时要**保住勾选** —— 跟 `--days-ago` 一个道理。
-        读不回来的话，一次界面自愈就把勾选悄悄改回默认。
-
-        ⚠ 读回来的**一定带着 `dump`**（它必做）：写进去 `("pos",)`，
-          读出来是 `("dump", "pos")` —— 这是特性不是 bug。
-        """
-        for picked, want in ((("dump",), ("dump",)),
-                             ((), ("dump",)),
-                             (("pos",), ("dump", "pos")),
-                             (("pools",), ("dump", "pools")),
-                             (("pos", "pools"), ("dump", "pos", "pools"))):
-            with self.subTest(picked=picked):
-                schedule.write_runner_script(self.root, "c.yaml", 1, steps=picked)
-                self.assertEqual(schedule.existing_steps(self.root), want)
-
-    def test_老脚本里的_skip_dump_要补回来(self):
-        """⚠ **升级路径**：抓数据以前是能取消的，门店的 run.bat 里可能
-        真带着 `--skip-dump`。不补的话那份脚本会一直生效，库永远不更新。
-
-        造一份带 `--skip-dump` 的老脚本 → `existing_steps` 必须补回 `dump`。
-        """
-        p = schedule.script_path(self.root)
+    def test_老记录里的勾选不再影响范围(self):
+        """⚠ **升级路径**：老门店的 `.secrets/schedule.json` 里记着 `["pos"]`
+        这种老勾选（那时界面还能勾）。它现在**读都不读** ——
+        手动那份脚本跑哪几步由注册表派生（`MANUAL_STEPS`），
+        跟那份记录一点关系都没有。"""
+        p = schedule.record_path(self.root)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(schedule.RUNNER_MARK + "\n"
-                     '"py" -m src.cli -c "c.yaml" daily --skip-dump --skip-pools\n',
-                     encoding="utf-8")
-        self.assertIn("dump", schedule.existing_steps(self.root))
+        p.write_text('{"t": {"steps": ["pos"], "at": "x"}}', encoding="utf-8")
+        schedule.write_runner_script(self.root, "c.yaml")
+        body = schedule.manual_script_path(self.root).read_text(encoding="utf-8")
+        for step in run_daily.MANUAL_STEPS:
+            with self.subTest(step=step):
+                self.assertIn(step, body, "老记录把 %s 挤掉了？" % step)
 
-    def test_手工脚本也要跟着改(self):
-        """run-now.bat 是给人手动双击的 —— 不改的话手动跑的还是老范围。"""
-        schedule.write_runner_script(self.root, "c.yaml", 1, steps=("pools",))
-        now = schedule.manual_script_path(self.root).read_text(encoding="utf-8")
-        self.assertIn("--skip-pos", now)
-
-    def test_保存勾选_不重新注册任务(self):
-        """⚠ 改勾选**不用碰 Windows 任务** —— 任务跑的是 run.bat，
-        改的是它的内容。重新注册有可能弹 UAC，为了改个勾选弹框不值得。"""
-        with mock.patch.object(schedule, "install") as inst:
-            res = schedule.set_automation_steps(self.root, "c.yaml", ["pos"])
-        self.assertEqual(inst.call_count, 0)
-        self.assertTrue(res["ok"])
-        self.assertIn("不用重新注册", res["message"])
-
-    def test_勾选存进了_schedule_json(self):
-        schedule.set_automation_steps(self.root, "c.yaml", ["pos"])
-        raw = schedule.record_path(self.root).read_text(encoding="utf-8")
-        self.assertIn("pos", raw)
-        # ⚠ 报量排查拿掉之后再写 reconcile 进去就是错的
-        self.assertNotIn("reconcile", raw)
-
-    def test_记录优先于从脚本反推(self):
-        """提权注册的任务普通权限读不到，界面靠这份记录 ——
-        所以记录和脚本不一致时**信记录**。"""
-        schedule.set_automation_steps(self.root, "c.yaml", ["pos"])
-        schedule.write_runner_script(self.root, "c.yaml", 1, steps=("pools",))
-        self.assertEqual(schedule.automation_steps(self.root), ("dump", "pos"))
-
-    def test_没记录时从脚本反推(self):
-        schedule.write_runner_script(self.root, "c.yaml", 1, steps=("pos",))
-        self.assertEqual(schedule.automation_steps(self.root), ("dump", "pos"))
-
-    def test_老格式的_what_也读得出来(self):
-        """升级期：记录里可能还留着 `what: "all"` 这种单值格式。
-        读不出来的话界面会显示成默认值 —— 用户改的勾选"自己变回去了"。
-
-        ⚠ 顺带**补上 `dump`**：那些 `what` 是界面按钮时代的产物
-          （那时能只跑一件事），现在的定时任务必须抓数据。
-        """
-        from src import schedule as sc
-        p = sc.record_path(self.root)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text('{"t": {"what": "pos", "at": "x"}}', encoding="utf-8")
-        self.assertEqual(schedule.automation_steps(self.root), ("dump", "pos"))
-
-    def test_老记录里没有_dump_也要补回来(self):
-        """⚠ 抓数据以前是**可取消**的，老 `.secrets/schedule.json` 里
-        真可能存着 `["pos"]`。不补的话那份记录会一直生效，库永远不更新。"""
-        from src import schedule as sc
-        p = sc.record_path(self.root)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text('{"t": {"steps": ["pos", "pools"], "at": "x"}}',
-                     encoding="utf-8")
-        self.assertEqual(schedule.automation_steps(self.root),
-                         ("dump", "pos", "pools"))
-
-    def test_记录丢了就当默认全跑(self):
-        self.assertEqual(schedule.automation_steps(self.root),
-                         tuple(run_daily.AUTOMATION_DEFAULT_STEPS))
-
-    def test_改勾选保住目标日(self):
-        schedule.write_runner_script(self.root, "c.yaml", 3, steps=("dump",))
-        schedule.set_automation_steps(self.root, "c.yaml", ["pos"])
-        body = schedule.script_path(self.root).read_text(encoding="utf-8")
-        self.assertIn("--days-ago 3", body)
-
-    def test_自愈重建也要保住勾选(self):
-        """`refresh_runner_scripts` 是概览页触发的 —— 它要是把勾选冲掉，
-        表现就是"打开一次界面，设置自己变回默认了"。"""
-        schedule.write_runner_script(self.root, "c.yaml", 1, steps=("pos",))
-        p = schedule.script_path(self.root)
-        p.write_text(p.read_text(encoding="utf-8").replace(schedule.RUNNER_MARK,
-                                                           "rem cbg-runner v0"),
-                     encoding="utf-8")
-        self.assertTrue(schedule.refresh_runner_scripts(self.root, "c.yaml"))
-        self.assertEqual(schedule.existing_steps(self.root), ("dump", "pos"))
-
-    def test_定时任务永远不跳过抓数据(self):
-        """⚠ 这是**用户 2026-09-17 明确要的**：抓数据不可选。
-
-        （原来那条 `test_定时任务不勾抓数据就不抓` 是反过来的 ——
-         那时抓数据是能取消的选项。现在取消不掉了，那条规矩作废。）
-        """
-        schedule.write_runner_script(self.root, "c.yaml", 1, steps=("pos",))
-        body = schedule.script_path(self.root).read_text(encoding="utf-8")
-        self.assertNotIn("--skip-dump", body)
-        self.assertNotIn("--skip-check", body)
-        self.assertIn("--skip-pools", body)
+    def test_生成的脚本里点名的是每天那趟(self):
+        """手动那份脚本：`daily --steps dump,erp-dump,pos,pools,attain` ——
+        **枚举出来**（不写"整批"那种隐式说法），而且不带任何 `--skip-*`。"""
+        schedule.write_runner_script(self.root, "c.yaml")
+        for path in (schedule.script_path(self.root),
+                     schedule.manual_script_path(self.root)):
+            body = path.read_text(encoding="utf-8")
+            with self.subTest(f=path.name):
+                for flag in ("--skip-dump", "--skip-pos", "--skip-pools",
+                             "--skip-attain", "--skip-report", "--days-ago"):
+                    self.assertNotIn(flag, body, "%s 里还有 %s" % (path.name, flag))
+        manual = schedule.manual_script_path(self.root).read_text(encoding="utf-8")
+        self.assertIn("--steps " + ",".join(run_daily.MANUAL_STEPS), manual)
 
 
 class TestAutomationLabel(unittest.TestCase):
@@ -419,44 +339,29 @@ class TestAutomationLabel(unittest.TestCase):
 
     def test_列出每一天实际干的几件事(self):
         self.assertEqual(run_daily.steps_label(("dump", "pos")),
-                         "抓四池数据 + POS 合规")
+                         "抓取玲珑数据 + POS 合规")
         self.assertEqual(run_daily.steps_label(("pos", "pools")),
-                         "POS 合规 + 四池对账")
+                         "POS 合规 + 双平台数据对比")
         self.assertEqual(run_daily.steps_label(("dump",)),
-                         "抓四池数据")
+                         "抓取玲珑数据")
 
     def test_一件都不选要抛(self):
         with self.assertRaises(ValueError):
             run_daily.steps_label(())
 
-    def test_按钮的四个预设都说得出来(self):
-        for what in run_daily.BUTTON_STEPS:
-            with self.subTest(what=what):
-                self.assertTrue(run_daily.steps_label(run_daily.BUTTON_STEPS[what]).strip())
+    def test_每天那趟也说得出来(self):
+        """`steps_label` 现在只给**各页「刷新」**用（`/api/refresh` 的回应里那句
+        "正在抓：…"）—— 它仍然要能把任意一组步骤说成人话。"""
+        from src.features import registry
+        self.assertTrue(run_daily.steps_label(registry.default_steps()).strip())
+        self.assertEqual(run_daily.steps_label(("erp-dump", "attain")),
+                         "抓取云商数据 + 销售达成")
 
 
-class TestAutomationChoicesMatch(unittest.TestCase):
-    """`schedule.AUTOMATION_CHOICES` 和 `run_daily` 是两份 ——
-    有测试盯着，免得改了一处另一处静默用旧的。
-
-    ⚠ 2026-09-17 起这两份**不再相等**：可选项 = 全部步骤 − 必做项
-    （「抓四池数据」的复选框被用户拿掉了）。所以要盯的是**这个式子**，
-    不是"两份字符串一样"。
-    """
-
-    def test_可选项等于全部步骤减去必做项(self):
-        want = tuple(s for s in run_daily.AUTOMATION_DEFAULT_STEPS
-                     if s not in run_daily.ALWAYS_STEPS)
-        self.assertEqual(tuple(schedule.AUTOMATION_CHOICES), want)
-
-    def test_必做项本身也在默认里(self):
-        """⚠ `dump` 必须同时是"默认跑"和"必做" ——
-        哪天有人把它从 `AUTOMATION_DEFAULT_STEPS` 里删了，
-        补回来的那一步会**排在最后**（`with_always` 按 `STEPS` 排序），
-        命令字符串就跟预期不一样了。"""
-        for s in run_daily.ALWAYS_STEPS:
-            with self.subTest(step=s):
-                self.assertIn(s, run_daily.AUTOMATION_DEFAULT_STEPS)
+# ⚠ 这儿原来有个 `TestAutomationChoicesMatch`（"可选项 = 全部步骤 − 必做项"）。
+#   2026-09-20 那个设置整个取消 —— `schedule.AUTOMATION_CHOICES` /
+#   `steps_from_choices` / `choices_from_steps` 三个也一起删了（没有调用方了）。
+#   "跑哪几步固定是全部"现在由 `Test跑哪几步不再是设置` 那几条钉着。
 
 
 class TestSettingsCopy(unittest.TestCase):
@@ -468,28 +373,55 @@ class TestSettingsCopy(unittest.TestCase):
 
     _CN = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五", 6: "六"}
 
+    @staticmethod
+    def _strip_html_comments(text):
+        """⚠ 断言前**必须剥掉 HTML 注释** —— 我给这块写的注释里正引用着
+        原文（「原来这儿有一组复选框（POS 合规 / 双平台数据对比）」），
+        不剥的话 `assertNotIn` 会被**自己的注释**顶掉。
+        （这个坑今天第五次了：断言要对着**页面**，不是整段源码。）"""
+        import re
+        return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
     def _sched_card(self):
-        i = INDEX_HTML.index("<h2>定时执行</h2>")
+        return self._strip_html_comments(self._sched_card_raw())
+
+    def _sched_card_raw(self):
+        # ⚠ 2026-09-20：这块从「通用」页搬成了**独立一页「定时器设置」**
+        #   （用户：「定时器设置单独出来一页」），标题后面还跟了一个
+        #   `<span class="hint" id="timer-meta">`（显示"下次 …"）——
+        #   所以按 `<h2>定时器设置` 找，带上 `</h2>` 就永远找不到了。
+        i = INDEX_HTML.index("<h2>定时器设置")
         j = INDEX_HTML.index("</section>", i)
         return INDEX_HTML[i:j]
 
-    def test_说明写清了抓数据不用选(self):
-        """⚠ 抓数据的复选框被用户 2026-09-17 拿掉了 ——
-        说明里必须写清"每次都跑、取消不掉"，否则用户会满界面找那个不存在的框。"""
+    def test_那几段说明也一起删了(self):
+        """⚠⚠ 2026-09-20（用户）：「**自动化跑什么 … 这些去掉吧，也不用设置了**」。
+
+        这一块原来是"复选框 + 保存 + 四段说明"（抓数据每次都会跑 / 双平台要勾 /
+        POS 不勾就不算 / 两个都不勾也允许）。**整块取消**之后那几段说明也必须走 ——
+        留着的话门店会满界面找一组**不存在的复选框**（这项目为"文案指着一个
+        已经删掉的控件"栽过好几次）。
+        """
         card = self._sched_card()
-        self.assertIn("抓四池数据", card)
-        self.assertIn("每次都会跑", card)
+        for gone in ("自动化跑什么", "每次都会跑", "双平台数据对比", "不勾"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, card)
+        # ⚠ 取消之后这页**不再解释"跑哪几步"** —— 没有可设的东西，就不用解释：
+        #   （解释留在别的页面也没必要：`自动化跑什么` 这个词整份界面里都该消失）
+        self.assertNotIn("自动化", card)
 
     def test_不再说不许一件都不勾(self):
         """⚠ 用户 2026-09-17 定的：两个都不勾 = 「只抓数据」，**允许**。
         文案里再留着"一件都不勾是不允许的"就是骗人。"""
         self.assertNotIn("不允许", self._sched_card())
 
-    def test_可选项的名字都在说明里出现过(self):
+    def test_勾选那两个名字不再出现在这页(self):
+        """⚠ 2026-09-20 之前这条是反的（要求"说明里必须出现可选项的名字"）——
+        设置取消之后，那些名字留在页面上只会让人满界面找复选框。"""
         card = self._sched_card()
-        for s in schedule.AUTOMATION_CHOICES:
+        for s in ("pos", "pools"):
             with self.subTest(step=s):
-                self.assertIn(run_daily.STEP_LABELS[s], card)
+                self.assertNotIn(run_daily.STEP_LABELS[s], card)
 
     def test_不再提已经删掉的目标日下拉(self):
         """⚠ 那句「选『昨天』零遗漏；选『今天』…」是对着一个**已经删掉的下拉框**
@@ -502,7 +434,7 @@ class TestSettingsCopy(unittest.TestCase):
 class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
     """⚠ 「目标日」和「高级（时间窗容差）」**只影响报量排查**（用户 2026-09-16 确认）。
 
-    * **抓四池数据**固定抓当月（第一次跑时补今年至今）—— 它没有"某一天"的概念；
+    * **抓取玲珑数据**固定抓当月（第一次跑时补今年至今）—— 它没有"某一天"的概念；
     * **POS 合规**按**整月**算 —— 一个月一个分数，也没有"某一天"。
 
     这条不只是文案：要是哪天有人"顺手"把 `days_ago` 也转发给 dump/pos，
@@ -514,10 +446,15 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
     （老 run.bat / 计划任务里写死着），所以下面几条照旧有效。
     """
 
-    def _seen(self, extra):
+    def _seen(self, extra=None):
+        # ⚠ 2026-09-21 晚起 `daily` 必须点名 —— 不传就当"每天那趟"那几步
+        #   （这些用例关心的是"目标日那几个参数传没传下去"，不是跑哪几步）。
+        if extra is None:
+            extra = ["--steps", ",".join(run_daily.MANUAL_STEPS)]
         import contextlib
         import io
         seen = {}
+        calls = []          # ⚠ `mk_attain` 会往里记 —— 别删（删了就是 NameError）
 
         def mk(k):
             def f(a):
@@ -525,96 +462,124 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
                 return 0
             return f
         buf = io.StringIO()
-        with mock.patch.object(cli, "cmd_dump", mk("dump")), \
+
+        # ⚠ 2026-09-19 起 POS 走**执行模块**（`app.pos.run`）：桩按新契约回 `PosRun`，
+        #   而且它收的是**关键字**（不再是那个手工拼的 Namespace）。
+        #   ⚠ 定义必须放在 `with` **之前** —— 续行链里插注释是语法错。
+        def mk_attain():
+            def fn(**_kw):
+                calls.append("attain")
+                return {"ok": True}
+            return fn
+
+        def mk_pos():
+            def fn(**kw):
+                seen["pos"] = kw
+                return PosRun(ok=True)
+            return fn
+
+        # ⚠ 也得挡住 `cmd_pools` —— 不挡的话 `run_daily.main` 会**真算一遍四池**、
+        #   往项目根的 `out/` 写 xlsx 和 json（实测 1.5 秒/次）。
+        #   这属于「测试数据隔离」那一步（四项文档 阶段 1.3），本文件顺手先隔离掉。
+        # ⚠ 注释**不能写在 `\` 续行链中间** —— 那是语法错误（这里刚踩了一次）。
+        with mock.patch.object(cli, "load_config",
+                               lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
+                                                "store_code": "SCN328987",
+                                                "marker": "C"}), \
+             mock.patch.object(cli, "cmd_dump", mk("dump")), \
              mock.patch.object(cli, "cmd_check", mk("check")), \
-             mock.patch.object(cli, "cmd_pos", mk("pos")), \
+             mock.patch.object(run_daily, "pos_run", mk_pos()), \
+             mock.patch.object(cli, "cmd_pools", mk("pools")), \
+             mock.patch.object(cli, "cmd_erp_dump", mk("erp-dump")), \
+             mock.patch.object(run_daily, "attain_run", mk_attain()), \
+             mock.patch.object(run_daily, "report_run",
+                               lambda **k: {"ok": True}), \
+             mock.patch.object(run_daily, "inbox_run",
+                               lambda **k: {"ok": True, "skipped": "没配收信"}), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")), \
              contextlib.redirect_stdout(buf):
+            # ⚠⚠ **`cmd_erp_dump` 和 `attain_run` 必须一起挡**（2026-09-21 补）：
+            #   漏了的话这条会**真去登云商抓数**（网络）并**真算一遍达成**
+            #   —— 而达成会 `tmp + rename` 写**项目根**的 `out/attain-2026.json`。
+            #   三个头并行跑时两个进程同时 rename 同一个 tmp ⇒
+            #   `FileNotFoundError: out/attain-2026.json.tmp -> …`（实测在 3.8 那个头红了）。
+            #   ⇒ 测试**不许碰项目根的 out/**（这是"测试数据隔离"的同一条规矩）。
             run_daily.main(extra)
         return seen
 
-    def test_抓四池数据收不到目标日(self):
-        seen = self._seen(["--date", "2026-09-10", "--lookback", "3", "--lookahead", "1"])
+    def test_抓取玲珑数据收不到目标日(self):
+        seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
+                           "--date", "2026-09-10", "--lookback", "3", "--lookahead", "1"])
         for attr in ("date", "days_ago", "lookback", "lookahead"):
             with self.subTest(attr=attr):
                 self.assertFalse(hasattr(seen["dump"], attr),
                                  "dump 不该收到 %s —— 它固定抓当月" % attr)
 
-    def test_抓四池数据只看当月或全量(self):
-        seen = self._seen(["--date", "2026-09-10"])
+    def test_抓取玲珑数据只看当月或全量(self):
+        seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
+                           "--date", "2026-09-10"])
         self.assertTrue(hasattr(seen["dump"], "month"))
         self.assertTrue(hasattr(seen["dump"], "all"))
 
     def test_POS_收不到目标日(self):
-        seen = self._seen(["--date", "2026-09-10", "--lookback", "3", "--lookahead", "1"])
+        seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
+                           "--date", "2026-09-10", "--lookback", "3", "--lookahead", "1"])
         for attr in ("date", "days_ago", "lookback", "lookahead"):
             with self.subTest(attr=attr):
-                self.assertFalse(hasattr(seen["pos"], attr),
+                self.assertNotIn(attr, seen["pos"],
                                  "pos 不该收到 %s —— 它按整月算" % attr)
 
-    def test_POS_只收到库路径(self):
-        seen = self._seen([])
-        self.assertEqual(vars(seen["pos"]), {"db": ""})
+    def test_POS_收到的字段和_pools_一样齐(self):
+        """⚠ 这条**原来叫 `test_POS_只收到库路径`，断言的就是 `{"db": ""}`** ——
+        它把**缺陷本身当成了规格**。
+
+        真相（2026-09-19 架构审阅的隔离探针发现）：`cmd_pos` 会把
+        `getattr(args, "config", None)` 交给 `_maybe_pos_push`，后者第一句是
+        `if not config_path: return` ⇒ **`daily` 每天算了 POS，却从来没推过 POS**。
+        而"POS 只收到库路径"这条断言，正好把这个缺口**焊死**了 ——
+        谁要修它，先得把这条测试改绿。
+
+        ⇒ 现在钉的是**该有的那份**：库路径 + 配置文件 + 两个通知开关，
+          **和同一个函数里 `cmd_pools` 收到的一样齐**。
+        """
+        seen = self._seen()
+        got = seen["pos"]
+        # ⚠ 2026-09-19 起是**关键字**（不再是 Namespace）：这条断言跟着换挂点，
+        #   但钉的东西一个字没变 —— 少一个参数就可能静默不推。
+        self.assertEqual(sorted(got),
+                         ["config_path", "db", "emit", "no_mail", "no_push"],
+                         "POS 收到的参数变了 —— 少一个就可能静默不推")
+        self.assertEqual(got["db"], "")
+        self.assertFalse(got["no_mail"])
+        self.assertFalse(got["no_push"])
+        self.assertTrue(got["config_path"], "POS 拿不到配置文件 ⇒ 推送那边第一句就 return")
+        self.assertTrue(callable(got["emit"]), "emit 没传 ⇒ daily 日志里没有分数那几行")
 
 
 class TestRunPageOnlyOneButton(unittest.TestCase):
-    """运行页现在只有「整个项目」一个按钮（用户 2026-09-17 定的）。
+    """⚠ 2026-09-21（用户：「**右下角的跑一次可以去掉了**」）——
+    那一整张「跑一次」的卡（按钮 + 停止 + 说明）**从 HTML 里删掉了**。
 
-    ⚠ 「目标日」和「高级（时间窗容差）」是**删掉**的，不是藏起来 ——
-    它们对应的五个字段一个都不生效，留着就是"能选、选了没用"的旋钮。
-    这条按源码钉：前端**没有构建步骤、没有 lint**，`$('#run-mode')` 这种
-    引用留着只会在浏览器控制台里报一行 TypeError，跑测试和跑服务都看不见。
+    留这条类的意义：**防止它被加回来**。手动跑还是可以的（命令行 `python -m src.cli daily`），
+    只是界面上不再给这个入口 —— 「运行日志」那张卡留着（用户 2026-09-18：
+    「运行日志要一直在、且好找」）。
     """
 
-    def _panel(self):
-        # ⚠ 2026-09-18：运行块**搬进了常驻抽屉**（`<aside class="drawer" id="run-drawer">`），
-        #   不再是 `<section class="panel" id="panel-run">`。
-        #   所以切片按抽屉的 `</aside>` 收尾 —— 还按 `id="panel-session"` 找的话，
-        #   抽屉在 `</main>` **之后**，那个标记在它前面，直接 ValueError。
-        i = INDEX_HTML.index('id="panel-run"')
-        j = INDEX_HTML.index("</aside>", i)
-        # ⚠ **先去掉 HTML 注释再断言"没有 X"** —— 那块删掉的说明我们留在了注释里
-        #   （"为什么删"比"删了什么"更值钱），不去掉的话注释自己会把断言顶掉。
-        return re.sub(r"<!--.*?-->", "", INDEX_HTML[i:j], flags=re.S)
-
-    def test_只剩整个项目一个按钮(self):
-        panel = self._panel()
-        self.assertEqual(re.findall(r'data-what="([^"]+)"', panel), ["all"])
-
-    def test_按钮的行内说明还在(self):
-        """按钮少了，但"这一下到底跑什么"必须写在旁边 ——
-        用户点到的是一个笼统的「整个项目」。"""
-        panel = self._panel()
-        for word in ("抓四池数据", "POS 合规", "四池对账"):
-            with self.subTest(word=word):
-                self.assertIn(word, panel)
-
-    def test_目标日和高级整块没了(self):
-        panel = self._panel()
-        for gone in ("目标日", "时间窗容差", "run-mode", "run-date",
-                     "run-lookback", "run-lookahead"):
+    def test_跑一次那张卡删了(self):
+        from pathlib import Path
+        html = (Path(__file__).resolve().parent.parent / "web" / "index.html"
+                ).read_text(encoding="utf-8")
+        for gone in ('<h2>跑一次</h2>', 'data-what="all"', 'id="btn-stop"',
+                     'id="run-status"'):
             with self.subTest(gone=gone):
-                self.assertNotIn(gone, panel, "「%s」还在运行页上" % gone)
+                self.assertNotIn(gone, html, "「跑一次」那张卡该删干净")
 
-    def test_app_js_里也不许再引用这些_id(self):
-        """⚠ 引用一个不存在的 id，`$('#run-mode').value` 会在**加载时**抛
-        TypeError —— 后面的绑定全部不执行，整个界面变哑巴。"""
-        for gone in ("#run-mode", "#run-date", "#run-lookback", "#run-lookahead"):
-            with self.subTest(gone=gone):
-                self.assertNotIn("'%s'" % gone, APP_JS)
-
-    def test_请求体里只有_what(self):
-        """⚠ 那五个字段以前是**前端拼好、后端拿去拼命令**的。现在两边都不碰 ——
-        老页面（刷新前还在跑旧 JS）多传也不会 400，后端直接忽略。"""
-        i = APP_JS.index("async function startRun")
-        j = APP_JS.index("function appendLog", i)
-        seg = APP_JS[i:j]
-        self.assertIn("body: { what }", seg)
-        for gone in ("#run-mode", "#run-date", "#run-lookback", "#run-lookahead",
-                     "body.lookback", "body.lookahead", "body.mode", "body.date"):
-            with self.subTest(gone=gone):
-                self.assertNotIn(gone, seg)
+    def test_运行日志还在(self):
+        from pathlib import Path
+        html = (Path(__file__).resolve().parent.parent / "web" / "index.html"
+                ).read_text(encoding="utf-8")
+        self.assertIn('id="run-log"', html, "运行日志不能跟着删")
 
 
 class TestTaskNameAndLegacy(unittest.TestCase):
@@ -670,48 +635,122 @@ class TestTaskNameAndLegacy(unittest.TestCase):
                                              "门店数据拉取与计算-18点00"))
 
 
-class TestScheduleTableColumns(unittest.TestCase):
-    """表列：「跑什么」放的是命令（里面有 run.bat 的**路径**）—— 名不副实。
+class Test旧的计划任务只剩清理(unittest.TestCase):
+    """⚠ 2026-09-20（用户：「**把兜底去掉吧，不用系统的计划任务**」）：
 
-    用户点出来了，所以：那一列改名「**路径**」，另起一列「**跑什么**」
-    写**执行项目**。
+    那块从"注册/管理一条 Windows 计划任务"改成**只做清理**：
+
+    * **没有任务时什么都不显示** —— 以前会挂一条"还没注册定时任务，
+      得手动跑才对账"，而那句话现在是**错的**（到点由服务里的定时器跑，
+      服务靠开机自启常驻）；留着它门店会去建一条根本不需要的任务；
+    * 有任务时给一句话 + 「删除」；**没有「添加」、也没有「执行」**
+      （添加是产品不再提供的动作；执行只会让它去"确保服务在跑"）。
     """
 
-    def _cols(self):
-        """定时任务那张表的列标题。
-
-        ⚠ 必须**锚定到含「任务名」的那一处** —— app.js 里有好几处 `table([...])`，
-        `re.search` 找的是**第一个**，第一版就匹到了别的表上，
-        于是断言"找不到「路径」"（而它其实在）。
-        """
+    def _block(self):
+        """⚠⚠ 取出来之后**必须剥掉 JS 注释** —— 那段注释里正好引用着
+        "以前会挂一条『还没注册定时任务，得手动跑才对账』"，
+        不剥的话 `assertNotIn` 会被**自己的注释**顶掉。
+        （这个坑在这个项目里已经是第四次了：断言要对着**代码**，不是整段文本。）"""
         import re
-        i = APP_JS.index("'任务名'")
-        j = APP_JS.index("]", i)
-        return re.findall(r"'([^']*)'", APP_JS[i:j])
+        i = APP_JS.index("function renderSchedule(sch)")
+        blk = APP_JS[i:APP_JS.index("\n}\n", i)]
+        blk = re.sub(r"/\*.*?\*/", "", blk, flags=re.S)
+        return re.sub(r"(?m)//[^\n]*$", "", blk)
 
-    def test_有路径这一列(self):
-        self.assertIn("路径", self._cols())
+    def test_没有任务时什么都不渲染(self):
+        blk = self._block()
+        self.assertIn("if (!tasks.length) {", blk)
+        # 早退那一支里**不许**再出现"还没注册…得手动跑"那种话
+        head = blk[:blk.index("const rows = tasks.map(")]
+        self.assertNotIn("得手动跑", head)
+        self.assertNotIn("注册计划任务", head)
 
-    def test_有跑什么这一列(self):
-        self.assertIn("跑什么", self._cols())
+    def test_界面不再提供注册入口(self):
+        for gone in ("btn-sched-install", "sched-time", "sched-name",
+                     "syncSchedPlaceholder"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, APP_JS, "注册入口又回来了？")
+                self.assertNotIn(gone, INDEX_HTML)
 
-    def test_跑什么排在路径后面(self):
-        cols = self._cols()
-        self.assertLess(cols.index("路径"), cols.index("跑什么"))
+    def test_也不再提供执行按钮(self):
+        """那条任务现在只做"确保服务在跑" —— 点「执行」等于白跑一趟。"""
+        self.assertNotIn("data-sched-run", APP_JS)
 
-    def test_表格用的是后端的文案(self):
-        """「跑什么」那一格的内容来自 `t.what_label`（后端 `automation_label`），
-        **前端不另写一份** —— 各写一份必然有一天对不上。"""
-        self.assertIn("t.what_label", APP_JS)
+    def test_删除按钮带上两个名字(self):
+        """发去后端的是 `full_name`（Windows 上带反斜杠），给人看的是叶子名 ——
+        不然弹窗会写成「删除「\\TaskName」？」。"""
+        blk = APP_JS[APP_JS.index("function schedDeleteButton(t)")
+                     :APP_JS.index("function schedDeleteButton(t)") + 500]
+        self.assertIn("data-sched-del=", blk)
+        self.assertIn("data-sched-label=", blk)
+        self.assertIn("full_name", blk)
 
-    def test_跑什么那格不被转义成源码(self):
-        """⚠ `table()` 对**字符串**单元格默认 esc()，要放 HTML 得包 `{html: ...}`
-        （这个坑踩过三次）。这一格是纯文字，所以直接给字符串就行 ——
-        但不能写成 `{ html: ... }` 里再套 esc（那样会双重转义）。"""
-        import re
-        seg = APP_JS[APP_JS.index("t.what_label") - 120:APP_JS.index("t.what_label") + 60]
-        self.assertIn("{ html:", seg)
+    def test_删不掉的可以提权删(self):
+        """管理员建的任务普通权限删不掉 —— 那只剩「以管理员身份删除」一条路，
+        而且发的必须是**叶子名**（带反斜杠后端会 400，表现是"点了没反应"）。"""
+        self.assertIn("data-sched-del-admin", APP_JS)
+        i = APP_JS.index("data-sched-del-admin]")
+        blk = APP_JS[i:i + 700]
+        self.assertIn("schedule-remove", blk)
+        self.assertIn("what: 'schedule-remove', name", blk)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Test点名模式不打无关的日志(unittest.TestCase):
+    """⭐ 用户 2026-09-21：「每个页面的刷新，刷**对应的数据**就行，比如销售达成
+    就**没必要刷玲珑**，毕竟他不依赖于玲珑数据」。
+
+    ⚠ 步骤映射本来就是对的（达成刷新 = `erp-dump,attain`，不碰玲珑）——
+      但**日志**里原来会打一行「[1/6] 抓取玲珑数据：**已用 --skip-dump 跳过**」，
+      用户看到"抓取玲珑数据"几个字就以为刷达成去动了玲珑。
+    ⇒ 点名模式下：没点名的步骤**一律不吭声**（顶上已经列了"就这几步"）。
+    """
+
+    def _run(self, steps):
+        import contextlib
+        import io
+        from unittest import mock
+        from src import run_daily as rd
+        buf = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for target in ("src.cli.cmd_dump", "src.cli.cmd_erp_dump",
+                           "src.cli.cmd_pools"):
+                stack.enter_context(mock.patch(target, side_effect=lambda *a, **k: 0))
+            stack.enter_context(mock.patch("src.run_daily.attain_run",
+                                           side_effect=lambda **k: {"ok": True}))
+            stack.enter_context(mock.patch(
+                "src.run_daily.pos_run",
+                side_effect=lambda **k: __import__("types").SimpleNamespace(
+                    ok=True, why="")))
+            stack.enter_context(mock.patch("src.modules.health.auto_update",
+                                           side_effect=lambda *a, **k: {"ok": True}))
+            stack.enter_context(mock.patch.object(
+                cli, "load_config", lambda *a, **k: {
+                    "erp_store_name": "青岛CBD万达店", "store_code": "SCN328987",
+                    "marker": "C"}))
+            stack.enter_context(mock.patch.object(
+                cli, "_find_pos_db", return_value=Path("/tmp/cbg-2026.db")))
+            stack.enter_context(contextlib.redirect_stdout(buf))
+            rd.main(["--steps", steps])
+        return buf.getvalue()
+
+    def test_刷达成不提玲珑(self):
+        out = self._run("erp-dump,attain")
+        self.assertNotIn("玲珑", out, "刷达成的日志里不该出现玲珑")
+        self.assertIn("抓取云商数据", out)
+
+    def test_顶上写清就这几步(self):
+        out = self._run("erp-dump,attain")
+        self.assertIn("这趟跑的：", out)
+        # ⚠ 步骤总数跟着注册表走（2026-09-22 加 film/benefit 后共 11 步）
+        self.assertIn("其余 %d 步不跑" % (len(run_daily.STEPS) - 2), out)
+
+    def test_明确用_skip_关掉的还是要说(self):
+        """⚠ 静音只针对"没点名"；**自己拿 `--skip-*` 关掉的**仍然要报
+        （那是人主动关的，不说就成了静默改行为）。"""
+        out = self._run("dump,erp-dump,pos,pools,attain,autoupdate")
+        self.assertIn("自动更新", out)

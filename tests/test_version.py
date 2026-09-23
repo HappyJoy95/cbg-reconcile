@@ -41,13 +41,20 @@ class TestBuildStamp(unittest.TestCase):
             self.assertTrue(version.packaged())
 
     def test_describe_mentions_both_version_and_build(self):
+        """开发中 shown=commit；发版号是时间戳时 shown=VERSION —— 两头都要在 describe 里。"""
         d = Path(tempfile.mkdtemp())
         f = d / "BUILD.txt"
         f.write_text("2026-09-15 13:42", encoding="utf-8")
         with mock.patch.object(version, "BUILD_FILE", f):
             s = version.describe()
-        self.assertIn(version.VERSION, s)
+        self.assertIn(version.shown_version(), s)
         self.assertIn("2026-09-15 13:42", s)
+        # 发版格式：shown 应等于 VERSION
+        with mock.patch.object(version, "VERSION", "26.0923.153045"), \
+                mock.patch.object(version, "BUILD_FILE", f):
+            s2 = version.describe()
+            self.assertIn("26.0923.153045", s2)
+            self.assertEqual(version.shown_version(), "26.0923.153045")
 
     def test_health_and_overview_expose_the_build(self):
         """界面和 /api/health 都要能看到 —— 门店同事报问题时让他念这一行就行。"""
@@ -146,6 +153,27 @@ class TestGitFallback(unittest.TestCase):
                + inspect.getsource(version._read_sha))
         self.assertNotIn("subprocess", src)
         self.assertNotIn("Popen", src)
+
+
+class Test版本号定义(unittest.TestCase):
+    """用户 2026-09-23：开发=commit，发版=yy.mmdd.hhmmss。"""
+
+    def test_pack_version格式(self):
+        v = version.pack_version()
+        self.assertRegex(v, r"^\d{2}\.\d{4}\.\d{6}$")
+        self.assertTrue(version.is_pack_version(v))
+        self.assertFalse(version.is_pack_version("2.1.1"))
+
+    def test开发显示用commit(self):
+        if not version.is_pack_version():
+            self.assertEqual(version.shown_version(), version.dev_version())
+        self.assertIn(version.shown_version(), version.describe())
+
+    def test时间戳能比大小(self):
+        from src import selfupdate
+        self.assertTrue(selfupdate.is_newer("26.0923.160000", "26.0923.150000"))
+        self.assertTrue(selfupdate.is_newer("26.1001.090000", "26.0930.235959"))
+        self.assertFalse(selfupdate.is_newer("26.0923.150000", "26.0923.160000"))
 
 
 class TestSelftestShowsTheStore(unittest.TestCase):

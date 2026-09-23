@@ -1,0 +1,69 @@
+/* 7 · 酪黄 × 远山青 —— 温暖明亮
+   主色 酪黄 #E7C86A（黄底必须深字）· 辅色 远山青 #5D7E7A · 突出色 深金 #B8942C
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 酪黄 × 远山青 */
+body[data-theme="butter"] {
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 底：酪黄晕开的暖米白 */
+  --bg: #f8f5ec;
+  --card: #fffef8;
+  --line: #e8e2d0;
+  --text: #242018;
+  --muted: #8a8070;
+  --muted-2: #5e5648;
+  --text-2: #443e30;
+
+  /* 主色：酪黄（深字，否则黄底白字糊） */
+  --brand: #d4af37;
+  --brand-dark: #b8942c;
+  --on-brand: #242018;
+  --brand-wash: rgba(212, 175, 55, .16);
+  --focus-ring: #a8c8c4;
+  --glow-fab: drop-shadow(0 5px 14px rgba(212, 175, 55, .45));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(93, 126, 122, .50));
+
+  /* 辅色：远山青 —— logo 第二端 / 表头 / hover / 信息底都偏青灰 */
+  --brand-2: #5d7e7a;
+  --info-bg: #e8f0ee;
+  --on-info: #2f4a46;
+  --th-bg: #f2f4f0;
+  --row-alt: #f8f6f0;
+  --hover: #f0eee4;
+  --field: #fffef8;
+  --code-bg: #eef0ea;
+  --idle: #7a8078;
+  --idle-bg: #eceae0;
+  --icon-muted: #a8b0a8;
+  --line-strong: #cfc8b4;
+
+  --ok: #1a7a4a;
+  --ok-bg: #d4f0e0;
+  --on-ok: #0f4a2c;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --on-bad: #7f1d1d;
+  --warn: #a06820;
+  --warn-bg: #faf0d0;
+  --on-warn: #6b4410;
+  --on-warn-strong: #7c4010;
+  --warn-line: #e8c060;
+  /* 突出色：深金，热点/强调压过浅黄按钮 */
+  --hot: #b8942c;
+  --log-ok: #4ade80;
+  --log-bad: #fca5a5;
+  --log-dim: #7a8078;
+
+  --film-lo: #fce4e4;
+  --film-hi: #dde8e6;
+  --film-sum: #b54850;
+  --on-film-sum: #fff;
+
+  --ink: #141810;
+  --ink-2: #0e120c;
+  --ink-text: #d0d8d0;
+  --overlay: rgba(20, 24, 16, .48);
+}

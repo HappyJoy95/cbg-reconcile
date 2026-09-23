@@ -50,7 +50,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 #: 两个口径的名字 → 用哪个字段判「国补」
 BY_LABEL = "label"
@@ -87,6 +87,33 @@ def is_team(remark) -> bool:
     return str(remark or "").strip() in TEAM_REMARKS
 
 
+#: 官方公式里的**扣减项** = 现金 + 记账（PPT：
+#: 「POS使用率 = 1 − (线下现金 + 记账 + 异常)/(异常 + 总金额)」）。
+#:
+#: ⚠ 判据**机器可读**（别写收款方式的**名字**清单 —— 门店加一种就叫不上了）：
+#:   * **现金**：`payment_medias.open_cash_drawer == 1`（实测「现金」那一条是 1）；
+#:   * **记账**：`pay_channel_name == "记账"` —— 实测「公对公打款」这条
+#:     的 `media_desc` 正好是「记账本」、渠道名就是「记账」。
+#:     PPT 的"基线管控场景"里写着「商场券/会员卡、现金支付、公对公打款等」，
+#:     和我们库里这几条对得上。
+BOOKKEEPING_CHANNEL = "记账"
+
+
+def is_cashlike(media_name, pay_channel: str = "", open_cash_drawer: int = 0) -> bool:
+    """这笔收款算不算**官方的扣减项**（现金 / 记账）。
+
+    ⚠ 跟 `is_noncash()` **不是一回事**（那个是用户 2026-09-16 定的
+      「不是现金都算非现金」，只认「现金」两个字）：
+      官方把**记账**也当扣减 —— 记账出库分销同样是「没走 POS」。
+      ⇒ 两个函数**并存**：老的算「我们自己的口径」，这个算「官方口径」。
+    """
+    if str(media_name or "").strip() == CASH_MEDIA:
+        return True
+    if str(pay_channel or "").strip() == BOOKKEEPING_CHANNEL:
+        return True
+    return bool(open_cash_drawer)
+
+
 def is_noncash(media_name) -> bool:
     """这个收款方式算不算**非现金**（= 进分子）。
 
@@ -111,6 +138,21 @@ class Order:
     is_instant_retail: bool = False
     is_care: bool = False
     is_team: bool = False       # 团单 / 团单出单 —— **只在「申诉后口径」里排除**
+    #: 下单那**一天**（`YYYY-MM-DD`）—— 官方是**日均值**，必须细到天。
+    day: str = ""
+    #: 逐笔支付 —— 官方公式算在**支付**这一层（现金/记账/总额），不是订单层。
+    pays: Tuple["Pay", ...] = ()
+
+    @property
+    def deduct_amount(self) -> float:
+        """这单里**算官方扣减项**的那部分（现金 + 记账）。
+
+        ⚠ 退货扣减要看"**原单当时算在哪一边**"（用户 2026-09-16 的规矩）——
+          官方这边"那一边"就是现金+记账这个和。
+        ⚠ 老数据没有 `pays`（只有月级 `amount/noncash`）⇒ 给 0
+          （**不知道就别瞎扣**，扣错边比不扣更难查）。
+        """
+        return sum(p.deduct() for p in self.pays)
 
     def eligible(self, by: str, exclude_team: bool = False) -> bool:
         """这个单进不进分母/分子。
@@ -126,11 +168,36 @@ class Order:
 
 
 @dataclass(frozen=True)
+class Pay:
+    """**一笔收款** —— 官方公式是按这个粒度算的。
+
+    ⚠ 为什么要单独一层：官方看的是「现金 + 记账 占总金额多少」，
+      而「国补 / 即时零售 / Care+」那些排除是**订单级**的判断。
+      挤在一个 `Order.amount/noncash` 里就表达不了"这一天里有多少现金"。
+    """
+
+    day: str                    # "2026-08-14"（没有支付时间就取订单那天）
+    amount: float
+    media_name: str = ""
+    pay_channel: str = ""
+    open_cash_drawer: int = 0
+
+    def deduct(self) -> float:
+        """这笔要不要算进官方的扣减项（现金 / 记账）。"""
+        return self.amount if is_cashlike(self.media_name, self.pay_channel,
+                                         self.open_cash_drawer) else 0.0
+
+
+@dataclass(frozen=True)
 class Returned:
     """一张退货 —— 关键字段是**退货发生的月**，不是原单的月。"""
 
     month: str                  # 退货月（"2026-09"）
     amount: float               # 退回的金额（全额退就是原单金额）
+    #: 退货那**一天**（`YYYY-MM-DD`）—— 官方那个是日均值，扣在具体哪天要说得清。
+    #: ⚠ 实测本店 7 张退货**全都和原单同一天**，所以"退货当天"和"原单当天"没区别；
+    #:   规矩仍按用户 2026-09-16 定的「**当月退货当月扣**」。
+    day: str = ""
     orig: Optional[Order] = None   # 原单；**查不到就是 None**（跨年、或不在库里）
     noncash_refund: float = 0.0    # 退款走非现金的金额
     # ⚠ **`noncash_refund` 只用来交叉核对，不参与扣减。**
@@ -197,6 +264,132 @@ class MonthResult:
                 "退货扣减": {"分母": round(self.cut_den, 2), "分子": round(self.cut_num, 2)},
                 "原单查不到的退货": list(self.orphan_returns),
                 "退款方式异常": list(self.odd_refunds)}
+
+
+#: 官方口径的名字 —— 界面上并列显示时用它当键。
+OFFICIAL = "official"
+
+
+def daily_totals(orders, returns=(), month: str = "", by: str = BY_LABEL,
+                 exclude_team: bool = False) -> Dict[str, Tuple[float, float]]:
+    """这个月**逐日**汇总 → `{day: (扣减, 总额)}`（**退货已扣**）。
+
+    * 扣减 = 当日**现金 + 记账**（`Pay.deduct()`，机器判据见 `is_cashlike`）；
+    * 总额 = 当日进分母的**全部**收款；
+    * 排除（国补/即时零售/Care+）是**订单级**判断 ⇒ 按订单过滤，再摊到天；
+    * ⚠⚠ **退货要扣掉** —— 官方那句「考核数据范围**不包含退货数据**」的意思是
+      **把退货从数据里剔除**（净额），不是"退货不参与计算"。
+      我第一版读反了，用户 2026-09-21 当场纠正：
+      「不包含退货数据**那就是要把退货扣除掉呀**」。
+      ⇒ 扣在**退货发生的那一天**（用户 2026-09-16 定的规矩：当月退货当月扣），
+        原单当月**不动**；原单本来就没进分母（国补/即时零售/Care+）的**不扣**。
+        ⚠ 退货那天没有销售时，退回到**原单那天**（再兜底用当月第一个有销售的日子）——
+          直接扣"月初 1 号"的话，那天的净额会是负数、比率算不出来，
+          这笔退货就**悄悄丢了**（实测本店 09 月三张 6,999 全丢过）。
+
+    ⚠ 没有 `pays` 的老数据（`Order` 只有月级 `amount/noncash`）**退化成天 = 月初**，
+      也就是"整天算一天" —— 那样日均值就等于汇总值，不至于没有数。
+    """
+    out: Dict[str, Tuple[float, float]] = {}
+
+    def add(day: str, deduct: float, total: float):
+        d, t = out.get(day, (0.0, 0.0))
+        out[day] = (d + deduct, t + total)
+
+    for o in orders:
+        if o.month != month or not o.eligible(by, exclude_team):
+            continue
+        if o.pays:
+            for p in o.pays:
+                add((p.day or o.day or (month + "-01"))[:10], p.deduct(), p.amount)
+        else:
+            add(o.day or (month + "-01"), 0.0, o.amount)
+
+    sale_days = sorted(d for d, (_dd, tt) in out.items() if tt > 0)
+    for r in returns:
+        if r.month != month:
+            continue
+        if not r.orig or not r.orig.eligible(by, exclude_team):
+            continue                     # 原单压根没进来 ⇒ 扣了反而错
+        # ⚠ 扣在**退货发生的那一天**（用户定的"当月退货当月扣"）。
+        #   那天要是没有销售（退货单和销售不同天），退回到**原单那天** ——
+        #   再退一步才用当月第一个有销售的日子。
+        #   ⚠ 不能直接写 `r.month + "-01"`：月初常常没有销售 ⇒ 那一天的净额变成
+        #     负数 ⇒ `daily_rate` 判"算不出来"跳过 ⇒ **这笔退货就悄悄丢了**
+        #     （第一版就是这么丢的，09 月那三张 6,999 一分没扣上）。
+        share = r.share()
+        cut_d, cut_t = -r.orig.deduct_amount * share, -r.amount
+        for cand in (r.day, r.orig.day, r.month + "-01"):
+            if cand and cand[:7] == month and cand[:10] in sale_days:
+                add(cand[:10], cut_d, cut_t)
+                break
+        else:
+            if sale_days:                # 兜底：当月第一个有销售的天
+                add(sale_days[0], cut_d, cut_t)
+    return out
+
+
+def daily_rate(deduct: float, total: float, abnormal: float = 0.0) -> Optional[float]:
+    """官方那一天的分式：`1 − (现金+记账+异常)/(异常+总金额)`。
+
+    ⚠ 异常金额（成交价低于建议零售价 >30% 的部分）**我们还没有数据源**
+      （要"建议零售价"，库里只有成交价）⇒ 现在恒为 0，
+      页面上会写明这件事，别让它看起来像"已经算进去了"。
+    """
+    den = abnormal + total
+    if den <= 0:
+        return None
+    return max(0.0, min(1.0, 1.0 - (deduct + abnormal) / den))
+
+
+def score_month_official(orders, returns=(), month: str = "", by: str = BY_LABEL,
+                         exclude_team: bool = False,
+                         abnormal_by_day: Optional[Dict[str, float]] = None) -> dict:
+    """**官方那套 POS 使用率**（PPT《POS合规：计算逻辑及方法》）。
+
+    | | 官方 | 我们原来那套（`score_month`） |
+    |---|---|---|
+    | 扣减项 | 现金 **+ 记账** | 只认「现金」两个字（"不是现金都算非现金"） |
+    | 退货 | **把退货扣掉**（净额，退货当月） | 退货当月扣减（同） |
+    | 算法 | **先按天算，再取日均值** | 整月分子分母各自汇总再相除 |
+
+    ⚠ **退货照样扣**（官方备注「考核数据范围不包含退货数据」= 把退货剔除、算净额；
+      我第一版读反成"不参与计算"，用户当场纠正）。扣的位置和规则跟老口径一致：
+      **退货当月扣、原单当月不动、原单没进分母的不扣**。
+    ⚠ **异常金额是"每天一个数"**（`abnormal_by_day`）——
+      PPT 那个例子里三天分别是 50 / 0 / 100，整月一个常数表达不了。
+      没有数据源时给 `None`（= 全 0），返回里 `abnormal_known=False` 说明这件事。
+
+    ⚠ 返回的是普通 dict（不是 `MonthResult`）：它多一个"天数"，
+      而且**没有**分子分母扣退货那些字段 —— 两套口径的字段本来就不一样，
+      硬塞进同一个 dataclass 只会让两边都读错。
+    """
+    days = daily_totals(orders, returns, month, by, exclude_team)
+    ab = dict(abnormal_by_day or {})
+    rates = []
+    deduct_sum = 0.0
+    total_sum = 0.0
+    ab_sum = 0.0
+    for day in sorted(days):
+        d, t = days[day]
+        a = float(ab.get(day, 0.0))
+        r = daily_rate(d, t, a)
+        if r is None:
+            continue
+        rates.append(r)
+        deduct_sum += d
+        total_sum += t
+        ab_sum += a
+    avg = round(sum(rates) / len(rates) * 100, 2) if rates else None
+    return {"month": month, "rate": avg, "days": len(rates),
+            "deduct": round(deduct_sum, 2), "total": round(total_sum, 2),
+            # 汇总法（分子分母各自加总再相除），留着**交叉核对**用：
+            #   同一个月两个数差多少，一眼能看出"日均值"这件事影响多大。
+            "rate_sum": (round((1 - (deduct_sum + ab_sum) / (total_sum + ab_sum)) * 100, 2)
+                         if (total_sum + ab_sum) else None),
+            "abnormal": round(ab_sum, 2),
+            # ⚠ 异常金额还没有数据源 —— 说出来，别让人以为算了
+            "abnormal_known": bool(abnormal_by_day)}
 
 
 def months_of(orders, returns) -> List[str]:

@@ -1,7 +1,7 @@
-"""四池比对历史（`src/pools_history.py`）的回归。
+"""报量查询历史（`src/pools_history.py`）的回归。
 
-这一页原来是「报量排查」，2026-09-17 用户选了 **B：形态留着、内容换成四池记录**
-（那个判据已被证伪，留着只会跟四池对账打架）。
+这一页原来是「报量排查」，2026-09-17 用户选了 **B：形态留着、内容换成报量查询的记录**
+（那个判据已被证伪，留着只会跟双平台数据对比打架）。
 所以这里额外钉一条**前端 tab 名** —— 改回去就说明有人没搞清这页现在是什么。
 """
 
@@ -74,11 +74,18 @@ class TestFrontendWiring(unittest.TestCase):
     """这一页现在叫什么、渲染哪来的 —— 钉住，别再被人改回「报量排查」。"""
 
     def test_tab_is_renamed(self):
-        # ⚠ 2026-09-18 前端融合改版：四池比对从**一级页签**降成
-        #   「合规」页里的**二级标签**（用户定：POS 和四池各是各的表，不许混）。
-        self.assertIn('data-subtab="pools">四池比对', INDEX_HTML)
-        self.assertNotIn('data-subtab="pools">报量排查', INDEX_HTML,
-                         "标签改回「报量排查」了？那页现在是四池比对的历史")
+        # ⚠ 2026-09-18 前端融合改版：报量查询从**一级页签**降成
+        #   「五项合规」页里的**二级标签**（用户定：POS 和报量查询各是各的表，不许混）。
+        # ⚠ 2026-09-18 傍晚用户又改了一次名：「报量查询」→「报量查询」。
+        #   页签 id 还是 `pools`（id 改了 `GO_TARGETS` / 老日志的 `go` 都要迁移）。
+        self.assertRegex(INDEX_HTML, r'data-subtab="pools"[^>]*>报量查询')
+        # ⚠ 这两个是**旧名**，故意留着字面 —— 别顺手"统一"成新名，
+        #   那等于把"不该出现的东西"改成"应该出现的东西"，断言必然反过来红
+        #   （批量改名时真踩了这一次）。
+        for dead in ("报量排查", "四池比对"):
+            with self.subTest(dead=dead):
+                self.assertNotRegex(INDEX_HTML, r'data-subtab="pools"[^>]*>%s' % dead,
+                                 "这个标签名已经被用户改掉了，别改回去")
 
     def test_renders_pools_history(self):
         self.assertIn("renderPoolsHistory", APP_JS)

@@ -11,8 +11,12 @@
 
 import base64
 import contextlib
+import hashlib
 import io
 import json
+import os
+import re
+import shutil
 import tempfile
 import types
 import unittest
@@ -21,6 +25,9 @@ from pathlib import Path
 from unittest import mock
 
 from src import selfupdate
+
+#: 真的项目根 —— 给"冒烟命令本身对不对"那条测试用（假安装目录 import 不起来）
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _fake_zip(root_in_zip: str, files: dict) -> bytes:
@@ -329,6 +336,9 @@ class TestWhitelist(unittest.TestCase):
 
         以前 bat 在仓库的 `packaging/` 下、安装目录里在根，更新时得靠一张
         映射表硬凑。那种"两套布局 + 对照表"的结构，加一个文件要想两处，迟早漏。
+
+        ⚠ `tests/` **故意不铺**（2026-09-22 方案 2，用户）：门店不跑 pytest；
+        手工包也 `--exclude 'tests/'`，两条路径一致。
         """
         for rel in ("src/cli.py", "web/app.js", "bootstrap.py",
                     "install.bat", "运维手册.md", "tests/test_x.py",
@@ -337,9 +347,20 @@ class TestWhitelist(unittest.TestCase):
         got = {str(rel) for _, rel in selfupdate._targets(self.zip_root)}
         self.assertEqual(got, {
             "src/cli.py", "web/app.js", "bootstrap.py",
-            "install.bat", "运维手册.md", "tests/test_x.py",
+            "install.bat", "运维手册.md",
             "run_check.py", ".gitattributes",
         }, "路径被改过了 —— 那就不再是'跟着仓库走'")
+        self.assertNotIn("tests/test_x.py", got,
+                         "门店包/自更新都不该下发 tests/")
+
+    def test_skip_apply_skips_tests(self):
+        """`SKIP_APPLY` 里的顶层目录 zip 里有也不铺。"""
+        self.assertIn("tests", selfupdate.SKIP_APPLY)
+        self._mk("tests/test_selfupdate.py", "x")
+        self._mk("src/cli.py", "x")
+        got = {str(rel) for _, rel in selfupdate._targets(self.zip_root)}
+        self.assertNotIn("tests/test_selfupdate.py", got)
+        self.assertIn("src/cli.py", got)
 
     def test_never_touches_data_directories(self):
         """⚠ 这是整个功能的底线。
@@ -539,7 +560,9 @@ class TestWhitelist(unittest.TestCase):
         self.assertNotIn("src/__pycache__/cli.cpython-314.pyc", targets)
 
 
-class TestApply(unittest.TestCase):
+class _ApplyCase(unittest.TestCase):
+    """升级类测试的公共脚手架（`TestApply` / `TestUpdateJournal` 共用）。"""
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -554,8 +577,15 @@ class TestApply(unittest.TestCase):
         (self.root / "out").mkdir()
         (self.root / "out" / "报告.xlsx").write_text("历史报告", encoding="utf-8")
 
-    def _apply(self, files, anchors=True):
-        """anchors=False 用来模拟"下载下来的根本不是我们的包"。"""
+    def _apply(self, files, anchors=True, keep_staging=False, smoke=False):
+        """anchors=False 用来模拟"下载下来的根本不是我们的包"。
+
+        `keep_staging=True` 用于**失败**的用例：`apply_update` 会故意保留解压目录
+        （重跑要用），这里就不替它删 —— 免得测试自己把要验的东西删掉。
+
+        `smoke=False` 是**默认**：临时目录里的 `src/cli.py` 内容就是"新代码"三个字，
+        根本 import 不起来。冒烟那一套自己有测试（`TestSmokeAndRollback`）。
+        """
         if anchors:
             files = {"bootstrap.py": "x", "src/cli.py": "旧代码", **files}
         blob = _fake_zip("cbg-reconcile-main", files)
@@ -564,10 +594,33 @@ class TestApply(unittest.TestCase):
             with zipfile.ZipFile(io.BytesIO(blob)) as z:
                 z.extractall(d)
             dl.return_value = d / "cbg-reconcile-main"
+            if keep_staging:
+                self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+                return selfupdate.apply_update(self.root, current="1.2.0", smoke=smoke)
             try:
-                return selfupdate.apply_update(self.root, current="1.2.0")
+                return selfupdate.apply_update(self.root, current="1.2.0", smoke=smoke)
             finally:
-                __import__("shutil").rmtree(d, ignore_errors=True)
+                shutil.rmtree(d, ignore_errors=True)
+
+    def _boom(self, after=0):
+        """造一个「铺完前 `after` 个文件就炸」的 `_write_file`（几个升级类共用）。
+
+        ⚠ 别在子类里重定义它 —— 会出现"看起来只有一份、其实后面那份把前面那份盖了"
+        的情况（同名方法后者胜，且没有任何提示）。
+        """
+        state = {"calls": 0}
+
+        def fake(src, dst):
+            if state["calls"] >= after:
+                raise OSError("磁盘满了")
+            state["calls"] += 1
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+
+        return fake
+
+class TestApply(_ApplyCase):
+    """把 zip 铺到安装目录（升级 / 回退走的是同一条路）。"""
 
     def test_updates_code(self):
         res = self._apply({"src/cli.py": "新代码", "src/version.py":
@@ -629,6 +682,657 @@ class TestApply(unittest.TestCase):
             self._apply({"src/cli.py": "x"}, anchors=False)      # 缺 bootstrap.py
 
 
+class TestUpdateJournal(_ApplyCase):
+    """升级现场：journal + 快照（阶段 1.4a）。
+
+    ⚠ 这一组盯的是「失败时**有人知道**、而且**退得回去**」——
+    在这之前，`apply_update` 改到一半被打断是**完全静默**的：
+    下一次启动 `upgrade.record()` 只比版本号，于是程序在混合版本上照跑。
+    """
+
+    def test_动第一个文件之前现场就写好了(self):
+        seen = {}
+
+        def boom(src, dst):
+            seen["journal"] = selfupdate.read_journal(self.root)
+            raise OSError("磁盘满了")
+
+        with mock.patch.object(selfupdate, "_write_file", boom):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        self.assertEqual(seen["journal"].get("state"), "applying",
+                         "铺文件之前没写 journal —— 中断了没人知道")
+        self.assertIn("src/cli.py", seen["journal"]["plan"]["update"])
+
+    def test_快照存的是改之前的内容(self):
+        res = self._apply({"src/cli.py": "新代码", "src/version.py": 'VERSION = "1.3.0"\n'})
+        backup = Path(res["backup"])
+        self.assertTrue(backup.is_dir())
+        self.assertEqual((backup / "src" / "cli.py").read_text(encoding="utf-8"),
+                         "旧代码", "备份里不是改之前的内容")
+        self.assertGreaterEqual(res["saved"], 1)
+        self.assertFalse((backup / "bootstrap.py").exists(),
+                         "这次是新加的文件，没什么可备份的")
+
+    def test_成功之后现场是_done(self):
+        self._apply({"src/version.py": 'VERSION = "1.3.0"\n'})
+        j = selfupdate.read_journal(self.root)
+        self.assertEqual(j["state"], "done")
+        self.assertEqual(j["to"], "1.3.0")
+        self.assertEqual(selfupdate.pending(self.root), {},
+                         "走完了还被当成「没走完」，界面上会一直挂横幅")
+
+    def test_失败抛的是_PartialUpdate_并且带着现场(self):
+        with mock.patch.object(selfupdate, "_write_file", self._boom()):
+            with self.assertRaises(selfupdate.PartialUpdate) as cm:
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        res = cm.exception.result
+        self.assertIn("铺到一半", str(cm.exception))
+        self.assertTrue(Path(res["backup"]).is_dir(), "失败后没有退路")
+        self.assertTrue(Path(res["journal"]).is_file())
+        self.assertEqual(res["changed"], [], "第一个文件就炸了，不该有「已改完」的")
+
+    def test_失败之后_pending_报得出来(self):
+        with mock.patch.object(selfupdate, "_write_file", self._boom()):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        j = selfupdate.pending(self.root)
+        self.assertEqual(j.get("state"), "failed")
+        self.assertIn("磁盘满了", j.get("error", ""))
+
+    def test_失败时保留解压目录(self):
+        """⚠ 重跑要用它 —— 老代码在 `finally` 里**无条件**删掉，于是中断之后
+        既不能重跑，也没有现场可查。"""
+        with mock.patch.object(selfupdate, "_write_file", self._boom()):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        staging = selfupdate.read_journal(self.root).get("staging", "")
+        self.assertTrue(staging and Path(staging).is_dir(),
+                        "解压目录被删了：重跑就得重新下载，离线时等于没救")
+
+    def test_还没动过文件就不留现场(self):
+        """锚点不对（根本不是我们的包）⇒ 一个文件都没动 ⇒ 不该留下 journal。"""
+        with self.assertRaises(selfupdate.UpdateError):
+            self._apply({"src/x.py": "y"}, anchors=False)
+        self.assertEqual(selfupdate.read_journal(self.root), {})
+        self.assertEqual(selfupdate.pending(self.root), {})
+
+    def test_重跑一遍是幂等的(self):
+        files = {"src/cli.py": "新代码", "src/version.py": 'VERSION = "1.3.0"\n'}
+        self._apply(files)
+        again = self._apply(files)
+        self.assertEqual(again["changed"], [])
+        self.assertEqual(again["added"], [])
+        self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"), "新代码")
+
+    def test_只留最近两份现场(self):
+        for i in range(3):
+            self._apply({"src/cli.py": f"第 {i} 版", "src/version.py": 'VERSION = "1.3.0"\n'})
+        base = self.root / ".secrets" / "update"
+        dirs = sorted(p.name for p in base.iterdir() if p.is_dir())
+        self.assertEqual(len(dirs), 2, f"现场堆着不清：{dirs}")
+
+    def test_现场放在_NEVER_TOUCH_里面(self):
+        """放别处会被下一次升级当代码覆盖掉 —— 那就白写了。"""
+        res = self._apply({"src/version.py": 'VERSION = "1.3.0"\n'})
+        rel = Path(res["journal"]).relative_to(self.root)
+        self.assertEqual(rel.parts[0], ".secrets")
+        self.assertIn(rel.parts[0], selfupdate.NEVER_TOUCH)
+
+
+class TestAtomicWrite(_ApplyCase):
+    """阶段 1.4b：铺单个文件必须是**原子**的。
+
+    ⚠ 盯的是一种最难查的损坏：`copyfile` 先截断再写，中断留下**半个 .py**。
+    那以后报出来的是"程序坏了"，没人会想到是某次升级被掐断。
+    """
+
+    def test_先写临时文件再改名(self):
+        """不许直接往目标路径写 —— 记下 `copyfile` 的目标就知道。"""
+        seen = []
+        real = shutil.copyfile
+
+        def spy(src, dst, *a, **k):
+            seen.append(str(dst))
+            return real(src, dst, *a, **k)
+
+        with mock.patch.object(shutil, "copyfile", spy):
+            self._apply({"src/cli.py": "新代码"})
+        wrote = [p for p in seen if p.endswith("src/cli.py")]
+        self.assertEqual(len(wrote), 1)
+        self.assertNotIn(str(self.root / "src" / "cli.py"), wrote,
+                         "直接写目标了 —— 中断会留下半个文件")
+
+    def test_改名失败时目标还是旧内容(self):
+        """⚠ **别 mock 整个 `os` 模块** —— `_write_journal` 和 `_iter_files`
+        也在用它（`os.replace` / `os.walk`），整块换掉会先炸在写 journal 上，
+        测出来的是另一回事。要打就打真正那个缝：`_replace_retry`。"""
+        with mock.patch.object(selfupdate, "_replace_retry",
+                               side_effect=OSError("占住了")):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"),
+                         "旧代码", "改名没成功，目标却已经被改了")
+
+    def test_失败之后不留临时文件(self):
+        with mock.patch.object(selfupdate, "_replace_retry",
+                               side_effect=OSError("占住了")):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, keep_staging=True)
+        left = list((self.root / "src").glob("*.new-*"))
+        self.assertEqual(left, [], f"门店目录里留下垃圾了：{left}")
+
+    def test_被占住时会重试(self):
+        """杀软/索引器**瞬时**占住是常态 —— 不能一次就把升级判死。
+
+        只让**目标文件**那一次 replace 失败；journal 自己的 replace 照常走，
+        否则测的是"journal 写不下去"，不是重试。
+        """
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(a, b):
+            if str(b).endswith("src/cli.py") and calls["n"] == 0:
+                calls["n"] += 1
+                raise PermissionError("杀软正扫着")
+            return real_replace(a, b)
+
+        with mock.patch.object(selfupdate.os, "replace", flaky), \
+                mock.patch.object(selfupdate.time, "sleep", lambda s: None):
+            res = self._apply({"src/cli.py": "新代码"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(calls["n"], 1, "没有重试就放弃了")
+        self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"), "新代码")
+
+
+class TestWriteOrder(_ApplyCase):
+    """阶段 1.4b：**入口文件最后落地**。
+
+    ⚠ 新代码可能 import 新模块。入口最后写 ⇒ 任何时刻中断，
+    旧入口配着"新模块已经在"的目录都还能跑（旧入口不认识新模块，
+    但它也不会去 import 它们）—— 这是"不搞整目录交换也能接受"的前提之一。
+    """
+
+    def test_入口排在最后(self):
+        order = []
+        real = selfupdate._write_file
+
+        def spy(src, dst):
+            order.append(selfupdate._rel_key(Path(dst).relative_to(self.root)))
+            return real(src, dst)
+
+        with mock.patch.object(selfupdate, "_write_file", spy):
+            self._apply({"src/cli.py": "新代码", "src/zzz_new.py": "Z", "src/aaa_new.py": "A"})
+        self.assertEqual(order[-1], "src/cli.py")
+        self.assertEqual(order[-2], "bootstrap.py")
+        self.assertNotIn("src/cli.py", order[:-1])
+        self.assertLess(order.index("src/zzz_new.py"), order.index("src/cli.py"),
+                        "普通模块必须排在入口前面")
+
+
+class TestPruneCandidates(_ApplyCase):
+    """阶段 1.4c：哪些旧文件**可以**清、哪些**绝对不许碰**。
+
+    ⚠ 这一版 `PRUNE_ENABLED=False` —— **只算不删**（用户 2026-09-19 定的审计版）。
+    先把门店真实候选看清楚，再打开真删。
+    """
+
+    def _zip(self, files):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for rel, text in files.items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        return d
+
+    def _put(self, rel, text="x"):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def _cand(self, zipfiles):
+        z = self._zip(zipfiles)
+        have = {selfupdate._rel_key(r) for r in zipfiles}
+        return selfupdate.prune_candidates(self.root, z, have)
+
+    def test_新版没有的旧模块算残留(self):
+        self._put("src/pools.py", "老的四池实现")
+        c = self._cand({"src/cli.py": "旧代码"})
+        self.assertIn("src/pools.py", c["files"])
+        self.assertFalse(c["blocked"])
+
+    def test_根目录一律不删(self):
+        """`run*.bat` 是本机生成的、`BUILD.txt` 是装完写的、文档只在包里 ——
+        在根目录做差集就会删掉它们。"""
+        for name in ("run.bat", "run-now.bat", "BUILD.txt", "AGENTS.md", "发布说明.md"):
+            self._put(name)
+        c = self._cand({"src/cli.py": "旧代码"})
+        for name in ("run.bat", "run-now.bat", "BUILD.txt", "AGENTS.md", "发布说明.md"):
+            self.assertNotIn(name, c["files"])
+
+    def test_门店配置和会话永不删(self):
+        self._put("config/store-SCN231409.yaml", "我的门店配置")
+        self._put("out/报告.xlsx", "历史报告")
+        self._put(".secrets/erp.env", "我的账号")
+        self._put("tools/build_package.sh", "打包工具")
+        self._put(".dsh/memory/x.md", "记忆")
+        c = self._cand({"src/cli.py": "旧代码"})
+        self.assertEqual(c["files"], [], f"动了不该动的东西：{c['files']}")
+
+    def test_stores_yaml_不会被清掉(self):
+        """它是**随程序走的门店映射表**（`ALLOW_EVEN_IF_NEVER`）——
+        删了 29 家店一起瞎。"""
+        self._put("config/stores.yaml", "门店映射表")
+        c = self._cand({"src/cli.py": "旧代码"})
+        self.assertNotIn("config/stores.yaml", c["files"])
+        self.assertIn("映射表", c["skipped"].get("config/stores.yaml", ""))
+
+    def test_锚点永不进删除候选(self):
+        """⚠ 老更新器硬依赖这两个路径 —— 删掉 = 全公司门店再也收不到更新。
+
+        `src/cli.py` 落在前缀里，靠**锚点那道闸**挡住；`bootstrap.py` 在根目录，
+        第一道闸（前缀白名单）就挡住了。两条路都必须"不可删"。
+        """
+        z = self._zip({"src/other.py": "x"})
+        self.assertEqual(selfupdate.prune_reason(self.root, z, "src/cli.py"), "更新器锚点")
+        self.assertNotEqual(selfupdate.prune_reason(self.root, z, "bootstrap.py"), "")
+        self._put("bootstrap.py", "入口")
+        c = self._cand({"src/other.py": "x"})
+        self.assertNotIn("src/cli.py", c["files"])
+        self.assertNotIn("bootstrap.py", c["files"])
+
+    def test_删之前再问一次文件系统(self):
+        """门店**真出过** `os.walk` 漏掉 `src/cli.py`（`:717-735` 的兜底就是为它写的）。
+
+        以前那只是"更新被拒"；有了删除之后就变成"删掉 cli.py"。
+        所以：**遍历说没有、但 `is_file()` 说有 ⇒ 不删。**
+        """
+        z = self._zip({"src/ghost.py": "新版里其实有这个文件"})
+        have = set()                      # 模拟"遍历漏了"：一个都没带上
+        c = selfupdate.prune_candidates(self.root, z, have)
+        self.assertNotIn("src/ghost.py", c["files"])
+        self.assertEqual(selfupdate.prune_reason(self.root, z, "src/ghost.py"),
+                         "新版里其实还有它（遍历漏了，按存在处理）")
+
+    def test_手工备份和缓存不会被当成残留(self):
+        for name in ("src/pools.py.bak-20260919", "src/pools.py.orig",
+                     "src/pools.py.new-4242", "src/notes.txt.tmp"):
+            self._put(name)
+        (self.root / "src" / "__pycache__").mkdir(exist_ok=True)
+        (self.root / "src" / "__pycache__" / "pools.cpython-38.pyc").write_text("x")
+        c = self._cand({"src/cli.py": "旧代码"})
+        self.assertEqual(c["files"], [], f"把手工备份/缓存当残留了：{c['files']}")
+
+    def test_候选太多就整体不删(self):
+        """一次正常重构不会让两成文件消失 —— 那种情况多半是包不对/解压不全。"""
+        for i in range(30):
+            self._put(f"src/old_{i}.py")
+        c = self._cand({"src/cli.py": "旧代码"})
+        self.assertTrue(c["blocked"], f"30/{c['total']} 个候选居然没被拦")
+        self.assertEqual(len(c["files"]), 30, "候选还是要算出来给人看")
+
+    def test_少量残留不触发比例闸(self):
+        for i in range(3):
+            self._put(f"src/old_{i}.py")
+        self.assertFalse(self._cand({"src/cli.py": "旧代码"})["blocked"])
+
+    def test_审计版只报告不删(self):
+        self._put("src/pools.py", "老的四池实现")
+        res = self._apply({"src/cli.py": "新代码"})
+        self.assertIn("src/pools.py", res["removed_candidates"])
+        self.assertEqual(res["removed"], [], "审计版不该真删")
+        self.assertFalse(res["prune_enabled"])
+        self.assertTrue((self.root / "src" / "pools.py").is_file(),
+                        "审计版把文件删了 —— 那还叫审计吗")
+
+    def test_残留也进快照(self):
+        """⚠ 要删的东西才是**最需要退路**的 —— 备份必须发生在删之前。"""
+        self._put("src/pools.py", "老的四池实现")
+        res = self._apply({"src/cli.py": "新代码"})
+        backup = Path(res["backup"])
+        self.assertEqual((backup / "src" / "pools.py").read_text(encoding="utf-8"),
+                         "老的四池实现")
+
+    def test_升级时新版独有的残留会被清掉(self):
+        """`apply_update` 的删除规则：新版没有的旧文件要能清掉（有备份）。"""
+        self._put("src/brand_new.py", "只在新版里有")
+        res = self._apply({"src/cli.py": "新代码"})
+        self.assertIn("src/brand_new.py", res["removed_candidates"])
+
+    def test_打开开关就真的搬走而且有备份(self):
+        """⚠ 真删那条路**现在就测**（把开关 mock 成 True）——
+        否则 1.4d 打开 `PRUNE_ENABLED` 时是在动一段没人验过的代码。"""
+        self._put("src/pools.py", "老的四池实现")
+        with mock.patch.object(selfupdate, "PRUNE_ENABLED", True):
+            res = self._apply({"src/cli.py": "新代码"})
+        self.assertTrue(res["prune_enabled"])
+        self.assertEqual(res["removed"], ["src/pools.py"])
+        self.assertFalse((self.root / "src" / "pools.py").exists(), "该清的没清")
+        self.assertEqual((Path(res["backup"]) / "src" / "pools.py").read_text(encoding="utf-8"),
+                         "老的四池实现", "搬走了却没进备份 —— 那就退不回来了")
+
+    def test_比例闸拦住时一个都不删(self):
+        for i in range(30):
+            self._put(f"src/old_{i}.py")
+        with mock.patch.object(selfupdate, "PRUNE_ENABLED", True):
+            res = self._apply({"src/cli.py": "新代码"})
+        self.assertTrue(res["prune_blocked"])
+        self.assertEqual(res["removed"], [])
+        self.assertTrue((self.root / "src" / "old_0.py").is_file())
+
+    def test_没有备份目录就一个都不搬(self):
+        """宁可不删，也不能删了找不回。"""
+        self._put("src/pools.py", "老的四池实现")
+        self.assertEqual(selfupdate._prune(self.root, ["src/pools.py"], ""), [])
+        self.assertTrue((self.root / "src" / "pools.py").is_file())
+
+
+class TestRepairAndRestore(_ApplyCase):
+    """阶段 1.4d：断了之后**怎么收尾** —— 重跑（不用联网）或者从备份退回去。
+
+    ⚠ 这条路是给"服务起不来、控制台进不去"准备的，所以它**不能依赖网络**，
+    也不能抛异常（命令行和 HTTP 两条路都会调它）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # ⚠ `repair()` 内部走的 `apply_update` 默认会冒烟，而假安装目录
+        #   （`src/cli.py` 里就"新代码"三个字）根本 import 不起来。
+        #   冒烟本身由 `TestSmokeAndRollback` 覆盖。
+        p = mock.patch.object(selfupdate, "smoke_test", lambda root, timeout=90: (True, ""))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _tree_hash(self):
+        """整棵安装目录的哈希（不含 `.secrets/update` —— 现场本来就该变）。"""
+        h = hashlib.sha256()
+        for p in sorted(self.root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = selfupdate._rel_key(p.relative_to(self.root))
+            if rel.startswith(".secrets/update"):
+                continue
+            h.update(rel.encode("utf-8"))
+            h.update(p.read_bytes())
+        return h.hexdigest()
+
+    def _break(self, files=None):
+        """跑到一半断掉，留下现场。"""
+        with mock.patch.object(selfupdate, "_write_file", self._boom(after=1)):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply(files or {"src/cli.py": "新代码"}, keep_staging=True)
+
+    def test_从备份恢复能回到升级前(self):
+        """整棵树逐字节比对 —— 包括"这次新加的文件要被挪走"。"""
+        before = self._tree_hash()
+        self._break({"src/cli.py": "新代码", "src/version.py": 'VERSION = "1.3.0"\n'})
+        self.assertNotEqual(self._tree_hash(), before, "都没改动，这个测试就没意义了")
+        res = selfupdate.restore_backup(self.root)
+        self.assertTrue(res["ok"], res.get("message"))
+        self.assertEqual(self._tree_hash(), before, "没回到升级前")
+        self.assertEqual(selfupdate.pending(self.root), {}, "恢复完了还报'没走完'")
+
+    def test_恢复也不会碰数据(self):
+        self._break()
+        selfupdate.restore_backup(self.root)
+        self.assertEqual((self.root / "config" / "store-SCN231409.yaml").read_text(encoding="utf-8"),
+                         "我的门店配置")
+        self.assertEqual((self.root / ".secrets" / "erp.env").read_text(encoding="utf-8"),
+                         "我的账号")
+        self.assertEqual((self.root / "out" / "报告.xlsx").read_text(encoding="utf-8"),
+                         "历史报告")
+
+    def test_没有备份就说清楚(self):
+        res = selfupdate.restore_backup(self.root)
+        self.assertFalse(res["ok"])
+        self.assertIn("找不到备份", res["message"])
+
+    def test_重跑优先用上次的解压目录(self):
+        """⚠ **不联网**也能修 —— 门店断网时这是唯一的路。"""
+        self._break()
+        with mock.patch.object(selfupdate, "download") as dl:
+            res = selfupdate.repair(self.root, current="1.2.0")
+        dl.assert_not_called()
+        self.assertTrue(res["ok"])
+        self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"), "新代码")
+        self.assertEqual(selfupdate.pending(self.root), {})
+
+    def test_解压目录没了就重新下载(self):
+        """系统临时目录重启后会被清 —— 那种情况只能重下。"""
+        self._break()
+        shutil.rmtree(selfupdate.read_journal(self.root)["staging"], ignore_errors=True)
+        blob = _fake_zip("cbg-reconcile-main",
+                         {"bootstrap.py": "x", "src/cli.py": "新代码"})
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            z.extractall(d)
+        with mock.patch.object(selfupdate, "download", lambda **k: d / "cbg-reconcile-main") as dl:
+            res = selfupdate.repair(self.root, current="1.2.0")
+        self.assertTrue(res["ok"])
+
+    def test_没有没走完的升级就直说(self):
+        res = selfupdate.repair(self.root, current="1.2.0")
+        self.assertFalse(res["ok"])
+        self.assertIn("没有没走完", res["message"])
+
+    def test_自检会报出没走完的升级(self):
+        """⚠ 中断必须**在人看得见的地方**说出来 —— 否则程序静默跑在混合版本上。"""
+        self._break()
+        lines = selfupdate.integrity_lines(self.root)
+        self.assertTrue(lines, "自检一声不吭")
+        self.assertIn("没走完", lines[0])
+        self.assertIn("--restore", "\n".join(lines))
+        selfupdate.restore_backup(self.root)
+        self.assertEqual(selfupdate.integrity_lines(self.root), [], "修完了还在报")
+
+    def test_命令行_repair_和_restore_能跑(self):
+        """服务起不来时唯一的路 —— 退出码必须是 0/非 0 说得清的。"""
+        import argparse
+
+        from src import cli
+        with mock.patch.object(cli, "ROOT", self.root):
+            self.assertEqual(cli.cmd_update(argparse.Namespace(repair=False, restore=False)), 0)
+            self._break()
+            self.assertEqual(cli.cmd_update(argparse.Namespace(repair=True, restore=False)), 0)
+            self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"), "新代码")
+
+
+class TestSmokeAndRollback(_ApplyCase):
+    """阶段 1.4e：铺完**冒烟一遍**，不过就**自动退回升级前**。
+
+    ⚠ 这两步合起来是"无人值守自动更新"能不能成立的**分界线**：
+    没有它，一次断在半路或铺进一个 import 不起来的版本的更新，
+    对门店来说就是"某天开始，程序莫名其妙起不来了"。
+    """
+
+    def _tree_hash(self):
+        h = hashlib.sha256()
+        for p in sorted(self.root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = selfupdate._rel_key(p.relative_to(self.root))
+            if rel.startswith(".secrets/update"):
+                continue
+            h.update(rel.encode("utf-8"))
+            h.update(p.read_bytes())
+        return h.hexdigest()
+
+    def test_冒烟不过就自动退回升级前(self):
+        before = self._tree_hash()
+        with mock.patch.object(selfupdate, "smoke_test",
+                               lambda root, timeout=90: (False, "ModuleNotFoundError: requests")):
+            with self.assertRaises(selfupdate.PartialUpdate) as cm:
+                self._apply({"src/cli.py": "新代码", "src/version.py": 'VERSION = "1.3.0"\n'},
+                            smoke=True)
+        self.assertIn("自动退回", str(cm.exception))
+        self.assertTrue(cm.exception.result.get("rolled_back"))
+        self.assertEqual(self._tree_hash(), before, "退回去了但目录没回到原样")
+        self.assertEqual(selfupdate.pending(self.root), {},
+                         "已经自己退回来了，不该还挂着「没走完」的红条")
+
+    def test_冒烟不过时不写_BUILD_txt(self):
+        """⚠ 代码退回去了、指纹却写着新版本 —— 界面会显示一个它没在跑的版本。"""
+        (self.root / "BUILD.txt").write_text("2026-09-01 10:00\n", encoding="utf-8")
+        with mock.patch.object(selfupdate, "smoke_test", lambda root, timeout=90: (False, "boom")):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码", "src/version.py": 'VERSION = "1.3.0"\n'},
+                            smoke=True)
+        self.assertEqual((self.root / "BUILD.txt").read_text(encoding="utf-8"),
+                         "2026-09-01 10:00\n")
+
+    def test_冒烟不过就不清旧文件(self):
+        """新代码还没被证明能用，就先别动旧文件。"""
+        self._put_old()
+        with mock.patch.object(selfupdate, "PRUNE_ENABLED", True), \
+                mock.patch.object(selfupdate, "smoke_test", lambda root, timeout=90: (False, "x")):
+            with self.assertRaises(selfupdate.PartialUpdate):
+                self._apply({"src/cli.py": "新代码"}, smoke=True)
+        self.assertTrue((self.root / "src" / "pools.py").is_file())
+
+    def test_冒烟通过就照常完成(self):
+        with mock.patch.object(selfupdate, "smoke_test", lambda root, timeout=90: (True, "ok")):
+            res = self._apply({"src/cli.py": "新代码"}, smoke=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual((self.root / "src" / "cli.py").read_text(encoding="utf-8"), "新代码")
+
+    def test_冒烟命令本身在真项目根上能过(self):
+        """⚠ 这条是**真实解释器**那一档证据：证明冒烟命令本身是对的，
+        而不只是"我们调了它"。"""
+        ok, why = selfupdate.smoke_test(ROOT)
+        self.assertTrue(ok, f"在真项目根上冒烟没过：{why}")
+
+    def test_冒烟命令在坏目录上会失败(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ok, why = selfupdate.smoke_test(d)
+        self.assertFalse(ok)
+        self.assertIn("退出码", why)
+
+    def test_没改任何文件就不冒烟(self):
+        """全都一样时不该白起一个进程（每次检查更新都会走这条）。"""
+        (self.root / "bootstrap.py").write_text("x", encoding="utf-8")   # 跟包里一致
+        calls = []
+        with mock.patch.object(selfupdate, "smoke_test",
+                               lambda root, timeout=90: calls.append(1) or (True, "")):
+            res = self._apply({"src/cli.py": "旧代码"}, smoke=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual(calls, [], "没有任何改动还去起了一个进程")
+
+    def _put_old(self):
+        p = self.root / "src" / "pools.py"
+        p.write_text("老的四池实现", encoding="utf-8")
+        return p
+
+
+class Test打包规则对账(unittest.TestCase):
+    """阶段 1.4f：**同一条规则的两次实现必须能对账**。
+
+    排除规则写在两个地方：`selfupdate.NEVER_TOUCH`（自更新照铺时不许碰什么）
+    和 `tools/build_package.sh` 的 `--exclude`（打包时不许装什么）。
+    两边靠**注释**对齐已经有漂过（实测：自检名单里躺着 `设计文档.md`、`packaging` 两个
+    死条目），所以改成测试钉住。
+    """
+
+    SH = ROOT / "tools" / "build_package.sh"
+
+    def _excludes(self) -> list:
+        text = self.SH.read_text(encoding="utf-8")
+        return re.findall(r"--exclude '([^']+)'", text)
+
+    def _selfcheck_names(self) -> list:
+        """自检那两段名单（文档 / 开发垃圾）。
+
+        ⚠ 只认 `_doc` 和 `junk` 这两个循环变量 —— 脚本里还有别的 `for … in …; do`
+        （拷 bat 那个），一把抓会把 `install start stop …` 当成文件名。
+        """
+        text = self.SH.read_text(encoding="utf-8")
+        names = []
+        for m in re.finditer(r"for\s+(?:_doc|junk)\s+in\s+([^;]+);", text):
+            body = m.group(1).replace("\\\n", " ")
+            names += [x.strip("'\"") for x in re.findall(r"'[^']+'|\S+", body)
+                      if x.strip("'\"")]
+        return names
+
+    def test_打包脚本的排除项覆盖所有_NEVER_TOUCH(self):
+        """自更新不碰的东西，包里也不该有 —— 两边漏一个就是一次事故。"""
+        ex = [e.rstrip("/") for e in self._excludes()]
+        missing = []
+        for name in selfupdate.NEVER_TOUCH:
+            if any(e == name or e.startswith(name + "/") for e in ex):
+                continue
+            missing.append(name)
+        self.assertEqual(missing, [], "打包脚本没排除这些："
+                         + ", ".join(missing) + f"（--exclude 里有：{ex}）")
+
+    def test_打包脚本不会丢掉四个前缀里的文件(self):
+        """⚠ **src / web 必须进包**（删除规则与自更新都依赖这两棵）。
+        `tests/` 例外（2026-09-22 用户方案 2）：手工包与自更新都**不下发**，
+        git 里保留 —— 两边一致，不是"包里没有、更新却会给"。
+        `config/` 只许排除 `store-*.yaml`（这台电脑自己的）。"""
+        for e in self._excludes():
+            key = e.rstrip("/")
+            if key == "tests" or key.startswith("tests/"):
+                continue                      # 有意排除：门店不跑 pytest
+            self.assertNotIn(
+                key, ("src", "web"),
+                f"--exclude '{e}' 会把 {key}/ 挡在包外 —— 自更新却会给门店，两边就不一致了")
+            self.assertFalse(
+                key.startswith(("src/", "web/")),
+                f"--exclude '{e}' 动了 src/ 或 web/")
+            if key.startswith("config/"):
+                self.assertEqual(
+                    key, "config/store-*.yaml",
+                    f"--exclude '{e}'：config/ 里只允许排除**这台电脑自己的**门店配置，"
+                    "别的文件（比如 config/stores.yaml）必须进包")
+        # tests 必须被排除（跟 SKIP_APPLY 对齐）
+        ex = [e.rstrip("/") for e in self._excludes()]
+        self.assertIn("tests", ex,
+                      "打包脚本应 --exclude 'tests/'，与 selfupdate.SKIP_APPLY 对齐")
+
+    def test_自检名单和排除项对得上(self):
+        """⚠ 脚本自己写着「名单要和 `--exclude` 那一段一一对上」——
+        本轮核的时候**已经对不上**（`设计文档.md`、`packaging` 两边都没有）。
+        这条测试就是那句话的执行版。"""
+        ex = [e.rstrip("/") for e in self._excludes()]
+        bad = []
+        for name in self._selfcheck_names():
+            if name.startswith("${") or name.startswith("$"):
+                continue                      # 脚本里的变量，不是文件名
+            if name in ex:
+                continue
+            if (ROOT / name).exists():
+                bad.append(f"{name}（文件在，但 --exclude 里没有）")
+            else:
+                bad.append(f"{name}（既不在仓库里、也不在 --exclude 里 —— 死条目）")
+        self.assertEqual(bad, [], "自检名单和 --exclude 对不上：\n  " + "\n  ".join(bad))
+
+    def test_删除白名单不会碰到本机生成的文件(self):
+        """`PRUNE_PREFIXES` 里的每一项要么**不在** `NEVER_TOUCH`，
+        要么就是 `config`（靠 `ALLOW_EVEN_IF_NEVER` 单独放行）。"""
+        for p in selfupdate.PRUNE_PREFIXES:
+            if p in selfupdate.NEVER_TOUCH:
+                self.assertEqual(p, "config",
+                                 f"{p} 在 NEVER_TOUCH 里，却进了删除白名单")
+        self.assertNotIn("config/stores.yaml", selfupdate.PRUNE_PREFIXES,
+                         "门店映射表永远不许进删除白名单")
+
+    def test_打包前要求工作区干净(self):
+        """⚠ D7：`rsync` 拷的是**工作区**，未跟踪文件会进包、而 zip 里没有 ——
+        门店装了这种包，下一次自更新就被当残留清掉（发了个短命包）。"""
+        text = self.SH.read_text(encoding="utf-8")
+        self.assertIn("status --porcelain", text)
+        self.assertIn("CBG_ALLOW_DIRTY", text)
+        # ⚠ 顺序也是要求：必须**在复制之前**拦下来 —— 拷完再检查就晚了。
+        #   锚"行首的 rsync"：注释里也提到过它（那段说明就写在检查上面）。
+        m = re.search(r"(?m)^rsync -a", text)
+        self.assertIsNotNone(m, "找不到复制那一步")
+        self.assertLess(text.index("status --porcelain"), m.start(),
+                        "工作区检查排在 rsync 后面 —— 那已经拷完了")
+
+
 class TestDownloadSources(unittest.TestCase):
     """⚠ 实测：`codeload.github.com` 会发**缓存的旧 zip**。
 
@@ -644,7 +1348,7 @@ class TestDownloadSources(unittest.TestCase):
         self.assertIn("codeload", urls[1])
 
     def test_zip_urls_follow_the_requested_ref(self):
-        """回退要能指定任意 commit —— 地址里的 ref 必须换成它。"""
+        """`download(ref=…)` 要能把地址里的 ref 换成指定分支/tag。"""
         sha = "abc1234def5678"
         urls = selfupdate._zip_urls(sha)
         self.assertIn(sha, urls[0])
@@ -762,7 +1466,7 @@ class TestFailureDiagnostics(unittest.TestCase):
                         {"README.md": "# 不是我们的仓库", "web/index.html": "x"})
         with mock.patch.object(selfupdate, "download", lambda *a, **k: pkg):
             with self.assertRaises(selfupdate.UpdateError) as cm:
-                selfupdate.apply_update(self.tmp, current="1.3.2")
+                selfupdate.apply_update(self.tmp, current="1.3.2", smoke=False)
         msg = str(cm.exception)
         self.assertIn("src/cli.py", msg, "缺哪个文件要说")
         self.assertIn("命令行入口", msg, "它是干什么的也要说")
@@ -777,7 +1481,7 @@ class TestFailureDiagnostics(unittest.TestCase):
             "bootstrap.py": "x", "install.bat": "y",
         })
         with mock.patch.object(selfupdate, "download", lambda *a, **k: pkg):
-            res = selfupdate.apply_update(self.tmp, current="1.3.1")
+            res = selfupdate.apply_update(self.tmp, current="1.3.1", smoke=False)
         self.assertTrue(res["ok"])
         self.assertEqual(res["to"], "1.3.2")
         self.assertTrue((self.tmp / "src" / "cli.py").is_file())
@@ -877,110 +1581,6 @@ class TestVersionSourcePriority(unittest.TestCase):
                 selfupdate.remote_version()
 
 
-class TestHistoryAndRollback(unittest.TestCase):
-    """历史版本回退。
-
-    升级出问题时要有退路 —— 尤其自更新这条路本身还在被门店网络折腾的时候。
-    """
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
-
-    # -------------------------------------------------- 版本号从哪来
-    def test_only_release_commits_count(self):
-        """⚠ 只认 `release: vX.Y.Z`。
-
-        实测踩到：宽松正则会把 `fix(update): 检查更新优先走…（v1.3.4 就这样）`
-        这种**正文里提到版本号**的提交也抓进来，列表里于是出现两个 v1.3.4，
-        而且都不是它真正的版本 —— 门店照着这种列表回退，等于闭着眼睛选。
-        """
-        self.assertEqual(selfupdate._version_from_message("release: v1.4.2"), "1.4.2")
-        self.assertEqual(selfupdate._version_from_message("Release: V1.4.2"), "1.4.2")
-        self.assertEqual(
-            selfupdate._version_from_message("release: v1.4.2\n\n两个修复一起出"),
-            "1.4.2")
-        self.assertEqual(
-            selfupdate._version_from_message("fix(update): 检查更新\n\n（v1.3.4 就这样）"),
-            "")
-        self.assertEqual(selfupdate._version_from_message("chore: 忽略 BUILD.txt"), "")
-        self.assertEqual(selfupdate._version_from_message(""), "")
-
-    def test_history_skips_commits_without_a_version(self):
-        payload = [
-            {"sha": "a" * 40, "commit": {"message": "release: v1.4.2",
-                                         "committer": {"date": "2026-09-15T09:58:00Z"}}},
-            {"sha": "b" * 40, "commit": {"message": "fix: 一些小修",
-                                         "committer": {"date": "2026-09-15T09:57:00Z"}}},
-            {"sha": "c" * 40, "commit": {"message": "release: v1.4.1",
-                                         "committer": {"date": "2026-09-15T09:44:00Z"}}},
-        ]
-        with mock.patch.object(selfupdate, "_git_json", lambda url, **k: payload):
-            vs = selfupdate.history()
-        self.assertEqual([v["version"] for v in vs], ["1.4.2", "1.4.1"])
-        self.assertEqual(vs[0]["short"], "a" * 7)
-        self.assertIn("2026-09-15", vs[0]["date"])
-
-    def test_history_reports_a_bad_response(self):
-        """限流 / 返回非列表 → 报错，别让界面拿到半个列表。"""
-        with mock.patch.object(selfupdate, "_git_json",
-                               lambda url, **k: {"message": "API rate limit exceeded"}):
-            with self.assertRaises(selfupdate.UpdateError) as cm:
-                selfupdate.history()
-        self.assertIn("历史版本", str(cm.exception))
-
-    # ------------------------------------------------------------ 回退
-    def test_rollback_refuses_a_non_sha(self):
-        """`ref` 直接拼进 URL —— 先卡住明显不对的东西。"""
-        for bad in ("", "main", "../../etc", "v1.4.2", "abc"):
-            with self.assertRaises(selfupdate.UpdateError):
-                selfupdate.rollback(self.root, ref=bad)
-
-    def test_rollback_passes_the_ref_through(self):
-        seen = {}
-
-        def fake_apply(root, *, current="", ref=None):
-            seen["ref"] = ref
-            return {"ok": True, "to": "1.3.6"}
-
-        with mock.patch.object(selfupdate, "apply_update", fake_apply):
-            res = selfupdate.rollback(self.root, ref="ddfb39d" + "0" * 33,
-                                      current="1.4.2")
-        self.assertTrue(res["ok"])
-        self.assertTrue(seen["ref"].startswith("ddfb39d"))
-
-    def test_rollback_only_touches_code(self):
-        """回退走的是同一条铺代码的路 —— 数据目录一样不许碰。"""
-        pkg = Path(tempfile.mkdtemp()) / "cbg-old"
-        for rel in ("src/cli.py", "src/version.py", "bootstrap.py", "install.bat"):
-            f = pkg / rel
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text('VERSION = "1.3.0"' if rel.endswith("version.py") else "x",
-                         encoding="utf-8")
-        # 门店自己的东西
-        (self.root / "config").mkdir(exist_ok=True)
-        (self.root / "config" / "store-SCN231409.yaml").write_text("marker: C",
-                                                                  encoding="utf-8")
-        (self.root / ".secrets").mkdir(exist_ok=True)
-        (self.root / ".secrets" / "erp.env").write_text("ERP_USERNAME=me",
-                                                        encoding="utf-8")
-        (self.root / "out").mkdir(exist_ok=True)
-        (self.root / "out" / "差异.xlsx").write_text("报告", encoding="utf-8")
-
-        with mock.patch.object(selfupdate, "download", lambda *a, **k: pkg):
-            res = selfupdate.apply_update(self.root, current="1.4.2",
-                                          ref="ddfb39d" + "0" * 33)
-        self.assertTrue(res["ok"])
-        self.assertTrue((self.root / "src" / "cli.py").is_file(), "代码要铺过去")
-        # ⚠ 数据一个都不许动
-        self.assertEqual((self.root / "config" / "store-SCN231409.yaml")
-                         .read_text(encoding="utf-8"), "marker: C")
-        self.assertEqual((self.root / ".secrets" / "erp.env")
-                         .read_text(encoding="utf-8"), "ERP_USERNAME=me")
-        self.assertTrue((self.root / "out" / "差异.xlsx").is_file())
-
-
 class TestTargetsInconsistency(unittest.TestCase):
     """`_targets()` 漏掉**真实存在**的文件时，不能因此拒绝一个好好的包。
 
@@ -1015,7 +1615,7 @@ class TestTargetsInconsistency(unittest.TestCase):
         pkg = self._pkg()
         with mock.patch.object(selfupdate, "download", lambda *a, **k: pkg), \
                 mock.patch.object(selfupdate, "_targets", drops_anchor):
-            res = selfupdate.apply_update(self.root, current="1.4.2")
+            res = selfupdate.apply_update(self.root, current="1.4.2", smoke=False)
         self.assertTrue(res["ok"], "包是好的，不该被拒")
         self.assertTrue((self.root / "src" / "cli.py").is_file(),
                         "漏掉的文件要补进去，否则铺过去的代码是残的")
@@ -1027,7 +1627,7 @@ class TestTargetsInconsistency(unittest.TestCase):
         (bad / "README.md").write_text("# 不是我们的", encoding="utf-8")
         with mock.patch.object(selfupdate, "download", lambda *a, **k: bad):
             with self.assertRaises(selfupdate.UpdateError) as cm:
-                selfupdate.apply_update(self.root, current="1.4.2")
+                selfupdate.apply_update(self.root, current="1.4.2", smoke=False)
         self.assertIn("src/cli.py", str(cm.exception))
 
     def test_the_inconsistency_is_reported_loudly(self):
@@ -1042,7 +1642,7 @@ class TestTargetsInconsistency(unittest.TestCase):
         with mock.patch.object(selfupdate, "download", lambda *a, **k: pkg), \
                 mock.patch.object(selfupdate, "_targets", drops_anchor), \
                 contextlib.redirect_stdout(buf):
-            selfupdate.apply_update(self.root, current="1.4.2")
+            selfupdate.apply_update(self.root, current="1.4.2", smoke=False)
         out = buf.getvalue()
         self.assertIn("内部不一致", out)
         self.assertIn("src/cli.py", out)

@@ -74,6 +74,8 @@ import datetime
 import json
 import re
 import struct
+import sys
+import time
 import zlib
 
 import requests
@@ -93,6 +95,25 @@ XL_EPOCH = datetime.date(1899, 12, 30)
 
 class TdocError(RuntimeError):
     """读腾讯文档失败。**一律抛这个，不返回空值** —— 见模块头部。"""
+
+
+#: 瞬时网络错重试次数 / 退避（跟 `erp._with_net_retry` 同形）。
+#:
+#: ⚠ 模块头「频率」那段记的 `SSLZeroReturnError`（限流时被腾讯掐 TLS）
+#:   以及门店常见代理/防火墙的间歇断连 —— 都值得原样重试一次就好。
+#:   不重试的话整步 `daily` 会以「没预料到的错误」+ 退出码 9 收场，
+#:   而那本该是可恢复的网络抖动（应用 `TdocError`）。
+NET_TRIES = 3
+NET_BACKOFF = 1.5          # 秒；第 n 次失败后等 n * BACKOFF
+
+
+def _is_transient_net_error(exc):
+    """这一票网络错**值得原样重试**（连接被掐 / 超时），不是文档解析错。"""
+    return isinstance(exc, (
+        requests.exceptions.SSLError,       # 含 SSLEOFError / SSLZeroReturnError
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    ))
 
 
 # =============================================================== protobuf
@@ -347,15 +368,45 @@ def decode_grid(text0):
 
 
 # ============================================================== IO（走网络）
+def _with_net_retry(fn, what, tries=None):
+    """跑一次 HTTP 调用；**瞬时网络错**重试，耗尽后抛 `TdocError`。
+
+    ⚠ 耗尽后必须转成 `TdocError`：`SSLError` 不是 `TdocError`，
+      上层（attain / daily）只接后者 —— 漏出去会变成顶层「程序 bug」+ 退出码 9。
+    ⚠ 同一个 `Session` 上重试（登录态 / cookie 要留着）；坏连接由 urllib3 丢弃，
+      不像 `selfupdate` 那样每次新开 Session。
+    ⚠ **业务/解析错不进这个函数**（`TdocError`、HTTP 非 200 在外层判）——
+      只包住 `sess.get` 那一下。
+    """
+    n = NET_TRIES if tries is None else max(1, int(tries))
+    last = None
+    for attempt in range(1, n + 1):
+        try:
+            return fn()
+        except Exception as e:                              # noqa: BLE001
+            if not _is_transient_net_error(e):
+                raise
+            last = e
+            if attempt < n:
+                print("[腾讯文档] %s 网络中断（%s），%.1fs 后重试 %d/%d"
+                      % (what, type(e).__name__, NET_BACKOFF * attempt,
+                         attempt, n - 1),
+                      file=sys.stderr)
+                time.sleep(NET_BACKOFF * attempt)
+    raise TdocError(
+        "%s失败：连试 %d 次网络都被掐断（%s: %s）"
+        % (what, n, type(last).__name__, last)
+    ) from last
+
+
 def _get(url, referer=None, session=None, timeout=60):
     sess = session or requests
     headers = {"User-Agent": UA}
     if referer:
         headers["Referer"] = referer
-    try:
-        resp = sess.get(url, headers=headers, timeout=timeout)
-    except requests.RequestException as exc:
-        raise TdocError("请求失败（网不通 / 被限流）：%s" % exc) from exc
+    resp = _with_net_retry(
+        lambda: sess.get(url, headers=headers, timeout=timeout),
+        "GET %s" % url[:80])
     if resp.status_code != 200:
         raise TdocError("HTTP %s：%s" % (resp.status_code, url[:80]))
     return resp.text

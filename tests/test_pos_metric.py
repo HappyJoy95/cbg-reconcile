@@ -15,7 +15,8 @@
 
 import unittest
 
-from src.pos_metric import (BY_LABEL, BY_REMARK, CARE_SCENARIO_TYPE, CASH_MEDIA,  # noqa: F401
+from src.features.compliance.pos import pos_metric as pm
+from src.features.compliance.pos.pos_metric import (BY_LABEL, BY_REMARK, CARE_SCENARIO_TYPE, CASH_MEDIA,  # noqa: F401
                         TEAM_REMARKS,
                         INSTANT_RETAIL_BUSINESS_TYPE, MonthResult, Order, Returned,
                         both, is_noncash, is_team, months_of, score_all,
@@ -274,3 +275,214 @@ class TestAppealBasis(unittest.TestCase):
     def test_团单常量就是实测那两条(self):
         """⚠ 全库只有这两条；改了要回门店核。"""
         self.assertEqual(TEAM_REMARKS, ("团单", "团单出单"))
+
+
+class Test官方口径的POS使用率(unittest.TestCase):
+    """⭐ 官方 PPT《POS合规：计算逻辑及方法》（用户 2026-09-21 给的）。
+
+        POS使用率 = 1 − (线下现金 + 记账 + 异常) / (异常 + 总金额)   ← 先按天算，再取日均值
+        备注：考核数据范围**不包含退货数据**
+
+    ⚠ 跟我们原来那套（`score_month`）**三处不一样**，逐条钉住：
+      ① 扣减项 = 现金 **+ 记账**（我们只认「现金」两个字）；
+      ② **不扣退货**（我们按退货当月扣）；
+      ③ **先按天算再平均**（我们整月汇总）。
+    """
+
+    def _order(self, day, pays, **kw):
+        return pm.Order(document_no="d" + day, month=day[:7], amount=sum(p.amount for p in pays),
+                        noncash=0.0, day=day, pays=tuple(pays), **kw)
+
+    def test_现金和记账都算扣减(self):
+        """⚠ 判据是**机器可读**的（开钱箱 / 渠道名「记账」），不是收款方式的名字清单。
+
+        实测：「现金」那一条 `open_cash_drawer=1`；「公对公打款」的
+        `media_desc` 是「记账本」、`pay_channel_name` 就是「记账」。
+        """
+        self.assertTrue(pm.is_cashlike("现金"))
+        self.assertTrue(pm.is_cashlike("公对公打款", pay_channel="记账"))
+        self.assertTrue(pm.is_cashlike("随便什么", open_cash_drawer=1))
+        self.assertFalse(pm.is_cashlike("银商MIS微信", pay_channel="银商MIS"))
+        self.assertFalse(pm.is_cashlike("花呗分期", pay_channel="支付宝"))
+        # ⚠ 老函数（用户 2026-09-16 定的）**没变** —— 两个口径并存
+        self.assertTrue(pm.is_noncash("公对公打款"))
+
+    def test_一天一笔现金一天一笔微信(self):
+        """两天：一天全现金、一天全微信 ⇒ 日均值 = (0% + 100%) / 2 = 50%。
+
+        ⚠ 汇总法也是 50%（两天金额一样）—— 这条只是打底；
+          真正拉开差距的是下面那条**金额不均**的。
+        """
+        orders = [self._order("2026-08-01", [pm.Pay("2026-08-01", 100.0, "现金")]),
+                  self._order("2026-08-02", [pm.Pay("2026-08-02", 100.0, "银商MIS微信")])]
+        got = pm.score_month_official(orders, month="2026-08")
+        self.assertEqual(got["rate"], 50.0)
+        self.assertEqual(got["days"], 2)
+        self.assertEqual(got["deduct"], 100.0)
+        self.assertEqual(got["total"], 200.0)
+
+    def test_日均值和汇总法真的不一样(self):
+        """⚠⚠ **这是这次改口径最容易出错的地方**：官方是**先按天算再平均**。
+
+        造一天"大额现金" + 一天"小额微信"：
+          * 日均值 = (0% + 100%) / 2 = **50%**
+          * 汇总法 = 1 − 10000/10100 = **0.99%**（大额那天把整月压死）
+        实测数据上这两个数差 **5~15 个点**（09 月：日均 54.24% vs 汇总 69.69%）。
+        """
+        orders = [self._order("2026-08-01", [pm.Pay("2026-08-01", 10000.0, "现金")]),
+                  self._order("2026-08-02", [pm.Pay("2026-08-02", 100.0, "银商MIS微信")])]
+        got = pm.score_month_official(orders, month="2026-08")
+        self.assertEqual(got["rate"], 50.0, "官方 = 日比率的平均")
+        self.assertLess(got["rate_sum"], 2.0, "汇总法会被大额那天压死")
+        self.assertNotEqual(got["rate"], got["rate_sum"], "两个数必须能看出差别")
+
+    def test_退货要扣掉(self):
+        """官方备注「考核数据范围**不包含退货数据**」= **把退货剔除、算净额**。
+
+        ⚠⚠ 我第一版读反了（当成"退货不参与计算"），用户 2026-09-21 当场纠正：
+          「不包含退货数据**那就是要把退货扣除掉呀**」。
+        """
+        o = self._order("2026-08-01", [pm.Pay("2026-08-01", 1000.0, "现金")])
+        o2 = self._order("2026-08-02", [pm.Pay("2026-08-02", 1000.0, "银商MIS微信")])
+        no_ret = pm.score_month_official([o, o2], (), month="2026-08")
+        ret = pm.Returned(month="2026-08", day="2026-08-02", amount=1000.0, orig=o2)
+        with_ret = pm.score_month_official([o, o2], [ret], month="2026-08")
+        self.assertEqual(no_ret["rate"], 50.0, "不扣退货：两天一个 0% 一个 100%")
+        self.assertEqual(with_ret["rate"], 0.0,
+                         "微信那单退掉了 ⇒ 剩下的全是现金 ⇒ 0%")
+        self.assertEqual(with_ret["total"], 1000.0, "分母扣掉了被退的那单")
+        self.assertEqual(with_ret["deduct"], 1000.0, "分子（现金）不动 —— 原单本来就是现金")
+
+    def test_退货扣在退货当天_不是月初(self):
+        """⚠ 扣在**退货发生的那一天**。
+
+        第一版图省事写成"扣在月初 1 号" ⇒ 月初没有销售时那天的净额变成负数、
+        `daily_rate` 判"算不出来"跳过 ⇒ **这笔退货就悄悄丢了**
+        （实测本店 09 月三张 6,999 一分没扣上）。⇒ 那天没销售就退回**原单那天**。
+        """
+        o = self._order("2026-08-10", [pm.Pay("2026-08-10", 1000.0, "银商MIS微信")])
+        ret = pm.Returned(month="2026-08", day="2026-08-10", amount=1000.0, orig=o)
+        days = pm.daily_totals([o], [ret], month="2026-08")
+        self.assertEqual(list(days), ["2026-08-10"], "别落到 08-01 去")
+        dd, tt = days["2026-08-10"]
+        self.assertEqual((dd, tt), (0.0, 0.0), "全退了 ⇒ 那天的额都归零")
+
+    def test_退货那天没销售就退回原单那天(self):
+        """退货单和销售不同天（门店先卖、隔几天再退）⇒ 扣原单那天，钱不能丢。"""
+        o = self._order("2026-08-05", [pm.Pay("2026-08-05", 800.0, "现金")])
+        ret = pm.Returned(month="2026-08", day="2026-08-20", amount=800.0, orig=o)
+        days = pm.daily_totals([o], [ret], month="2026-08")
+        self.assertEqual(list(days), ["2026-08-05"])
+        self.assertEqual(days["2026-08-05"], (0.0, 0.0))
+
+    def test_原单没进分母的退货不扣(self):
+        """国补/即时零售/Care+ 的单压根没算进来 ⇒ 退它的时候**不能扣**（扣了反而错）。"""
+        gb = self._order("2026-08-01", [pm.Pay("2026-08-01", 5000.0, "现金")],
+                         is_gb_label=True)
+        ok = self._order("2026-08-02", [pm.Pay("2026-08-02", 100.0, "银商MIS微信")])
+        ret = pm.Returned(month="2026-08", day="2026-08-02", amount=5000.0, orig=gb)
+        got = pm.score_month_official([gb, ok], [ret], month="2026-08")
+        self.assertEqual(got["total"], 100.0, "国补那单没进来，它的退货也不该扣")
+
+    def test_排除的那几类照样不进来(self):
+        """国补 / 即时零售 / Care+ 的排除**两套口径都保留**。
+
+        ⚠ 理由是我们**数据**的性质：那几类在库里全走现金（实测国补占支付额 54%），
+          不排除的话会被补贴砸掉几十分 —— 而官方那边它们压根不是现金渠道。
+        """
+        gb = self._order("2026-08-01", [pm.Pay("2026-08-01", 9999.0, "现金")],
+                         is_gb_label=True)
+        ok = self._order("2026-08-02", [pm.Pay("2026-08-02", 100.0, "银商MIS微信")])
+        got = pm.score_month_official([gb, ok], month="2026-08")
+        self.assertEqual(got["total"], 100.0, "国补那单没进来")
+        self.assertEqual(got["rate"], 100.0)
+
+    def test_没有支付明细的老数据不炸(self):
+        """⚠ 老 payload / 手搓的 `Order` 没有 `pays` ⇒ 退化成"天 = 月初"，
+        日均值就等于汇总值（不至于没有数，也不至于除以 0）。"""
+        o = pm.Order(document_no="d1", month="2026-08", amount=500.0, noncash=200.0)
+        got = pm.score_month_official([o], month="2026-08")
+        self.assertEqual(got["days"], 1)
+        self.assertEqual(got["total"], 500.0)
+        self.assertEqual(got["rate"], 100.0, "没有 pays ⇒ 扣减算 0（不知道就别瞎扣）")
+
+    def test_异常金额还没有数据源(self):
+        """官方公式里有「异常金额」这一项，我们**没有建议零售价** ⇒ 按 0 算，
+        而且要**明说**没算（`abnormal_known=False`），别让人以为已经算进去了。"""
+        o = self._order("2026-08-01", [pm.Pay("2026-08-01", 100.0, "现金")])
+        got = pm.score_month_official([o], month="2026-08")
+        self.assertEqual(got["abnormal"], 0.0)
+        self.assertFalse(got["abnormal_known"])
+
+    def test_没有交易的天不进平均(self):
+        o = self._order("2026-08-01", [pm.Pay("2026-08-01", 100.0, "银商MIS微信")])
+        got = pm.score_month_official([o], month="2026-08")
+        self.assertEqual(got["days"], 1, "只有 8-01 有交易 ⇒ 只算一天")
+
+
+class Test官方那个例子逐格复现(unittest.TestCase):
+    """⭐ 用户给的 PPT（《POS合规：计算逻辑及方法》第 4 页）里那个例子，**照着数字复现**：
+
+        时间            1号    2号    3号
+        交易总金额        200    300    300
+        现金+记账交易金额   50     90     20
+        异常金额           50      0    100
+        POS使用率         60%    70%    70%
+        1-3号期间 POS使用率 = (60% + 70% + 70%) / 3 = 67%
+
+    ⚠ 这个例子一次钉住**三件事**，缺一条都对不上：
+      ① 分母 = 总金额 **+ 异常**，分子 = 现金+记账 **+ 异常**；
+      ② 统计期 = **日比率的简单平均**（不是整月汇总）；
+      ③ **异常金额是每天一个数**（整月一个常数表达不了这三天 50/0/100）。
+    """
+
+    def _day(self, day, cash, other):
+        """造一天：现金 `cash` + 微信 `other`（微信是非现金，不进扣减项）。"""
+        pays = []
+        if cash:
+            pays.append(pm.Pay(day, float(cash), "现金"))
+        if other:
+            pays.append(pm.Pay(day, float(other), "银商MIS微信"))
+        return pm.Order(document_no="d" + day, month=day[:7],
+                        amount=float(cash + other), noncash=float(other),
+                        day=day, pays=tuple(pays))
+
+    def setUp(self):
+        self.orders = [self._day("2026-08-01", 50, 150),      # 总额 200
+                       self._day("2026-08-02", 90, 210),      # 总额 300
+                       self._day("2026-08-03", 20, 280)]      # 总额 300
+        self.ab = {"2026-08-01": 50.0, "2026-08-02": 0.0, "2026-08-03": 100.0}
+
+    def test_三天各自的比率(self):
+        days = pm.daily_totals(self.orders, month="2026-08")
+        self.assertEqual(days["2026-08-01"], (50.0, 200.0))
+        self.assertEqual(days["2026-08-02"], (90.0, 300.0))
+        self.assertEqual(days["2026-08-03"], (20.0, 300.0))
+        # 1号 = 1 − (50+50)/(50+200) = 60%
+        self.assertAlmostEqual(pm.daily_rate(50, 200, 50) * 100, 60.0, places=6)
+        # 2号 = 1 − (0+90)/(0+300) = 70%
+        self.assertAlmostEqual(pm.daily_rate(90, 300, 0) * 100, 70.0, places=6)
+        # 3号 = 1 − (100+20)/(100+300) = 70%
+        self.assertAlmostEqual(pm.daily_rate(20, 300, 100) * 100, 70.0, places=6)
+
+    def test_统计期是日比率的平均(self):
+        got = pm.score_month_official(self.orders, month="2026-08",
+                                      abnormal_by_day=self.ab)
+        # (60 + 70 + 70) / 3 = 66.67（PPT 写 67%，是四舍五入）
+        self.assertAlmostEqual(got["rate"], 66.67, places=2)
+        self.assertEqual(got["days"], 3)
+        self.assertEqual(got["abnormal"], 150.0)
+        self.assertTrue(got["abnormal_known"])
+
+    def test_异常金额必须按天(self):
+        """⚠ 三天是 50/0/100 —— 整月一个常数表达不了。
+
+        拿"整月 150"去算会得到另一个数（1 − (160+150)/(800+150) = 67.37% 的**汇总**，
+        跟日均值的 66.67% 不是一回事）—— 这条就是防"图省事用一个数"。
+        """
+        got = pm.score_month_official(self.orders, month="2026-08",
+                                      abnormal_by_day=self.ab)
+        self.assertEqual(got["abnormal"], 150.0)
+        flat = pm.score_month_official(self.orders, month="2026-08")
+        self.assertEqual(flat["abnormal"], 0.0, "不给就是 0（没有数据源）")
+        self.assertNotEqual(got["rate"], flat["rate"], "异常金额进了公式，数就该变")

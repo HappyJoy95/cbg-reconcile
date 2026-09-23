@@ -82,13 +82,20 @@ class TestExtractKey(unittest.TestCase):
 
 
 class TestLoadConfig(unittest.TestCase):
+    """⚠ 自带空 root：否则读到本机 `.secrets/push-paths.json`，dict 配置被短路。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
     def test_reads_config_and_secret(self):
         with tempfile.TemporaryDirectory() as d:
             env = Path(d) / "wecom.env"
             env.write_text(f"WECOM_WEBHOOK={URL}\n", encoding="utf-8")
             wc = wecom.load_wecom_config({"wecom": {
                 "enabled": True, "env_file": str(env), "when": "only_diff",
-                "mention_all": False, "send_file": False}})
+                "mention_all": False, "send_file": False}}, self.root)
             self.assertTrue(wc.enabled)
             self.assertEqual(wc.key, KEY)
             self.assertEqual(wc.when, "only_diff")
@@ -97,28 +104,74 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_defaults_when_mention_and_file(self):
         """默认要 @人、要传文件 —— 门店群里不 @ 就等于没发。"""
-        wc = wecom.load_wecom_config({"wecom": {}})
+        wc = wecom.load_wecom_config({"wecom": {}}, self.root)
         self.assertTrue(wc.mention_all)
         self.assertTrue(wc.send_file)
 
     def test_enabled_false_by_default(self):
-        self.assertFalse(wecom.load_wecom_config({}).enabled)
+        self.assertFalse(wecom.load_wecom_config({}, self.root).enabled)
 
 
 class TestShouldSend(unittest.TestCase):
     def test_disabled(self):
         ok, why = wecom.should_send(_wc(enabled=False), True)
         self.assertFalse(ok)
-        self.assertIn("没开", why)
+        self.assertIn("没有企微推送路径", why)
 
-    def test_only_diff(self):
-        self.assertFalse(wecom.should_send(_wc(when="only_diff"), has_diff=False)[0])
-        self.assertTrue(wecom.should_send(_wc(when="only_diff"), has_diff=True)[0])
+    def test_when_and_diff_ignored(self):
+        """2026-09-22：不再看 when / has_diff / ignore_when —— 签名保留。"""
+        self.assertTrue(wecom.should_send(_wc(when="only_diff"),
+                                          has_diff=False)[0])
+        self.assertTrue(wecom.should_send(_wc(when="only_diff"),
+                                          has_diff=False, ignore_when=True)[0])
 
     def test_missing_webhook(self):
         ok, why = wecom.should_send(_wc(webhook=""), True)
         self.assertFalse(ok)
         self.assertIn("webhook", why)
+
+
+class TestPaths(unittest.TestCase):
+    def test_from_row(self):
+        wc = wecom.wecom_from_row({"webhook": URL})
+        self.assertTrue(wc.enabled)
+        self.assertEqual(wc.key, KEY)
+        self.assertTrue(wc.ready)
+        # 界面已撤：代码内默认 mention_all=False、send_file=True
+        self.assertFalse(wc.mention_all)
+        self.assertTrue(wc.send_file)
+
+    def test_paths_roundtrip_and_empty(self):
+        from src import push_paths
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            wecom.save_wecom_paths([{"webhook": URL},
+                                    {"webhook": f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"}],
+                                   root)
+            paths = wecom.load_wecom_paths({}, root)
+            self.assertEqual(len(paths), 2)
+            dsc = wecom.describe_wecom_paths({}, root)
+            # 不回明文 webhook
+            blob = json.dumps(dsc, ensure_ascii=False)
+            self.assertNotIn(KEY, blob)
+            # 清空 = 没配
+            wecom.save_wecom_paths([], root)
+            self.assertEqual(wecom.load_wecom_paths({}, root), [])
+            wc = wecom.load_wecom_config({}, root)
+            self.assertFalse(wc.enabled)
+            ok, why = wecom.should_send(wc, True)
+            self.assertFalse(ok)
+            self.assertIn("没有企微推送路径", why)
+
+    def test_legacy_fallback_without_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            env = root / "wecom.env"
+            env.write_text(f"WECOM_WEBHOOK={URL}\n", encoding="utf-8")
+            cfg = {"wecom": {"enabled": True, "env_file": str(env)}}
+            paths = wecom.load_wecom_paths(cfg, root)
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(paths[0][1].key, KEY)
 
 
 class TestMarkdown(unittest.TestCase):

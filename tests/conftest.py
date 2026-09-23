@@ -12,3 +12,53 @@
 import os
 
 os.environ.setdefault("CBG_NO_DB_REBUILD", "1")
+
+
+# ─────────────────────── 测试**不许往项目根写东西** ───────────────────────
+#
+# ⚠ 这条是**用真金白银换来的**（2026-09-19 一天里踩了三次）：
+#   `runlog.record(root=None)` / `attain.run(root=None)` 这些的 `root=None`
+#   = **项目根**（那是给生产用的默认值）。测试里忘了传临时 root，
+#   就会往开发机的 `out/` 里写：跑过 28 行假 `notify:*` 记录（健康面板跟着误报
+#   "sms 连着失败 7 次"），也覆盖过真的 `out/attain-2026.json`。
+#
+# 光靠"我记得传 root"拦不住 —— 每次加一个会写盘的新步骤，都要把所有相关测试
+# 过一遍补桩，而漏掉的那个测试**只在开发机上才看得出问题**。
+# 所以在这儿兜一道：**跑之前拍一张快照，跑完比对**，多出来的文件直接报错。
+#: ⚠ `in/`（2026-09-21 晚）也要盯：它是**收进来的东西**（各店发来的上报包 + 收信库），
+#:   跟 `out/` 一样属于"这台电脑自己的"，忘了传临时 root 照样会写进开发机。
+_WATCH_DIRS = ("out", "in")
+
+
+_OUT_DIRS = _WATCH_DIRS          # 老名字，别再引用
+
+
+def _snapshot():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    got = set()
+    for d in _WATCH_DIRS:
+        p = os.path.join(root, d)
+        if os.path.isdir(p):
+            for name in os.listdir(p):
+                got.add(d + "/" + name)
+    return got
+
+
+def pytest_sessionstart(session):
+    session._cbg_files_before = _snapshot()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    before = getattr(session, "_cbg_files_before", None)
+    if before is None:
+        return
+    new = sorted(_snapshot() - before)
+    if new:
+        # ⚠ 只**报**不失败（`pytest_sessionfinish` 改不了退出码）——
+        #   但这条红字足够定位：说明某个测试在往项目根写东西。
+        print("\n" + "!" * 70)
+        print("⚠ 测试往项目根写了新文件（大概率是忘了传临时 root）：")
+        for n in new:
+            print("    " + n)
+        print("  查法：`ls -l` 看 mtime 落在哪个测试；那个测试的 root= 要传 tmp。")
+        print("!" * 70)

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>权益领取方式 · 门店导购速查</title>
+  <link rel="stylesheet" href="claim-guide.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div class="eyebrow">HUAWEI · 服务产品权益</div>
+      <h1>权益领取方式</h1>
+      <p>
+        华为近期多款机型购买后赠送 Care+ / 无忧大礼包 / 丢失无忧等权益，
+        需要在活动期内<strong>主动领取</strong>。本页汇总官方领取步骤与入口，
+        供门店导购对照待领清单帮客户操作。
+      </p>
+      <div class="meta">
+        <span>来源：consumer.huawei.com 官方活动页</span>
+        <span>整理：2026-09-22</span>
+        <span>热线：<a href="tel:950800" style="color:#ffd0d4">950800</a></span>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="品类筛选">
+      <button type="button" class="active" data-cat="all">全部</button>
+      <button type="button" data-cat="phone">手机</button>
+      <button type="button" data-cat="tablet">平板</button>
+      <button type="button" data-cat="pc">PC</button>
+      <button type="button" data-cat="audio">音频</button>
+      <button type="button" data-cat="wear">穿戴</button>
+      <label style="margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px">
+        搜索
+        <input id="q" type="search" placeholder="机型 / 权益名…"
+               style="background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:7px 10px;min-width:160px" />
+      </label>
+    </nav>
+
+    <!-- 通用领取流程 -->
+    <section class="block" id="how">
+      <h2>通用领取流程 <span class="tag">官方口径</span></h2>
+      <p class="sub">绝大多数活动都是「填 SN → 勾协议 → 领取 → 24 小时内生效」。差异主要在<strong>去哪领</strong>和<strong>怎么查 SN</strong>。</p>
+      <div class="steps">
+        <div class="step">
+          <div class="n">1</div>
+          <b>确认在活动期内</b>
+          <span>购机日 / 领取日落在该活动「赠送时间」内；每个 SN 通常只可领 1 次。</span>
+        </div>
+        <div class="step">
+          <div class="n">2</div>
+          <b>查设备序列号 SN</b>
+          <span>手机拨号输 <code>*#06#</code>；平板：设置 → 关于本机 → 序列号；耳机：看包装外盒。</span>
+        </div>
+        <div class="step">
+          <div class="n">3</div>
+          <b>打开领取页填写 SN</b>
+          <span>点下方各活动的「去领取」；或「我的华为 App → 服务 → 精选活动 / 权益」。</span>
+        </div>
+        <div class="step">
+          <div class="n">4</div>
+          <b>勾选协议并提交</b>
+          <span>阅读并同意服务协议 + 隐私声明后点「领取」。</span>
+        </div>
+        <div class="step">
+          <div class="n">5</div>
+          <b>查询是否到账</b>
+          <span>约 <strong>24 小时内</strong>生效：保修期及权益查询，或 我的华为 App → 服务 → 权益查询。</span>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>导购提示：</strong>
+        待领清单里标「待领」的单，把 SN 和对应活动页发给客户即可；
+        领完在清单里点「标已领」，避免第二天重复催。
+        疑问走在线客服或 <strong>950800</strong>。
+      </div>
+
+      <div class="sn-grid">
+        <div class="sn-item">
+          <b>手机查 SN</b>
+          <p>拨号界面输入 <code>*#06#</code>，屏幕直接显示设备 SN。</p>
+        </div>
+        <div class="sn-item">
+          <b>平板 / PC 查 SN</b>
+          <p>设置 → 关于本机 / 关于本机信息 → 序列号（也可看包装盒条码）。</p>
+        </div>
+        <div class="sn-item">
+          <b>耳机 / 穿戴查 SN</b>
+          <p>优先看<strong>包装外盒</strong>；部分可在设备设置或「我的华为」里查。</p>
+        </div>
+        <div class="sn-item">
+          <b>领完怎么查</b>
+          <p>
+            <a href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">保修期及权益查询</a>
+            · 或我的华为 App → 服务 → 权益查询
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 分活动入口 -->
+    <section class="block">
+      <h2>按活动领取入口</h2>
+      <p class="sub">与控制台「小工具 → 权益领取 → 活动一览」同一套口径；链接指向华为官方领取页。</p>
+      <div class="grid" id="cards">
+
+        <!-- 手机 -->
+        <article class="card" data-cat="phone" data-search="mate x6 x7 xts pura care 金秋 折叠">
+          <div class="cat">手机 · HUAWEI Care+（一年期）</div>
+          <h3>金秋礼遇限时赠送 Care+<br />Mate X6 / X7 / XTs / Pura X Max / Pura X</h3>
+          <div class="win">2026-09-01 ~ 2026-09-30 · 至高 2699 元</div>
+          <div class="method">
+            <em>领取方式：</em>进入领取页 → 填写设备序列号（SN）→ 手机拨号 <code>*#06#</code> 查 SN →
+            勾选协议 → 领取。也可经「我的华为 App → 服务 → 精选活动」进入同一活动领取。
+            领取成功后约 24 小时生效。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/receive-huawei-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="phone" data-search="nova 16 pro ultra 无忧大礼包">
+          <div class="cat">手机 · nova 无忧大礼包</div>
+          <h3>nova 16 / Pro / Ultra<br />nova 无忧大礼包</h3>
+          <div class="win">2026-08-01 ~ 2026-10-07 · 至高 1295 元</div>
+          <div class="method">
+            <em>领取方式：</em>填写 SN 领取；拨号 <code>*#06#</code> 查 SN。
+            每个 SN 限领 1 次。最晚 2026-10-07 23:59:59。
+            领后可补购 Care+（一年期），不支持两年期 / 延长服务宝。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/nova16-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="phone" data-search="nova 16 se 无忧大礼包">
+          <div class="cat">手机 · nova 无忧大礼包</div>
+          <h3>nova 16 SE<br />nova 无忧大礼包</h3>
+          <div class="win">首销日 ~ 2026-10-07 · 价值 985 元</div>
+          <div class="method">
+            <em>领取方式：</em>与 nova 16 相同 —— 填 SN、拨号 <code>*#06#</code> 查序列号、勾协议领取。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/nova16se-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="phone" data-search="畅享90 pro max 无忧大礼包">
+          <div class="cat">手机 · 畅享无忧大礼包</div>
+          <h3>畅享90 Pro Max<br />畅享无忧大礼包</h3>
+          <div class="win">2026-09-01 ~ 2026-10-07 · 价值 938 元</div>
+          <div class="method">
+            <em>领取方式：</em>活动页填写 SN 领取；手机拨号 <code>*#06#</code> 显示 SN；
+            勾选协议后提交，约 24 小时生效。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/changxiang90series/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <!-- 平板 -->
+        <article class="card" data-cat="tablet" data-search="matepad air 11.5 mini 焕新 无忧大礼包 平板">
+          <div class="cat">平板 · 无忧大礼包</div>
+          <h3>焕新版平板（Air / 11.5 / 11.5S / mini / SE…）<br />平板无忧大礼包</h3>
+          <div class="win">2026-12-31 24 时前 · 购机 30 天内领取</div>
+          <div class="method">
+            <em>领取方式：</em>设置 → 关于本机 → <strong>序列号</strong> 查 SN；
+            在活动页或「我的华为 App」填写 SN 领取。每个 SN 限 1 次；
+            自购机日起 <strong>30 天内</strong>须完成领取。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/tablets-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="tablet" data-search="matepad pro 12 无忧大礼包">
+          <div class="cat">平板 · 无忧大礼包</div>
+          <h3>MatePad Pro 12<br />无忧大礼包</h3>
+          <div class="win">首销日 ~ 9.13 · 价值 986 元</div>
+          <div class="method">
+            <em>领取方式：</em>平板「设置 → 关于本机 → 序列号」查 SN，
+            在官方领取入口提交。若链接暂不可用，走「我的华为 App → 服务」同主题活动。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/matepad-pro-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <!-- PC -->
+        <article class="card" data-cat="pc" data-search="matebook pro s 无忧大礼包 PC">
+          <div class="cat">PC · 无忧大礼包</div>
+          <h3>Matebook Pro / Pro S<br />无忧大礼包</h3>
+          <div class="win">2026-08-14 ~ 2026-09-13 · 价值 1506 元</div>
+          <div class="method">
+            <em>领取方式：</em>查本机序列号（设置 / 机身 / 包装），在活动页填 SN 领取；
+            含屏幕保障、充电器五折换新、电池/键帽、拆机清洁等。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/matebook-pro-s-care/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="pc" data-search="matebook fold 非凡大师 尊享服务">
+          <div class="cat">PC · 非凡尊享服务</div>
+          <h3>MateBook Fold 非凡大师<br />非凡尊享服务</h3>
+          <div class="win">全生命周期随设备捆绑</div>
+          <div class="method">
+            <em>领取方式：</em>权益<strong>随设备绑定</strong>，一般无需单独领；
+            屏幕惠换 / 上门 / 深度清洁等按服务条款预约即可。
+            可用保修期及权益查询确认是否已挂上。
+          </div>
+          <div class="links">
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+            <span class="btn disabled">不涉及在线领取</span>
+          </div>
+        </article>
+
+        <!-- 音频 -->
+        <article class="card" data-cat="audio" data-search="freearc 丢失无忧 耳机">
+          <div class="cat">音频 · 丢失无忧</div>
+          <h3>FreeArc<br />丢失无忧</h3>
+          <div class="win">2026-08-01 ~ 2026-09-30 · 价值 68 元</div>
+          <div class="method">
+            <em>领取方式：</em>从<strong>包装外盒</strong>读取耳机 SN → 活动页填 SN 领取。
+            服务期内单只丢失可 5 折购一次备件。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/freearc/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="audio" data-search="freeclip 2 典藏 丢失无忧">
+          <div class="cat">音频 · 丢失无忧</div>
+          <h3>FreeClip 2 典藏版<br />丢失无忧</h3>
+          <div class="win">2026-08-01 ~ 2026-09-30 · 价值 88 元</div>
+          <div class="method">
+            <em>领取方式：</em>包装外盒查 SN → 官方活动页填写领取（同 FreeArc 流程）。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/freeclip2s/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="audio" data-search="freebuds 7 丢失无忧">
+          <div class="cat">音频 · 丢失无忧</div>
+          <h3>FreeBuds 7<br />丢失无忧</h3>
+          <div class="win">2026-08-24 ~ 2026-10-07 · 价值 88 元</div>
+          <div class="method">
+            <em>领取方式：</em>包装外盒查看耳机 SN → 活动页填 SN → 勾协议领取；
+            一年内单只丢失享一次 5 折购备件。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/freebuds7/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <!-- 穿戴 -->
+        <article class="card" data-cat="wear" data-search="watch gt 7 无忧大礼包 穿戴">
+          <div class="cat">穿戴 · 无忧大礼包</div>
+          <h3>HUAWEI WATCH GT 7 系列<br />无忧大礼包</h3>
+          <div class="win">2026-08-05 ~ 2026-09-30 · 至高 588 元</div>
+          <div class="method">
+            <em>领取方式：</em>查手表 SN（包装 / 设备信息）→ 官方领取入口填 SN。
+            表内活动页若 404，改走「我的华为 App → 服务」或 950800。
+          </div>
+          <div class="links">
+            <a class="btn primary" href="https://consumer.huawei.com/cn/support/watch-gt7/" target="_blank" rel="noopener">去领取</a>
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">查权益</a>
+          </div>
+        </article>
+
+        <article class="card" data-cat="wear" data-search="watch 6 ultimate 2 无忧大礼包">
+          <div class="cat">穿戴 · 无忧大礼包</div>
+          <h3>WATCH 6 系列 / WATCH Ultimate 2<br />无忧大礼包</h3>
+          <div class="win">见活动页 · 至高 1668 元</div>
+          <div class="method">
+            <em>领取方式：</em>以「我的华为 App → 服务 → 精选活动」及汇总表链接为准；
+            流程仍是填 SN → 协议 → 领取。部分链接汇总表标「输出中」，等华为放出后再点。
+          </div>
+          <div class="links">
+            <a class="btn ghost" href="https://consumer.huawei.com/cn/support/warranty-query/" target="_blank" rel="noopener">先查权益</a>
+            <span class="btn disabled">领取链接输出中</span>
+          </div>
+        </article>
+
+      </div>
+      <div class="empty" id="empty">没有匹配的活动 —— 换个关键词或点「全部」。</div>
+    </section>
+
+    <section class="block">
+      <h2>与控制台的衔接</h2>
+      <p class="sub">本页是<strong>领取操作手册</strong>；该催谁领、标没标已领，在控制台里做。</p>
+      <div class="steps">
+        <div class="step">
+          <div class="n">A</div>
+          <b>待领清单</b>
+          <span>控制台 → 小工具 → 待领清单：按机型×活动期从销售明细匹配，一键「标已领」。</span>
+        </div>
+        <div class="step">
+          <div class="n">B</div>
+          <b>活动一览</b>
+          <span>同菜单「活动一览」：完整机型 / 价值 / 出险收费 / 配置改期。</span>
+        </div>
+        <div class="step">
+          <div class="n">C</div>
+          <b>本页</b>
+          <span>拿到 SN 后按上面步骤去官方页领取；领完回清单勾状态。</span>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      内容摘自华为消费者业务官网活动页「领取方式」章节，仅供门店导购参考，以官方页面实时说明为准。<br />
+      在线客服 · 服务热线 <a href="tel:950800">950800</a> ·
+      <a href="https://consumer.huawei.com/cn/support/" target="_blank" rel="noopener">华为服务支持</a>
+    </footer>
+  </div>
+  <script src="claim-guide.js"></script>
+</body>
+</html>

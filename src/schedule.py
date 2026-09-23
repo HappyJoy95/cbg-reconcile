@@ -17,7 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .autostart import AUTOSTART_TASK
+from .autostart import AUTOSTART_TASK, AUTOSTART_TASK_NAMES
 from . import runtime
 from .winutil import decode as _decode, parse_xml, schtasks as _schtasks, xml_text
 
@@ -46,7 +46,16 @@ LOG_NAME = "run.log"          # 计划任务跑完留下的日志（out\ 下）
 #   v5：日常流程从 `check` 换成 `daily`（先抓华为当月写进库，再做两个分析）。
 #   不 +1 的话，**已装门店的 run.bat 永远不会被重写** ——
 #   而 2.0.0 的 check 只从本地库读，没人抓数据 = 每天报「库不新鲜」。
-RUNNER_MARK = "rem cbg-runner v5"
+#: v7（2026-09-21 晚）：**手动那份脚本改成点名跑**（`daily --steps …`）——
+#: 用户：「现在不需要 run daily 吧，按定时器运行就行了」。"整批"这个模式删了，
+#: `daily` 不给 `--steps` 会直接报错 ⇒ 老脚本（不带 `--steps`）必须换掉，
+#: 所以这一版**非 +1 不可**：不 +1 的话门店双击那份老 `run-now.bat` 会一直报"必须点名"。
+#: v6（2026-09-20）：**计划任务不再自己跑 daily** —— 用户把分工改了：
+#: 「内置定时器为主，计划任务降级成"只负责把服务拉起来"」。
+#: 到点干活的是服务里那个心跳线程（`modules/timer`），它到点叫醒各功能模块。
+#: ⚠ 不 +1 的话，**已装门店的 run.bat 永远不会被重写** ⇒ 那边一天跑两遍
+#:   （计划任务一遍 + 内置定时器一遍），而云商不能并行登录。
+RUNNER_MARK = "rem cbg-runner v7"
 CRON_MARK = "# cbg-reconcile"          # crontab 里的归属标记，用于增删改
 DEFAULT_TIME = "21:00"        # 门店一般晚上关门前跑
 DEFAULT_DAYS_AGO = 1                   # 跑昨天（那天的销售早就结束，零遗漏）
@@ -94,123 +103,17 @@ def _pythonw() -> str:
     return _python()
 
 
-#: 自动化勾选 → 步骤。**和界面上的复选框一一对应**。
-#: ⚠ **不含 `dump`** —— 用户 2026-09-17 把那个复选框拿掉了
-#: （「默认执行这个。不可选」），它由 `run_daily.ALWAYS_STEPS` 无条件补上。
-#: 真值在 `run_daily`，这里只是给不 import run_daily 的调用方一个方便入口，
-#: 有测试盯着两边对得上。
-AUTOMATION_CHOICES = ("pos", "pools")
+# ⚠ 这里原来有 `AUTOMATION_CHOICES` / `steps_from_choices` / `choices_from_steps`
+#   （"自动化跑什么"那组复选框用的），2026-09-20 那个设置取消时删了。
+# ⚠ 2026-09-21 晚又删了 `existing_steps()`（从老脚本的 `--skip-*` 反推"勾了哪几件"）
+#   和 `automation_steps()` / `set_automation_steps()`（那组复选框的存储）——
+#   "整批"没了之后，手动那份脚本跑哪几步**就是注册表里 `default=True` 的那几步**
+#   （`run_daily.MANUAL_STEPS`），没有第二处能改它，
+#   也就没有"重建时要保住谁的勾选"这回事了。
+#   **留着的话下一个人会以为那还是个能配的东西。**
 
 
-def steps_from_choices(picked):
-    """勾了哪几项 → 步骤元组（**含必做的**）。校验交给 `run_daily`，只此一处。
-
-    ⚠ **两个都不勾是合法的**（用户 2026-09-17 定）：含义是「每天只抓数据，
-    不算也不推」。原来那条"至少勾一项"防的是"取消了勾选、结果照样推"，
-    而现在的行为严格照着勾选走（空 + 必做），**不会静默扩大**。
-    """
-    from . import run_daily
-    return run_daily.with_always(picked)
-
-
-def choices_from_steps(steps) -> list:
-    """步骤 → 勾选框该点亮哪几个。
-
-    ⚠ **必做的项不参与**（`ALWAYS_STEPS`）—— 界面上没有它的框，
-    混进去的话前端会去点一个不存在的复选框。
-    """
-    from . import run_daily
-    try:
-        got = run_daily.with_always(steps)
-    except ValueError:
-        return list(AUTOMATION_CHOICES)
-    return [s for s in got if s not in run_daily.ALWAYS_STEPS]
-
-
-def existing_steps(root) -> tuple:
-    """从现有的 run 脚本里**反推**它跑哪几件事。
-
-    重建时保住用户的勾选，跟 `existing_days_ago` 一个道理。
-    读不出来就当默认（三件都做）—— 老脚本没有跳过开关，确实是这样。
-
-    ⚠ 出口统一走 `with_always`：老 run.bat 里带着 `--skip-dump` 的
-    （那时候"抓数据"还能取消）要**补回来**，否则升级后库永远不更新。
-    """
-    from . import run_daily
-    for p in (script_path(root), manual_script_path(root)):
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if " daily" not in text:
-            continue
-        skipped = {s for s, flag in run_daily.STEP_FLAGS.items() if flag in text}
-        kept = tuple(s for s in run_daily.STEPS if s not in skipped)
-        if kept:
-            return run_daily.with_always(kept)
-    return run_daily.with_always(run_daily.AUTOMATION_DEFAULT_STEPS)
-
-
-def automation_steps(root) -> tuple:
-    """定时任务当前跑哪几件事。**注册记录优先**，没有就从脚本反推。
-
-    记录优先的原因和任务详情一样：提权注册的任务普通权限读不到，
-    但我们自己记了一份（`.secrets/schedule.json`）。
-
-    ⚠ 三条出口**都要过 `with_always`** —— 老记录里可能没有 `dump`
-    （那时它还是可选项），不补的话那份记录会一直生效，库永远不更新。
-    """
-    from . import run_daily
-    for rec in (_recall(root) or {}).values():
-        if not isinstance(rec, dict):
-            continue
-        steps = rec.get("steps")
-        if steps:
-            try:
-                return run_daily.with_always(steps)
-            except ValueError:
-                pass
-        what = rec.get("what")            # 老格式：单个字符串
-        if what:
-            try:
-                return run_daily.with_always(run_daily.BUTTON_STEPS[what])
-            except (KeyError, ValueError):
-                pass
-    return existing_steps(root)
-
-
-def set_automation_steps(root, config: str, picked, run_daily_fn=None) -> dict:
-    """改「自动化跑什么」：写记录 + 重写 run 脚本。**不碰 Windows 任务。**
-
-    ⚠ 为什么不用重新注册任务：计划任务跑的是 `run.bat`，改的是 run.bat 的
-    内容 —— 任务本身一个字都没变。重新注册有可能弹 UAC（旧任务覆盖不了 /
-    账户被 UAC 过滤），为了改个勾选弹框不值得，而且弹了还未必成。
-    """
-    from . import run_daily                        # 延迟 import：避免和 cli 绕圈
-    steps = run_daily.with_always(picked)
-    root = Path(root)
-    days = existing_days_ago(root)
-    if days is None:
-        days = DEFAULT_DAYS_AGO
-    write_runner_script(root, config, days, steps=steps)
-    # 记录：把每个已注册任务都更新一遍（任务名是按时间起的，可能不止一个）
-    rec = _recall(root)
-    if rec:
-        for task in list(rec):
-            if isinstance(rec.get(task), dict):
-                _remember(root, task, time_str=rec[task].get("time", ""),
-                          days_ago=rec[task].get("days_ago"), config=config,
-                          steps=steps)
-    else:
-        # 还没注册过任务（或者记录丢了）：也记一条，界面至少能显示勾选
-        _remember(root, TASK_NAME, config=config, steps=steps)
-    label = run_daily.steps_label(steps)
-    return {"ok": True, "steps": list(steps), "label": label,
-            "message": "已改成「%s」，下次定时执行生效（不用重新注册任务）" % label}
-
-
-def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AGO,
-                        steps=None) -> Path:
+def write_runner_script(root: Path, config: str) -> Path:
     root = Path(root)
     path = script_path(root)
     # ⚠ 解释器和脚本路径**都要加引号** —— Windows 上 Python 常装在
@@ -219,22 +122,18 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     # ⚠ **不要在 bat 里写 `>> out\run.log`**：那样屏幕上什么都没有，
     #   双击的人看到的是黑窗口 + 一分多钟 + 自己关掉，完全判断不了跑没跑。
     #   日志交给 Python 分流（--log-file），屏幕和文件两边都有。
-    # 勾了「只算 POS / 只做四池对账」就带上对应的跳过开关 —— 映射表在 run_daily，
-    # **这里不另写一份**（各写一份必然有一天对不上）。
-    #
-    # ⚠ 过一道 `with_always`：**定时任务永远要抓数据**（用户 2026-09-17 定的，
-    #   界面上那个复选框都拿掉了）。不过这道的话，一份老记录里的
-    #   `--skip-dump` 会一直生成下去，库再也不更新，
-    #   而日志里只会说"跑完了"。
-    #   ⚠ 命令行 `daily --skip-dump` 仍然可以（调试用），**管的只是这里** ——
-    #   走 `flags_for`/`flags_for_steps` 那条路不经过 `with_always`。
+    # ⚠⚠ 2026-09-21 晚：手动那份脚本（`run-now.bat`）**点名跑**（`daily --steps …`）。
+    #   原来写的是 `daily --skip-*`（"整批里跳过谁"），而"整批"这个模式删掉了 ——
+    #   `daily` 现在不给 `--steps` 直接报错（`run_daily.main` 顶上那段）。
+    #   ⚠ 名单**从注册表派生**（`run_daily.MANUAL_STEPS`），这儿不另写一份：
+    #     写死的话，以后加一步（比如又插一个新分析）门店双击那份就**悄悄少跑一步**，
+    #     而屏幕上只会说"跑完了"。派生的另一个好处：加步骤时不用记得回来改这儿。
+    #   ⚠ `--days-ago` **不再写了**：它早就废弃（一个字段都不影响结果），
+    #     留着只会让看脚本的人以为"这里可以调目标日"。命令行照样还认它（老脚本兼容）。
     from . import run_daily
-    if steps is None:
-        steps = run_daily.AUTOMATION_DEFAULT_STEPS
-    steps = run_daily.with_always(steps)
-    extra = "".join(" " + f for f in run_daily.flags_for_steps(steps))
-    base = (f'"{_pythonw()}" -m src.cli -c "{config}" daily{extra}'
-            f' --days-ago {int(days_ago)}')
+    steps = run_daily.MANUAL_STEPS
+    base = (f'"{_pythonw()}" -m src.cli -c "{config}" daily'
+            f' --steps {",".join(steps)}')
     # ⚠ 路径要写全：只给 "run.log" 的话，工作目录是项目根 → 写到根目录去了，
     #   而下面 bat 追加退出码用的又是 out\run.log —— 两处对不上，排查时会被坑。
     log = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
@@ -253,10 +152,12 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
             'cd /d "%~dp0"\r\n'
             "if not exist out mkdir out\r\n"
             "rem Leave a trace, so 'bat never ran' and 'python never started' differ.\r\n"
-            f'echo [%DATE% %TIME%] run.bat launching>> "{logfile}"\r\n'
+            f'echo [%DATE% %TIME%] run.bat launching (ensure-service)>> "{logfile}"\r\n'
             "rem start = cmd exits at once, so this console closes in a blink instead of\r\n"
-            "rem hanging around for the whole run. pythonw.exe has no console of its own.\r\n"
-            f'start "" "{pyw}" "run_check.py" -c "{config}" daily{extra} --days-ago {int(days_ago)}\r\n'
+            "rem hanging around. pythonw.exe has no console of its own.\r\n"
+            "rem v6: this task no longer runs the pipeline itself -- it only makes sure\r\n"
+            "rem the service is up; the in-process timer wakes each feature at its own time.\r\n"
+            f'start "" "{pyw}" "run_check.py" -c "{config}" ensure-service\r\n'
             "if errorlevel 1 (\r\n"
             "  rem 'start' itself failed -- pythonw.exe missing or path wrong\r\n"
             f'  echo [%DATE% %TIME%] FAILED to start pythonw: "{pyw}">> "{logfile}"\r\n'
@@ -266,11 +167,15 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
             "exit /b 0\r\n"
         )
     else:
+        # ⚠ 和 Windows 那份**同一个意思**：计划任务只"确保服务在跑"。
+        #   开发机上 `kind()` 是 unix，这条不写的话，改完在开发机上还是老行为
+        #   （计划任务直接跑 daily），而那正是要被替掉的那条路。
         body = (
             "#!/bin/sh\n"
             'cd "$(dirname "$0")" || exit 1\n'
             "mkdir -p out\n"
-            f"{base} {log}\n"
+            f"{RUNNER_MARK}\n"
+            f'"{_python()}" -m src.cli -c "{config}" ensure-service\n'
             "exit $?\n"
         )
     # ⚠ 不能用 path.write_text(newline=...) —— 那是 Python 3.10 才有的参数，
@@ -286,7 +191,7 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
     #   手动跑就该**同步**跑：屏幕上能看到全过程，跑完停住看结果。
     try:
         mpath = manual_script_path(root)
-        mbase = f'"{_python()}" -m src.cli -c "{config}" daily{extra} --days-ago {int(days_ago)}'
+        mbase = base
         mlog = ('--log-file "out\\%s"' % LOG_NAME) if kind() == "windows" \
             else ('--log-file "out/%s"' % LOG_NAME)
         if kind() == "windows":
@@ -298,7 +203,8 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
                 "rem Manual run: synchronous, so you can watch it and read the result.\r\n"
                 'cd /d "%~dp0"\r\n'
                 "if not exist out mkdir out\r\n"
-                f'"{_python()}" "run_check.py" -c "{config}" daily{extra} --days-ago {int(days_ago)}\r\n'
+                f'"{_python()}" "run_check.py" -c "{config}" daily'
+                f' --steps {",".join(steps)}\r\n'
                 "echo.\r\n"
                 "echo   Press any key to close this window\r\n"
                 "pause >nul\r\n"
@@ -322,23 +228,6 @@ def write_runner_script(root: Path, config: str, days_ago: int = DEFAULT_DAYS_AG
 
 
 # --------------------------------------------------------------------- Windows
-def existing_days_ago(root) -> int | None:
-    """从现有的 run 脚本里把 `--days-ago N` 读出来。
-
-    重建脚本时要**保住用户原来选的**（昨天/今天），不能默默改回默认值 ——
-    那会让对账的目标日悄悄变掉，比不重建更糟。
-    """
-    for p in (script_path(root), manual_script_path(root)):
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        m = re.search(r"--days-ago\s+(\d+)", text)
-        if m:
-            return int(m.group(1))
-    return None
-
-
 def runner_outdated(root) -> bool:
     """脚本是不是这一版生成的（老版本没有标记 / 标记不一样）。"""
     p = script_path(root)
@@ -352,24 +241,28 @@ def runner_outdated(root) -> bool:
 
 
 def refresh_runner_scripts(root, config: str) -> bool:
-    """脚本过时/缺失就按当前模板重建，**保住原来的 --days-ago**。
+    """脚本过时/缺失就按当前模板重建。
 
     为什么需要：脚本只在**注册任务时**生成，升级代码不会碰它。
     结果就是"代码修好了，门店电脑上跑的还是旧脚本"——
     （黑窗没修掉、日志格式还是旧的、界面认不出跑完没）。
+
+    ⚠ 2026-09-21 晚起**没有"保住谁的勾选/目标日"这回事了**：
+      跑哪几步由注册表派生（`run_daily.MANUAL_STEPS`），`--days-ago` 也不再写进脚本。
+      这条自愈因此只剩一个作用：把老模板换成新模板。
     """
     root = Path(root)
     if not runner_outdated(root):
         return False
-    days = existing_days_ago(root)
-    if days is None:
-        days = DEFAULT_DAYS_AGO
     try:
-        # ⚠ 勾选也要保住 —— 否则一次界面自愈就把"只算 POS"悄悄改回"整个项目"
-        write_runner_script(root, config, days, steps=existing_steps(root))
+        write_runner_script(root, config)
     except OSError:
         return False
     return True
+
+
+#: 系统计划任务"跑什么"那一列的文字 —— 它现在**只负责把服务拉起来**（见 `_win_task_info`）。
+WHAT_LABEL_OF_TASK = "只确保服务在跑"
 
 
 def _same_task(recorded: str, task: str) -> bool:
@@ -421,7 +314,10 @@ def _is_ours(name: str) -> bool:
     开机自启删掉**，然后完全不知道服务为什么不再自启。
     """
     leaf = _leaf(name)
-    if leaf == AUTOSTART_TASK:
+    # ⚠ 用 `AUTOSTART_TASK_NAMES`（含**旧名字**那个）——
+    #   只排当前名字的话，改名之后旧的自启任务会冒出来让人删掉，
+    #   而删了就等于把开机自启杀了。
+    if leaf in AUTOSTART_TASK_NAMES:
         return False
     # ⚠ 老名字也要认 —— 不认的话那条旧任务在界面上是个"外人"：
     #   删不掉、也拿不到"你还有一条旧任务在跑"的提醒，于是一天跑两遍。
@@ -552,9 +448,10 @@ def _remember(root, task: str, *, time_str: str = "", days_ago=None,
         old = d.get(task) if isinstance(d.get(task), dict) else {}
         entry = {"time": time_str, "days_ago": days_ago, "config": config,
                  "at": time.strftime("%Y-%m-%d %H:%M:%S")}
-        # ⚠ steps 没给就**保留上一次的** —— 改时间/目标日时别把勾选弄丢。
-        #   （老记录里可能是 `what: "all"` 这种单值格式，原样留着，
-        #    读的时候 `automation_steps` 会换算。）
+        # ⚠ steps / what **只是历史字段**：2026-09-21 晚起没人再读它们了
+        #   （跑什么由注册表决定，见 `run_daily.MANUAL_STEPS`）。
+        #   留着是**不删老记录** —— `.secrets/schedule.json` 是门店机器上的文件，
+        #   为了干净去改它不值得（改坏了"读不到任务详情"那条退路就没了）。
         if steps:
             entry["steps"] = list(steps)
         elif old.get("steps"):
@@ -624,7 +521,10 @@ def _win_status(root=None) -> dict:
 
 def _win_install(root: Path, time_str: str, days_ago: int, config: str,
                  name: str | None = None) -> dict:
-    bat = write_runner_script(root, config, days_ago)
+    # ⚠ `days_ago` **收下但不用**（2026-09-21 晚起脚本里不再写 `--days-ago`）——
+    #   参数留着是因为调用方（`install` / `/api/schedule` / 命令行）还在传，
+    #   而它影响不到任何东西：脚本跑哪几步、跑哪天，都由注册表和内置定时器决定。
+    bat = write_runner_script(root, config)
     task = name or TASK_NAME
     # ⚠ `/tr` 的值**不要自己加引号** —— subprocess 在 Windows 上会走 list2cmdline，
     #   手工加的引号会被它转义成 `\"D:\...\run.bat\"`，而 schtasks 是原生 Win32 程序、
@@ -729,7 +629,8 @@ def _unix_status() -> dict:
 
 def _unix_install(root: Path, time_str: str, days_ago: int, config: str,
                   name: str | None = None) -> dict:
-    sh = write_runner_script(root, config, days_ago)
+    # ⚠ `days_ago` 同上：**收下但不用**。
+    sh = write_runner_script(root, config)
     task = name or TASK_NAME
     hh, mm = time_str.split(":")
     # 路径带空格（macOS 上很常见）时，crontab 里不加引号会被拆成两个词
@@ -778,19 +679,15 @@ def status(root: Path) -> dict:
         info["time"] = tasks[0].get("time", "")
     # 每条任务「跑什么」—— 界面上单独一列。
     #
-    # ⚠ 所有任务共用同一个 `run.bat`，所以它们的"跑什么"是**同一个值**
-    #   （`.secrets/schedule.json` 里那份记录，或从脚本反推）。
-    #   一天跑两次、一次只排查一次只 POS 是**做不到**的 —— 那不是这里漏了，
-    #   是设计如此：任务只是"到点执行 run.bat"，跑什么由脚本决定。
-    #   想要不同时间跑不同东西，得改 run.bat，现在没这个入口。
-    #   （先如实写出来，别让界面显得它能做到。）
-    from . import run_daily                     # 延迟 import：避免和 cli 绕圈
-    auto = automation_steps(root)
-    label = run_daily.steps_label(auto)
+    # ⚠⚠ 2026-09-20 v6 起，**系统计划任务不再跑对账**（`run.bat` 只"确保服务在跑"）；
+    #   2026-09-21 晚"整批"删掉之后更彻底：任务到点只是把服务拉起来，
+    #   跑哪几步全由服务里的内置定时器按**每一步自己的时刻**派发。
+    #   ⇒ 这里如实写"不跑对账"，别再填一串步骤名 —— 填了就是**假信息**
+    #     （那些步骤根本不是这条任务跑的）。
     for t in tasks:
-        t.setdefault("steps", list(auto))
-        t.setdefault("what_label", label)
-    info["automation_steps"] = list(auto)
+        t.setdefault("steps", [])
+        t.setdefault("what_label", WHAT_LABEL_OF_TASK)
+    info["what_label"] = WHAT_LABEL_OF_TASK
     return info
 
 

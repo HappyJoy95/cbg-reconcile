@@ -5,9 +5,11 @@
 这类错误在浏览器里才炸，跑测试是看不见的。
 """
 
+import datetime
 import io
 import json
 import re
+import sqlite3
 import tempfile
 import textwrap
 import types
@@ -20,6 +22,8 @@ from unittest import mock
 from urllib.parse import quote
 
 from src import run_daily, runner, schedule, service, web
+from src.storage import runlog
+import bootstrap
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -61,24 +65,24 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn("data-sched-del", APP_JS)
         self.assertIn("/api/schedule?name=", APP_JS)
 
-    def test_repair_button_sends_the_leaf_name(self):
-        """⚠ 修复按钮发的是**叶子名**（`t.name`），不是 `full_name`。
+    def test_提权删发的是叶子名(self):
+        """⚠ 提权删那条发的是 **叶子名**（`t.name`），不是 `full_name`。
 
-        `full_name` 带反斜杠（`\\CBG报量对账-21点20`），而
-        `schedule.install` 会拒收带反斜杠的名字（防路径注入）→
-        这个按钮**必然 400**，表现是"点了完全没反应"。
-        行内「删除」按钮发 full_name 没问题（那条路不做名字校验），
-        但修复这条路必须收敛 —— 两条差别就在这里。
+        `full_name` 带反斜杠（`\\CBG报量对账-21点20`），而 `schedule.remove`
+        会拒收带反斜杠的名字（防路径注入）→ 必然 400，表现是"点了完全没反应"。
+        行内「删除」那条发 full_name 没问题（那条路不做名字校验），
+        两条的差别就在这儿。
+
+        ⚠ 2026-09-20：原来是「以管理员身份**修复**」（重新注册一遍），
+          兜底去掉之后改成「以管理员身份**删除**」——
+          按钮换了，规矩不变：**发叶子名**。
         """
-        # ⚠ 从 `const fixBtn` 开始截 —— `btn-sched-fix` 在 banner 的 HTML 里
-        #   还出现过一次，从那儿截会**截不到真正发请求的那段**，
-        #   断言就变成假绿
-        i = APP_JS.index("const fixBtn = document.getElementById")
-        block = APP_JS[i:i + 1400]
-        self.assertIn("name: target.name", block,
-                      "修复按钮要把叶子名发过去")
-        self.assertNotIn("name: target.full_name", block,
-                         "发 full_name 会被后端判非法字符，点了没反应")
+        i = APP_JS.index("data-sched-del-admin]")
+        blk = APP_JS[i:i + 800]
+        self.assertIn("what: 'schedule-remove', name", blk)
+        self.assertNotIn("full_name", blk, "提权这条不能发带反斜杠的名字")
+        # 名字是从 `data-sched-del-admin` 上取的（渲染时给的是 t.name）
+        self.assertIn("data-sched-del-admin=\"${esc((tasks.find((t) => t.unreadable) || {}).name", APP_JS)
 
     def test_captcha_state_has_its_own_banner(self):
         """⚠ 状态映射漏了 `need_captcha` 的话，`cls`/`title` 都取到 `undefined`，
@@ -145,29 +149,18 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertFalse(bad, "这些单元格带 HTML 但没包 {html:}，会被原样转义显示：\n"
                               + "\n".join(bad))
 
-    def test_history_row_builds_html_cells_as_objects(self):
-        """历史版本那一行的「版本」单元格**必须**是 `{html: ...}`。
-
-        它踩过一次，而且形态是"在数组外面先把 HTML 算成字符串、再当单元格传"——
-        所以上面那条按数组扫描的检查**抓不到它**。这里单独钉一次。
-
-        症状（门店看到的）：页面上原样显示 `<b>v1.4.6</b>` 这串标签。
-        """
-        m = re.search(r"function renderHistory\(.*?\n\}", APP_JS, re.S)
-        self.assertIsNotNone(m, "找不到 renderHistory，测试要跟着改")
-        block = m.group(0)
-        self.assertIn("{ html:", block,
-                      "版本单元格要用 {html: ...}，字符串会被 table() 转义")
-        self.assertNotIn("const label = isCur", block,
-                         "const label 直接赋 HTML 字符串 = 会被转义（踩过）")
-
     def test_schedule_html_cells_are_wrapped(self):
         """`table()` 的单元格默认 **esc 转义** —— 想塞原生 HTML 必须包成 `{html: ...}`。
 
         （截图时真踩到过：页面上直接显示 `<span class="hint">` 的源码。
         不算崩，但很难看，而且测试全绿、只有肉眼能发现。）
         """
-        m = re.search(r"const rows = tasks\.map\(.*?\n  \]\);", APP_JS, re.S)
+        # ⚠ 切片要**先锚到 `function renderSchedule`**：2026-09-20 前面多了
+        #   一张定时器任务表（`renderTimer` / `timerRow`），不锚的话
+        #   匹到的是那一张 —— 而它里面确实有不含 `{html:}` 的 `<span>`（是模板片段，不是单元格）。
+        seg = APP_JS[APP_JS.index("function renderSchedule("):]
+        seg = seg[:seg.index("\n}\n", seg.index("function renderSchedule("))]
+        m = re.search(r"const rows = tasks\.map\(.*?\n  \]\);", seg, re.S)
         self.assertIsNotNone(m, "找不到 renderSchedule 里的 rows 定义，测试要跟着改")
         block = m.group(0)
         html_lines = [ln for ln in block.splitlines() if "<span" in ln or "<button" in ln]
@@ -188,6 +181,16 @@ class _Server:
     """真起一个 HTTP 服务 —— 测的是路由和状态码，不是 mock 出来的路由。"""
 
     def __init__(self, root: Path):
+        # ⚠ 2026-09-18 起 `/api/*` 有**登录门禁**（`web.setup_state`）——
+        #   不先把这台机器配成"能用的"，下面所有请求都是 403。
+        #   这里配成**合作店**（有门店名 + 编码、**没有串号标识**）：
+        #   那种店不走玲珑，所以不需要玲珑会话也算就绪。
+        #   ⚠ 必须写进**这个 root**（`app.root`）—— 门店账号文件是按 `app.root`
+        #     解析的，写到别处的话会去读**开发机上那份真凭据**（实测踩到）。
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        (root / "config" / "store-X.yaml").write_text(
+            'erp_store_name: "青岛永旺东部店"\nstore_code: "CNSCN162188"\n',
+            encoding="utf-8")
         with mock.patch.object(web.service, "find_running", lambda *a, **k: None):
             self.app = web.App(root, "config/store-X.yaml")
         self.app.server = None
@@ -271,12 +274,8 @@ class TestAutoUpdateReachesUI(unittest.TestCase):
         self.assertIn("formatAgo", APP_JS)
 
 
-class TestRollbackApi(unittest.TestCase):
-    """回退接口的接线。
-
-    回退按钮是**动态渲染**出来的，报错时页面上只留一句"回退失败"，
-    所以参数有没有正确传到后端、走的哪条路，必须在测试里钉住。
-    """
+class TestUpdateApi(unittest.TestCase):
+    """升级 / 修复接口（历史版本回退已去掉，用户 2026-09-23）。"""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -286,44 +285,69 @@ class TestRollbackApi(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_history_endpoint_returns_versions(self):
-        fake = [{"version": "1.4.1", "sha": "a" * 40, "short": "a" * 7,
-                 "date": "2026-09-15T09:44:00Z", "message": "release: v1.4.1"}]
-        with mock.patch.object(web.selfupdate, "history", lambda *a, **k: fake):
-            status, body = self.srv.request("GET", "/api/update?history=1")
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["versions"][0]["version"], "1.4.1")
-        self.assertIn("current", body, "界面要能标出哪个是当前版本")
+    def test_改到一半失败时绝不重启服务(self):
+        """阶段 1.4a：`PartialUpdate` ⇒ 界面拿得到现场，而且**不重启**。"""
+        def boom(root, *, current=""):
+            raise web.selfupdate.PartialUpdate("铺到一半失败了（3/40 个文件）：磁盘满了", {
+                "from": current, "to": "1.5.0", "changed": ["src/a.py"],
+                "backup": "/tmp/backup-x", "journal": "/tmp/journal.json"})
 
-    def test_history_endpoint_reports_failure_without_crashing(self):
-        """GitHub 连不上 / 限流时，接口要如实说，不能 500。"""
-        def boom(*a, **k):
-            raise web.selfupdate.UpdateError("连不上 GitHub（试了 2 次）")
-        with mock.patch.object(web.selfupdate, "history", boom):
-            status, body = self.srv.request("GET", "/api/update?history=1")
+        with mock.patch.object(web.selfupdate, "apply_update", boom), \
+                mock.patch.object(web.selfupdate, "restart_later",
+                                  lambda r: self.fail("部分失败**不许**重启服务")):
+            status, body = self.srv.request("POST", "/api/update", {})
         self.assertEqual(status, 200)
         self.assertFalse(body["ok"])
-        self.assertIn("连不上", body["message"])
+        self.assertTrue(body["partial"], "要标明这是「改到一半」，不是干净失败")
+        self.assertFalse(body["restarting"])
+        self.assertIn("磁盘满了", body["message"])
+        self.assertEqual(body["changed"], ["src/a.py"], "现场要带给界面")
+        self.assertIn("backup", body)
 
-    def test_post_with_ref_goes_through_rollback(self):
-        """带 ref → 走 rollback（**不是** upgrade），且 sha 要原样传过去。"""
+    def test_修复接口走_repair_并且会重启(self):
         seen = {}
 
-        def fake_rollback(root, *, ref, current=""):
-            seen["ref"] = ref
-            return {"ok": True, "from": current, "to": "1.3.6",
-                    "changed": ["src/cli.py"], "count": 1}
+        def fake_repair(root, *, current="", mode="auto"):
+            seen["mode"] = mode
+            return {"ok": True, "to": "1.5.0", "count": 3}
 
-        with mock.patch.object(web.selfupdate, "rollback", fake_rollback), \
-                mock.patch.object(web.selfupdate, "restart_later", lambda r: False):
-            status, body = self.srv.request("POST", "/api/update",
-                                            {"ref": "ddfb39d" + "0" * 33})
-        self.assertEqual(status, 200)
+        with mock.patch.object(web.selfupdate, "repair", fake_repair), \
+                mock.patch.object(web.selfupdate, "restart_later", lambda r: True):
+            status, body = self.srv.request("POST", "/api/update", {"repair": "rerun"})
+        self.assertEqual(seen["mode"], "auto")
         self.assertTrue(body["ok"])
-        self.assertEqual(seen["ref"], "ddfb39d" + "0" * 33)
-        self.assertTrue(body.get("rollback"), "要标明这是一次回退，不是升级")
-        self.assertIn("回退到", body["message"])
+        self.assertTrue(body["restarting"])
+        self.assertIn("1.5.0", body["message"])
+
+    def test_修复接口_restore_走备份(self):
+        seen = {}
+
+        def fake_repair(root, *, current="", mode="auto"):
+            seen["mode"] = mode
+            return {"ok": True, "message": "已恢复 12 个文件"}
+
+        with mock.patch.object(web.selfupdate, "repair", fake_repair), \
+                mock.patch.object(web.selfupdate, "restart_later", lambda r: False):
+            status, body = self.srv.request("POST", "/api/update", {"repair": "restore"})
+        self.assertEqual(seen["mode"], "restore")
+        self.assertIn("已恢复", body["message"])
+
+    def test_修复失败时不重启(self):
+        def fake_repair(root, *, current="", mode="auto"):
+            return {"ok": False, "message": "找不到备份目录"}
+
+        with mock.patch.object(web.selfupdate, "repair", fake_repair), \
+                mock.patch.object(web.selfupdate, "restart_later",
+                                  lambda r: self.fail("修复失败不该重启")):
+            status, body = self.srv.request("POST", "/api/update", {"repair": "restore"})
+        self.assertFalse(body["ok"])
+        self.assertIn("找不到备份", body["message"])
+
+    def test_概览页带出没走完的升级(self):
+        with mock.patch.object(web.selfupdate, "pending",
+                               lambda root: {"state": "failed", "to": "1.5.0"}):
+            status, body = self.srv.request("GET", "/api/overview")
+        self.assertEqual(body["update_pending"]["state"], "failed")
 
     def test_post_without_ref_still_upgrades(self):
         """不带 ref 的老行为不能变（升级）。"""
@@ -334,19 +358,15 @@ class TestRollbackApi(unittest.TestCase):
             return {"ok": True, "to": "1.5.0", "changed": [], "count": 0}
 
         with mock.patch.object(web.selfupdate, "apply_update", fake_apply), \
-                mock.patch.object(web.selfupdate, "rollback",
-                                  lambda *a, **k: self.fail("不该走回退")), \
                 mock.patch.object(web.selfupdate, "restart_later", lambda r: False):
             status, body = self.srv.request("POST", "/api/update", {})
         self.assertTrue(called.get("upgrade"))
         self.assertIn("更新到", body["message"])
         self.assertFalse(body.get("rollback"))
 
-    def test_ui_wires_the_history_controls(self):
-        """前端得真的去读、真的去回退 —— 光有后端没人调也一样。"""
-        self.assertIn("/api/update?history=1", APP_JS)
-        self.assertIn("data-rollback", APP_JS)
-        self.assertIn("btn-history-load", APP_JS)
+    def test_界面不再有历史回退入口(self):
+        self.assertNotIn("btn-history-load", Path("web/index.html").read_text(encoding="utf-8"))
+        self.assertNotIn("data-rollback", APP_JS)
 
 
 class TestElevationWarning(unittest.TestCase):
@@ -723,36 +743,43 @@ class TestSessionSelfCheck(unittest.TestCase):
         self.assertTrue(self.app.session_info()["check_ok"])
 
 
-class TestRunButtonShowsFeedback(unittest.TestCase):
-    """「执行」按钮不能是个黑盒。
+class Test手动跑的反馈在抽屉里(unittest.TestCase):
+    """⚠ 2026-09-20（用户：「把兜底去掉吧，不用系统的计划任务」）之后，
+    **手动跑**是唯一"点了要看到过程"的入口 —— 它走 `runner` + 右下角那个抽屉
+    （`/api/run` 轮询 + `setRunDrawer`）。
 
-    用户原话："点了也不推送" —— 其实推送被跳过了（配置的是"仅有差异时发"），
-    日志里写得清清楚楚，但界面上什么都看不到。
+    以前还有一条"点计划任务的「执行」、再盯 out/run.log"的路
+    （`watchRunLog` + `runlog-progress`）—— 那条**随兜底一起删了**：
+    旧任务现在只做"确保服务在跑"，点它等于白跑一趟。
+
+    ⚠ 这里钉的是"**反馈不能是黑盒**"这条规矩本身：
+      它当年的教训是「点了也不推送」——其实推送只是被跳过了，日志里写得清清楚楚，
+      而界面上什么都看不到。换个入口，规矩不变。
     """
 
-    def test_watches_the_run_log(self):
-        self.assertIn("/api/runlog", APP_JS)
-        self.assertIn("watchRunLog", APP_JS)
+    def test_抽屉会轮询运行日志(self):
+        self.assertIn("setRunDrawer", APP_JS)
+        self.assertIn("/api/run", APP_JS)
 
-    def test_removes_the_progress_banner_when_done(self):
-        """跑完了"正在跑…"那条要撤掉 —— 挂着会让人以为还在跑。"""
-        self.assertIn("runlog-progress", APP_JS)
-        self.assertIn(".remove()", APP_JS)
+    def test_旧的那条看日志的路撤干净了(self):
+        for gone in ("watchRunLog", "runlog-progress", "runlog-box"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, APP_JS, "兜底那套的看日志又回来了？")
 
-    def test_push_outcome_is_shown_line_by_line(self):
-        """✅ / 跳过 **逐行保留自己的记号**，不要整块染成绿的。
-
+    def test_日志是逐行原样显示的(self):
+        """✅ / 跳过 **逐行保留自己的记号**，不要整块染成绿的 ——
         整块绿的话"邮件跳过"也会跟着变绿，反而误导。
-        """
-        self.assertIn("banner info", APP_JS, "推送结果那块的样式")
-        self.assertIn("d.wecom", APP_JS)
-        self.assertIn("d.mail", APP_JS)
 
-    def test_exit_code_is_translated(self):
-        """退出码要翻译成人话 + 下一步做什么。"""
-        seg = APP_JS[APP_JS.index("async function watchRunLog"):]
-        self.assertIn("会话过期", seg)
-        self.assertIn("取数失败", seg)
+        ⚠ 2026-09-20：原来这条盯的是 `watchRunLog` 里那几行
+          （它自己解析 `d.wecom` / `d.mail` 再拼成一块 banner）——
+          那条路随兜底一起删了。现在**抽屉直接把日志行原样贴出来**
+          （`textContent += job.lines.join('\n')`），记号本来就跟着行走的，
+          比对着一份解析结果更不容易撒谎。
+        """
+        i = APP_JS.index("function appendLog(job)")
+        blk = APP_JS[i:i + 400]
+        self.assertIn("textContent", blk, "日志要按文本贴，别当 HTML 拼")
+        self.assertIn("job.lines.join", blk)
 
 
 class TestSessionBannerIsNotHardcoded(unittest.TestCase):
@@ -879,10 +906,17 @@ class TestHiddenAttributeActuallyHides(unittest.TestCase):
         return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
 
     def test_style_sheet_has_a_hidden_fallback(self):
+        """⚠ 别用 `css.split("[hidden]")[1]` 找那条兜底 —— **它假定兜底是全文第一处
+        `[hidden]`**。2026-09-19 加了下左角的设置浮层（`.side-menu[hidden]`），
+        它排在那条兜底**前面**，于是切出来的是浮层那条
+        （浮层自己那条本来就不该有 `!important`，它的类没设 display），假红。
+        → 按**行首的裸选择器**锚，那才是全局兜底那一条。"""
         css = self._css()
         self.assertIn("[hidden]", css,
                       "style.css 要有 [hidden] 兜底，否则类选择器会压过它")
-        self.assertIn("!important", css.split("[hidden]")[1][:60],
+        m = re.search(r"(?m)^\[hidden\]\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m, "找不到裸的 `[hidden] { … }` 兜底规则")
+        self.assertIn("!important", m.group(1),
                       "不加 !important 压不过 .form-row / .btn 那些规则")
 
     def test_every_hidden_element_has_a_display_rule_covered(self):
@@ -1290,8 +1324,15 @@ class TestRunnerScriptSelfHeal(unittest.TestCase):
         p = self._legacy_bat()
         self.app.overview()
         body = p.read_text(encoding="utf-8")
-        self.assertIn("daily --days-ago 1", body)
+        # ⚠ v6（2026-09-20）：计划任务那份**不再跑 daily**，它只确保服务在跑；
+        #   真正跑日常流程的是手动那份（`run-now.bat`）。
+        self.assertIn("ensure-service", body)
         self.assertIn(schedule.RUNNER_MARK, body)
+        now = schedule.manual_script_path(self.root).read_text(encoding="utf-8")
+        # ⚠ v7（2026-09-21 晚）：手动那份**点名**跑（`daily --steps …`）——
+        #   `daily` 不给 `--steps` 会直接报错，所以自愈必须把它写进去。
+        self.assertIn("daily --steps " + ",".join(run_daily.MANUAL_STEPS), now,
+                      "手动那份要点名跑「每天那趟」")
 
     def test_重建过就在返回里说一声(self):
         """界面可以据此提一句 —— 免得门店发现命令悄悄变了会懵。"""
@@ -1299,7 +1340,7 @@ class TestRunnerScriptSelfHeal(unittest.TestCase):
         self.assertTrue(self.app.overview()["runner_rebuilt"])
 
     def test_没改动就不说重建了(self):
-        schedule.write_runner_script(self.root, "config/store-X.yaml", 1)
+        schedule.write_runner_script(self.root, "config/store-X.yaml")
         self.assertFalse(self.app.overview()["runner_rebuilt"])
 
     def test_每进程只试一次(self):
@@ -1334,11 +1375,14 @@ class TestRunnerScriptSelfHeal(unittest.TestCase):
         self.assertEqual(m.call_count, 1)
 
 
-class TestRunWhatApi(unittest.TestCase):
-    """`/api/run` 的 `what` —— 界面按钮靠它。
+class Test跑一次那个接口已经删了(unittest.TestCase):
+    """⚠ 2026-09-21 晚（用户：「**现在不需要 run daily 吧，按定时器运行就行了**」）——
+    `POST /api/run`（`what` 预设那套）**删了**：界面上那张「跑一次」的卡先删的，
+    后端这套"手动跑一整趟"的入口跟着一起走。
 
-    ⚠ 2026-09-17：界面上只剩「整个项目」一个按钮，但三个预设**后端都还认**
-    （`daily --skip-dump` 那套没动，老页面也不会因为多传字段就点不动）。
+    ⚠ 留着一条**说人话的 410**，不静默 404 —— 老页面缓存里的 JS 还可能打过来，
+      而 404 只会让那个按钮"点了没反应"（这个项目最怕的一种失败）。
+    ⚠ `GET /api/run`（看日志/进度）**留着** —— 右下角抽屉和各页「刷新」还在用它。
     """
 
     def setUp(self):
@@ -1349,57 +1393,38 @@ class TestRunWhatApi(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_乱传_what_返回_400_而不是起个半死进程(self):
-        code, body = self.srv.request("POST", "/api/run", {"what": "bogus"})
-        self.assertEqual(code, 400)
-        self.assertIn("不认识的 what", body["error"])
+    def test_打过来是_410_而且说人话(self):
+        """老页面缓存里的「跑一次」按钮打过来：**别起进程**，回一句人话。"""
+        with mock.patch.object(runner.RunManager, "start_steps") as m:
+            code, body = self.srv.request("POST", "/api/run", {"what": "all"})
+        self.assertEqual(code, 410)
+        self.assertIn("已经去掉", body["error"])
+        self.assertIn("刷新", body["error"], "要告诉人现在该怎么补这一趟")
+        self.assertEqual(m.call_count, 0, "入口删了就不许再起进程")
 
-    def test_不给_what_就是整个项目(self):
-        """老前端/老脚本不带这个字段时，行为不能变。"""
-        with mock.patch.object(runner.RunManager, "start") as m:
-            m.return_value = mock.Mock(snapshot=lambda n: {})
-            self.srv.request("POST", "/api/run", {})
-        self.assertEqual(m.call_args.kwargs.get("what"), "all")
-
-    def test_what_透传到_runner(self):
-        with mock.patch.object(runner.RunManager, "start") as m:
-            m.return_value = mock.Mock(snapshot=lambda n: {})
-            self.srv.request("POST", "/api/run", {"what": "pos"})
-        self.assertEqual(m.call_args.kwargs.get("what"), "pos")
-
-    def test_每个_what_后端都认(self):
-        for what in run_daily.BUTTON_STEPS:
+    def test_什么_what_都不认了(self):
+        for what in ("all", "pos", "dump", "bogus", ""):
             with self.subTest(what=what):
-                with mock.patch.object(runner.RunManager, "start") as m:
-                    m.return_value = mock.Mock(snapshot=lambda n: {})
-                    code, _ = self.srv.request("POST", "/api/run", {"what": what})
-                self.assertEqual(code, 200)
+                code, _ = self.srv.request("POST", "/api/run", {"what": what})
+                self.assertEqual(code, 410)
 
-    def test_老页面多传的日期字段被忽略而不是_400(self):
-        """⚠ 门店刷新页面之前那一版 JS 还在往这儿塞 mode/date/lookback，
-        报 400 的话按钮点了没反应，而界面上一个字都不会说。"""
-        with mock.patch.object(runner.RunManager, "start") as m:
-            m.return_value = mock.Mock(snapshot=lambda n: {})
-            code, _ = self.srv.request("POST", "/api/run", {
-                "what": "all", "mode": "date", "date": "2026-09-10",
-                "days_ago": 0, "lookback": 3, "lookahead": 1})
+    def test_读日志那条路还在(self):
+        """⚠ 删的是 POST（起一趟），不是 GET（看进度/日志）——
+        右下角那个抽屉和各页「刷新」的反馈全靠它。"""
+        code, body = self.srv.request("GET", "/api/run?id=&since=0")
         self.assertEqual(code, 200)
-        # 只把 what 递给 runner —— 那五个字段一个都不许再往下走
-        self.assertEqual(set(m.call_args.kwargs), {"what"})
-
-    def test_不再往命令里拼日期开关(self):
-        """⚠ `/api/run` 和 `runner` 都不碰这四个参数了：`daily` 命令行上还认
-        （老 run.bat / 计划任务里写死着），但它们不影响任何一步 ——
-        拼上去只会让运行日志里那条命令看着像"界面上有个目标日"。"""
-        m = runner.RunManager()
-        j = m.start(Path("/tmp/x"), "c.yaml", what="all")
-        self.assertEqual(" ".join(j.argv[j.argv.index("daily") + 1:]), "")
-        j.kill()
-        j.running = False
+        self.assertIn("running", body)
 
 
-class TestAutomationApi(unittest.TestCase):
-    """`/api/schedule/automation` —— 设置里「自动化跑什么」。"""
+class Test自动化设置的接口只回一句取消(unittest.TestCase):
+    """⚠ 2026-09-20（用户）：「**自动化跑什么 … 这些去掉吧，也不用设置了**」，
+    2026-09-21 晚连"手动整批"也删了。
+
+    ⇒ `/api/schedule/automation` 这条路由**不再改任何东西**（脚本跑什么是注册表派生的），
+      只回一句"这个设置取消了"。
+    ⚠ 回的是**说人话的 410**（不是 404）：老页面缓存里那个「保存」按钮打过来时，
+      用户要看到的是"设置没了"，而不是一个看不懂的 404、更不是"点了没反应"。
+    """
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1412,40 +1437,15 @@ class TestAutomationApi(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_空数组现在合法了(self):
-        """⚠ 用户 2026-09-17 定的：两个都不勾 = 「只抓数据」，**允许**。
-        以前这条是 `test_一个都不勾返回_400` —— 那条规矩作废了。"""
-        code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": []})
-        self.assertEqual(code, 200)
-        self.assertEqual(body["steps"], ["dump"])
-
-    def test_勾了会重写_run_bat(self):
-        code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": ["dump", "pos"]})
-        self.assertEqual(code, 200)
-        self.assertTrue(body["ok"])
-        run = schedule.script_path(self.root).read_text(encoding="utf-8")
-        # ⚠ 勾「dump + POS」生成的是 `--skip-pools`（**不**带 `--skip-dump`）：
-        #   定时任务没人盯着，抓数据是必做的，不是选项。
-        #   （`--skip-check` 已经废弃 —— 报量排查整步拿掉了。）
-        self.assertIn("--skip-pools", run)
-        self.assertNotIn("--skip-dump", run)
-
-    def test_概览里能读到当前的勾选和可选项(self):
-        self.srv.request("POST", "/api/schedule/automation",
-                         {"steps": ["dump", "pos"]})
-        _, ov = self.srv.request("GET", "/api/overview")
-        auto = ov["automation"]
-        self.assertEqual(auto["steps"], ["dump", "pos"])
-        # ⚠ 可选项**不含 dump**（那个复选框 2026-09-17 拿掉了），
-        #   它是必做的，走 `always_on`。
-        self.assertEqual([c["value"] for c in auto["choices"]], ["pos", "pools"])
-
-    def test_可选项由后端给_前端不自己维护一份(self):
-        _, ov = self.srv.request("GET", "/api/overview")
-        for c in ov["automation"]["choices"]:
-            self.assertEqual(c["label"], run_daily.STEP_LABELS[c["value"]])
+    def test_传什么都不改_脚本也不重写(self):
+        with mock.patch.object(schedule, "write_runner_script") as w:
+            code, body = self.srv.request("POST", "/api/schedule/automation",
+                                          {"steps": ["pos"]})
+        self.assertEqual(code, 410)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body.get("cancelled"))
+        self.assertIn("取消", body["message"])
+        self.assertEqual(w.call_count, 0, "设置没了就别再去动门店那份脚本")
 
 
 class TestRunPageWiring(unittest.TestCase):
@@ -1458,11 +1458,19 @@ class TestRunPageWiring(unittest.TestCase):
     `dump` / `pos` 两个预设后端还认，只是**不许再有按钮**。
     """
 
-    def test_只剩下整个项目一个按钮(self):
-        self.assertIn('data-what="all"', INDEX_HTML)
-        for what in set(run_daily.BUTTON_STEPS) - {"all"}:
-            with self.subTest(what=what):
-                self.assertNotIn('data-what="%s"' % what, INDEX_HTML)
+    def test_跑一次那张卡整个删了(self):
+        """⚠ 2026-09-21（用户：「**右下角的跑一次可以去掉了**」）——
+        那一整张卡（按钮 + 停止 + 状态）从 HTML 里删了。手动跑仍可以走命令行。
+        ⚠ 这条同时保证**别再加回来**（旧写法是"只剩「整个项目」一个按钮"）。
+        """
+        for gone in ('data-what="all"', 'id="btn-stop"', 'id="run-status"',
+                     '<h2>跑一次</h2>'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, INDEX_HTML)
+        # ⚠ app.js 里对这两个 id 的引用**必须判空**（元素没了，裸取会在加载时抛）
+        import re as _re
+        self.assertFalse(_re.findall(r"\$\('#(?:btn-stop|run-status)'\)\.", APP_JS),
+                         "app.js 里还有对已删元素的裸引用")
 
     def test_老的单按钮已经彻底拿掉(self):
         """⚠ 拆成 data-what 之后 `#btn-run` 就不存在了 —— app.js 里那句
@@ -1471,22 +1479,60 @@ class TestRunPageWiring(unittest.TestCase):
         self.assertNotIn('id="btn-run"', INDEX_HTML)
         self.assertNotIn("$('#btn-run')", APP_JS)
 
-    def test_按_what_解释退出码(self):
-        """⚠ 只有四池对账才有"有差异"(3) 这一说；POS 的 2 是"没找到订单库"。
-        混着说会让人以为 POS 也"有差异"。"""
-        self.assertIn("EXIT_LABELS", APP_JS)
-        for what in run_daily.BUTTON_STEPS:
-            with self.subTest(what=what):
-                self.assertIn("%s: {" % what, APP_JS)
+    def test_退出码说法跟着那张卡一起走了(self):
+        """⚠ 2026-09-21（用户：「**右下角的跑一次可以去掉了**」）——
+        `EXIT_LABELS`（"退出码 → 人话"那张表）只有那张卡在用：
+        卡删了、`pollRun` 也删了，它就成了死代码。
 
-    def test_自动化勾选的三个_id_都在(self):
+        ⚠ 这里钉的是**"删干净"**：留着那张表本身无害，但留着它的兄弟
+        （`startRun` / `pollRun` / `setRunButtons`）就有害 ——
+        里面每一句对 `btn-stop` / `run-status` 取元素的写法都会在加载时拿到 null，
+        而 `TestFrontendWiring::test_every_referenced_id_exists_in_html` 是按源码扫的。
+        ⚠ 手动跑整趟改走命令行 `python -m src.cli daily`；后端 `POST /api/run`
+        **还在**（`Test手动跑的反馈在抽屉里` 那几条钉着 `/api/run` 的读取侧）。
+        """
+        for gone in ("function startRun", "function pollRun", "function setRunButtons",
+                     "const EXIT_LABELS"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, APP_JS, "那张卡删了，这套接线也该走")
+        # ⚠ 锚**定义**（`function x` / `const x =`）而不是裸名字：app.js 里那段
+        #   说明为什么删的注释会把这些名字写进去，锚裸名字会匹到注释上（当场踩到）。
+        # 「运行日志」抽屉的喂法（各页「刷新」用）**留着** —— 别删过头
+        self.assertIn("watchJob", APP_JS)
+        self.assertIn("appendLog", APP_JS)
+
+    def test_自动化勾选那三个_id_都不在了(self):
+        """⚠ 2026-09-20（用户）：「自动化跑什么 … 这些去掉吧，也不用设置了」——
+        复选框、保存按钮、提示位**一起撤**。
+        ⚠ 撤了 HTML 但 JS 还留着 `$('#automation-box')` 那种写法是最阴的：
+          拿到 null 不报错，看着一切正常、其实什么都不干
+          （`test_自动化勾选不再有接线` 盯着那个方向）。"""
         for i in ("automation-box", "btn-automation-save", "automation-msg"):
             with self.subTest(id=i):
-                self.assertIn('id="%s"' % i, INDEX_HTML)
+                self.assertNotIn('id="%s"' % i, INDEX_HTML)
 
-    def test_自动化勾选会渲染(self):
-        self.assertIn("renderAutomation", APP_JS)
-        self.assertIn("state.overview.automation", APP_JS)
+    def test_自动化勾选不再有接线(self):
+        """⚠ 2026-09-20：这个设置**整个取消** ⇒ 前端那套接线也要跟着走。
+
+        ⚠ 最阴的失败是"HTML 删了、JS 留着"：`$$('#automation-box [data-auto]')`
+          拿到空数组、`$('#btn-automation-save')` 拿到 null —— **不报错、
+          看着一切正常**，其实什么都不干。所以这条按**函数名和事件**查，
+          不是只查 id。
+        """
+        # ⚠⚠ 断言前**剥掉 JS 注释** —— 我为了说明"删了什么"在注释里原样写了这些名字，
+        #   不剥的话 `assertNotIn` 会被**自己的注释**顶掉（今天第六次了）。
+        import re as _re
+        code = _re.sub(r"/\*.*?\*/", "", APP_JS, flags=_re.S)
+        code = _re.sub(r"(?m)//[^\n]*$", "", code)
+        for gone in ("renderAutomation", "pickedAutomation",
+                     "btn-automation-save", "automation-box", "automation-msg"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, code)
+        # 定时器页那个加载器只剩「旧的系统计划任务」那块
+        i = APP_JS.index("async function loadSchedulerBits()")
+        blk = APP_JS[i:i + 320]
+        self.assertIn("renderSchedule(o.schedule", blk)
+        self.assertNotIn("renderAutomation", blk)
 
     def test_两个都不勾前端不再拦(self):
         """⚠ 用户 2026-09-17 定的：两个都不勾是合法的（「只抓数据」）。
@@ -1513,19 +1559,61 @@ class TestRunPageWiring(unittest.TestCase):
                          "还有指向已删下拉框的残留变量 —— 点下去会 ReferenceError")
 
     def test_报量排查_tab_改好名了(self):
-        # ⚠ 2026-09-17 改成「四池比对」（报量排查的判据被证伪，那页换成四池记录）
-        self.assertIn(">四池比对<", INDEX_HTML)
-        self.assertNotIn(">报告<", INDEX_HTML)
+        """⚠ 这个名字改过两轮：2026-09-17「报量排查」→「报量查询」
+        （判据被证伪，那页换成报量查询的记录），2026-09-18 又改名成「报量查询」（用户）。
+        页签 id 始终是 `pools`。"""
+        self.assertIn(">报量查询<", INDEX_HTML)
+        for dead in (">报告<", ">报量排查<"):
+            with self.subTest(dead=dead):
+                self.assertNotIn(dead, INDEX_HTML)
 
 
-class TestAutomationChoicesAndAlwaysOn(unittest.TestCase):
-    """「自动化跑什么」的两个概念（2026-09-17 用户定的）：
+class Test不再注册系统计划任务(unittest.TestCase):
+    """⚠ 用户 2026-09-20：「**把兜底去掉吧，不用系统的计划任务**」。
 
-    * **可选项**（`choices`）—— 有复选框，能勾能取消：POS 合规 / 四池对账；
-    * **必做项**（`always_on`）—— **取消不掉，界面上没有框**：抓四池数据。
+    这块原来有一整套"注册计划任务"的界面（时间框 + 任务名 + 添加按钮，
+    连 placeholder 都要按**后端的** `schedule.TASK_NAME` 现算）。
 
-    来历：2026-09-16 用户说"默认执行抓数据"（那时还能取消）；
-    2026-09-17 看到那个复选框，说「把抓数据这个复选框去掉吧，默认执行这个。不可选」。
+    现在**整套撤掉**：到点由服务里的定时器跑，服务靠**开机自启**常驻
+    （注册表 Run 项 —— 不需要管理员，也不会把服务变成管理员）。
+    界面上只剩"旧的还能删"（见 `Test旧的计划任务只剩清理`）。
+    """
+
+    def test_注册入口全撤了(self):
+        for gone in ("btn-sched-install", "sched-time", "sched-name",
+                     "syncSchedPlaceholder", "添加兜底任务"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, APP_JS)
+                self.assertNotIn(gone, INDEX_HTML)
+
+    def test_连老名字一起没了(self):
+        """写死的 `CBG报量对账-21点00` 是 2026-09-16 就改掉的老名字 ——
+        那个 placeholder 撤了之后，一个字都不该再出现。"""
+        self.assertNotIn("CBG报量对账-21点00", INDEX_HTML)
+        self.assertNotIn("CBG报量对账-21点00", APP_JS)
+
+    def test_后台那套还在_命令行还能用(self):
+        """⚠ 撤的是**产品界面上的入口**，不是能力本身。
+
+        留着它有三个用处：删旧任务（普通权限删不掉时提权删）、
+        给"服务起不来"的机器手动兜一条、以及老门店升级期的兼容。
+        """
+        self.assertIn("schedule-install", str(bootstrap.STDLIB_ONLY))
+        self.assertIn("schedule-remove", str(bootstrap.STDLIB_ONLY))
+
+
+class Test跑哪几步没有可设的东西(unittest.TestCase):
+    """⚠⚠ 2026-09-20（用户）：「**自动化跑什么 … 这些去掉吧，也不用设置了**」，
+    2026-09-21 晚"手动整批"也删了。
+
+    ⇒ 现在"跑哪几步"**没有任何可设的余地**：
+      * 到点 = 每一步自己的唤醒时刻（注册表）；
+      * 手动双击 = `run_daily.MANUAL_STEPS`（也是注册表派生的）；
+      * 各页「刷新」= `web.REFRESH_STEPS`。
+
+    ⚠ 这条线当年守的是"**勾了什么就得跑什么**"。设置和手动入口都没了之后，
+      要守的换成了它的反面：**别再冒出第二个"跑什么"的来源** ——
+      `overview.automation` 那个字段已经删了（留着只会让下一个人以为还能配）。
     """
 
     def setUp(self):
@@ -1539,71 +1627,33 @@ class TestAutomationChoicesAndAlwaysOn(unittest.TestCase):
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
-    def test_可选项里没有抓数据(self):
+    def test_概览里不再有那个字段(self):
         _, ov = self.srv.request("GET", "/api/overview")
-        self.assertEqual([c["value"] for c in ov["automation"]["choices"]],
-                         ["pos", "pools"])
+        self.assertNotIn("automation", ov,
+                         "`overview.automation` 又回来了？那说明「跑什么」又要变成可配的了")
 
-    def test_抓数据作为必做项单独给前端(self):
-        """⚠ 前端**不写死名字** —— 必做项要从 `always_on` 拿。
-        `always_on` 原本就是个空占位（`src/web.py` 里的注释写着"预留"），
-        现在真用上了。"""
+    def test_计划任务那列说的是实话(self):
+        """⚠ 系统计划任务 v6 起**不跑对账**了（只确保服务在跑）——
+        那一列以前填的是一串步骤名，那是**假信息**（那些步骤根本不是它跑的）。"""
         _, ov = self.srv.request("GET", "/api/overview")
-        self.assertEqual([c["value"] for c in ov["automation"]["always_on"]],
-                         ["dump"])
-        self.assertEqual([c["label"] for c in ov["automation"]["always_on"]],
-                         [run_daily.STEP_LABELS["dump"]])
+        for t in (ov["schedule"].get("tasks") or []):
+            with self.subTest(task=t.get("name")):
+                self.assertEqual(t.get("steps"), [])
+                self.assertEqual(t.get("what_label"), schedule.WHAT_LABEL_OF_TASK)
 
-    def test_默认三项都跑(self):
-        _, ov = self.srv.request("GET", "/api/overview")
-        self.assertEqual(ov["automation"]["steps"],
-                         ["dump", "pos", "pools"])
-
-    def test_跑什么那列和勾选加必做对得上(self):
-        """⚠ 这是这条线的**全部意义**：复选框列表 + 必做项
-        必须和旁边那列「跑什么」一致 —— 否则用户看到"只勾了两项"、
-        实际跑了三件，会以为程序乱来。"""
-        _, ov = self.srv.request("GET", "/api/overview")
-        labels = [c["label"] for c in ov["automation"]["always_on"]] + \
-                 [c["label"] for c in ov["automation"]["choices"]]
-        self.assertEqual(ov["automation"]["label"], " + ".join(labels))
-
-    def test_取消勾选也取消不掉抓数据(self):
-        """⚠ 用户 2026-09-17 定的。取消之后库不更新，
-        POS 和四池对账都只是拿旧数据在算 —— 而界面上只会显示"跑完了"。"""
-        code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": ["pos", "pools"]})
-        self.assertEqual(code, 200)
-        self.assertEqual(body["steps"], ["dump", "pos", "pools"])
-        run = schedule.script_path(self.root).read_text(encoding="utf-8")
-        self.assertNotIn("--skip-dump", run)
-
-    def test_两个都不勾就是只抓数据(self):
-        code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": []})
-        self.assertEqual(code, 200)
-        self.assertEqual(body["steps"], ["dump"])
-        self.assertEqual(body["label"], run_daily.STEP_LABELS["dump"])
-
-    def test_传个不是数组的还是要_400(self):
-        """空数组现在合法了，但"传了个字符串"还是错的 ——
-        老前端/手搓请求会这么干，放过去会变成逐字符拆开的步骤名。"""
-        code, body = self.srv.request("POST", "/api/schedule/automation",
-                                      {"steps": "pos"})
-        self.assertEqual(code, 400)
-        self.assertIn("数组", body["error"])
-
-    def test_前端不自己写死选项表(self):
-        self.assertIn("a.choices", APP_JS)
-        self.assertIn("a.always_on", APP_JS)
-        self.assertNotIn("['reconcile', 'pos']", APP_JS)
-        self.assertNotIn('["reconcile", "pos"]', APP_JS)
-
-    def test_说明写清了抓数据不用选(self):
-        """⚠ 用户 2026-09-17 把那个复选框拿掉了 ——
-        说明里要写清"每次都跑、取消不掉"，否则用户会满界面找那个不存在的框。"""
-        self.assertIn("每次都会跑", INDEX_HTML)
-        self.assertIn("取消不掉", INDEX_HTML)
+    def test_老记录取消不掉任何一步(self):
+        """⚠ 老门店的 `.secrets/schedule.json` 里记着 `["pos","pools"]` 那种老勾选 ——
+        它现在**读都不读**：手动那份脚本跑哪几步由注册表派生，跟记录无关
+        （否则就成了"设不了的设置还在限范围"：`dump`/`attain` 永远跑不到，
+         而界面上一个字都不会说）。"""
+        p = schedule.record_path(self.root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"t": {"steps": ["pos", "pools"], "at": "x"}}', encoding="utf-8")
+        schedule.refresh_runner_scripts(self.root, "config/store-X.yaml")
+        body = schedule.manual_script_path(self.root).read_text(encoding="utf-8")
+        for step in run_daily.MANUAL_STEPS:
+            with self.subTest(step=step):
+                self.assertIn(step, body)
 
 
 class TestWhatsNewPopup(unittest.TestCase):
@@ -1758,28 +1808,53 @@ class TestReportBugApi(unittest.TestCase):
 
 
 class TestReportBugButtonWiring(unittest.TestCase):
-    def test_按钮挪到了检查更新旁边(self):
-        """⚠ 2026-09-17 用户定的：这两个按钮和相关说明原来挂在「定时执行」下面 ——
-        「出问题了？」跟"每天几点跑"完全没关系。现在跟「检查更新」放一起。
+    def test_上报_bug_在右下角抽屉里(self):
+        """⚠ 2026-09-17 定的：这两个按钮原来挂在「定时执行」下面 ——
+        「出问题了？」跟"每天几点跑"完全没关系。
 
-        ⚠ 锚 `<h2>定时执行</h2>` —— 光找"定时执行"会匹到顶部那个小药丸的
-        title（第一版就是这么错的，取到的区间是空的）。
+        ⚠⚠ **2026-09-21 又挪了一次**（用户：「**出问题上报 bug 做到右下角的状态
+        悬浮窗里**」）—— 出问题时人第一反应是点右下角那个悬浮窗看状态，
+        而不是翻到设置页里找按钮。⇒ 这条测试也跟着改成盯抽屉。
+
+        老规矩保留：`btn-report-bug` **不许**再出现在「定时器设置」页里。
+
+        ⚠ 锚 `<h2>定时执行`（**不带 `</h2>`**）—— 光找"定时执行"会匹到顶部那个
+        小药丸的 title（第一版就是这么错的，取到的区间是空的）；
+        而 2026-09-20 起这个标题后面跟了个 `<span class="hint" id="timer-meta">`，
+        带上 `</h2>` 就再也找不到了。
         """
-        i = INDEX_HTML.index("<h2>定时执行</h2>")
+        i = INDEX_HTML.index("<h2>定时器设置")
         j = INDEX_HTML.index("</section>", i)
         for gone in ("btn-report-bug", "btn-clear-pools-notify"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, INDEX_HTML[i:j],
                                  "「%s」不该再挂在「定时执行」下面了" % gone)
 
-        # 区间取「检查更新」标题到面板结束 —— 不写死是哪一张卡片，
-        # 合成一张卡还是紧挨着开一张新卡都算通过。
-        k = INDEX_HTML.index("<h2>检查更新</h2>")
+        # 「上报 bug」在**右下角那个状态抽屉**里（`#run-drawer`）
+        d0 = INDEX_HTML.index('id="run-drawer"')
+        d1 = INDEX_HTML.index("</aside>", d0)
+        self.assertIn("btn-report-bug", INDEX_HTML[d0:d1],
+                      "「上报 bug」该在右下角状态悬浮窗里")
+        # ⚠ 2026-09-21 又挪了一次（用户：「**清除推送记忆这个放在报量查询那个
+        #   设置里面吧**，合作店用不上」）—— 它是**双平台数据对比**那条推送自己的事。
+        k = INDEX_HTML.index('id="subpanel-compliance-settings"')
         m = INDEX_HTML.index("</section>", k)
-        for want in ("btn-report-bug", "btn-clear-pools-notify"):
-            with self.subTest(want=want):
-                self.assertIn(want, INDEX_HTML[k:m],
-                              "「%s」该跟「检查更新」放在一起" % want)
+        self.assertIn("btn-clear-pools-notify", INDEX_HTML[k:m],
+                      "「清除推送记忆」该在「报量查询 › 设置」里")
+        # 而且**只有一份**（两份 id 会撞，而且用户明确说"放那儿")
+        self.assertEqual(INDEX_HTML.count('id="btn-clear-pools-notify"'), 1)
+        # 合作店看不到这一页
+        # ⚠ 2026-09-21（M17 甲方案）：标签上不再写 `data-types="experience platform"`
+        #   —— 改由后端 `web.PAGE_RULES` 说了算。这里断言**表里那一行管着它**：
+        #   `compliance-settings` 必须挂在"走玲珑才看得见"那一档。
+        from src import web as _web
+        self.assertTrue(_web.PAGE_RULES.get("compliance-settings"),
+                        "这一页得只给走玲珑的店看（合作店用不上）")
+        self.assertIn("compliance-settings",
+                      _web.pages_for({"role": _web.ROLE_STORE, "needs_linglong": True}))
+        self.assertNotIn("compliance-settings",
+                         _web.pages_for({"role": _web.ROLE_STORE,
+                                         "needs_linglong": False}))
 
     def test_结果区几个_id_都在(self):
         for i in ("btn-report-bug", "report-bug-msg", "report-bug-result"):
@@ -1796,3 +1871,944 @@ class TestReportBugButtonWiring(unittest.TestCase):
         seg = INDEX_HTML[INDEX_HTML.index("btn-report-bug"):]
         self.assertIn("凭据", seg[:2500])
         self.assertIn("业务数据", seg[:2500])
+
+
+class Test更新没走完的横幅(unittest.TestCase):
+    """阶段 1.4d：中断的升级必须**在哪个页面都看得见**。
+
+    后端把 `overview.update_pending` 给出来了还不够 —— 前端不渲染就等于没有，
+    而"静默跑在混合版本上"正是这一整套要消灭的东西。
+    """
+
+    def test_横幅和两个按钮都在页面上(self):
+        self.assertIn('id="update-broken"', INDEX_HTML)
+        self.assertIn('id="btn-update-repair"', INDEX_HTML)
+        self.assertIn('id="btn-update-restore"', INDEX_HTML)
+
+    def test_默认是藏着的(self):
+        """没断在半路时不能一直挂条红横幅。"""
+        self.assertRegex(INDEX_HTML, r'id="update-broken"[^>]*\shidden')
+
+    def test_前端真的会渲染它(self):
+        self.assertIn("renderUpdateBroken", APP_JS)
+        # ⚠ 必须挂在**总览**那趟轮询上（30 秒一次、跟当前在哪一页无关），
+        #   只挂在设置页的话，门店不进设置就永远看不到。
+        self.assertIn("renderUpdateBroken(o.update_pending)", APP_JS)
+
+    def test_两个按钮真的会去打后端(self):
+        self.assertIn("repair: how", APP_JS)
+        self.assertIn("api/update", APP_JS)
+        self.assertIn("'restore'", APP_JS)
+
+
+class Test数据没到位的横幅(unittest.TestCase):
+    """M14 / 阶段 3.3：**五态要在界面上分得开**。
+
+    ⚠ 这条的价值在于：以前"ERP 挂了抓取一直失败"和"今天确实没卖"在页面上
+    是同一个画面（"还是昨天那份"），门店会把前者的账算到"没生意"头上。
+    """
+
+    def test_横幅和文案位都在(self):
+        self.assertIn('id="data-broken"', INDEX_HTML)
+        self.assertIn('id="ds-text"', INDEX_HTML)
+
+    def test_默认是藏着的(self):
+        """没事别老挂一条黄条 —— 只在 `ok=false` 时才出现。"""
+        self.assertRegex(INDEX_HTML, r'id="data-broken"[^>]*\shidden')
+
+    def test_前端真的会渲染它(self):
+        self.assertIn("renderDataState", APP_JS)
+        # ⚠ 挂在**总览**那趟轮询上（跟"更新没走完"那条横幅一个位置）
+        self.assertIn("renderDataState(o.data_state)", APP_JS)
+
+    def test_全_ok_时不显示(self):
+        """逻辑层：`ok=true` ⇒ 藏起来（用 node 太贵，这里查源码里的那个分支）。"""
+        seg = APP_JS[APP_JS.index("function renderDataState"):]
+        seg = seg[:seg.index("\n}")]
+        self.assertIn("ds.ok", seg)
+        self.assertIn("hidden = true", seg)
+
+    def test_确实为零和没有数据在文案上不是一回事(self):
+        """⚠ M2M5 §9.4 的红线：真 0 不许写成"没有数据"。"""
+        from src.app import data_state as ds
+        self.assertNotEqual(ds.LABELS[ds.ZERO], ds.LABELS[ds.MISSING])
+        self.assertNotIn("没有数据", ds.LABELS[ds.ZERO])
+
+
+class Test表头也认_html(unittest.TestCase):
+    """2026-09-19：达成表要在表头里换行（产品名 + 占比两行），
+    而 `table()` 的表头原来只 `esc(h)` ⇒ 传 `{html:…}` 进去渲染成
+    `[object Object]`，**整个表头都看不见了**（用户当场发现）。
+
+    ⚠ 这条同时钉住"**字符串照样转义**"—— 开这个口子不等于放宽安全性。
+    """
+
+    def setUp(self):
+        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_表头认_html(self):
+        i = self.js.index("function table(header")
+        blk = self.js[i:i + 700]
+        self.assertIn("'html' in h", blk, "表头不认 {html:…} ⇒ 换行的表头渲染不出来")
+        self.assertIn("esc(h)", blk, "普通字符串还是得转义")
+
+    def test_表体的规矩没变(self):
+        """⚠ 2026-09-19：`cell()` 多了一个"单元格自带 class"的能力（达成率标色要用，
+        颜色得打在 `td` 上）—— 但**转义那条规矩没变**：字符串照样 `esc`。"""
+        i = self.js.index("function cell(")
+        blk = self.js[i:i + 500]
+        self.assertIn("raw ? c.html : esc(c)", blk, "字符串还是要转义")
+        self.assertIn("const k = (raw && c.cls) || cls;", blk, "自带 class 只认 {html:…} 那种")
+
+
+class Test静态文件取得到(unittest.TestCase):
+    """⚠⚠ 2026-09-19 用真金白银换的：我给静态文件加缓存头时多传了一个 kwarg
+    （`_send()` 没有 `extra` 参数）⇒ **每个 .js / .css 请求都 500** ⇒
+    浏览器拿不到前端，用户看到的是"改完了、刷新了、**还是老样子**"。
+
+    ⚠ 当时 `py_compile` 过得去、**全量测试也全绿** —— 因为没有任何一条测试
+      请求过静态文件。所以这一条补的就是那个洞：**交付链路本身要有测试**。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+
+    def tearDown(self):
+        self.srv.close()
+
+    def test_四个前端文件都取得到(self):
+        for name, least in (("index.html", 1000), ("app.js", 10000),
+                            ("style.css", 5000), ("theme.css", 1000)):
+            code, body = self.srv.request("GET", "/" + name)
+            with self.subTest(name=name):
+                self.assertEqual(code, 200, "%s 取不到（前端会停在旧的那份上）" % name)
+                self.assertGreaterEqual(len(body), least)
+
+    def test_不带缓存头的话前端会停在旧版本(self):
+        """⚠ 前端**没有构建步骤**，改完就是刷新一下 —— 所以静态文件不能缓存。"""
+        c = HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        c.request("GET", "/app.js")
+        r = c.getresponse()
+        hdr = r.getheader("Cache-Control") or ""
+        r.read()
+        c.close()
+        self.assertIn("no-store", hdr)
+
+
+class Test历史记录接口(unittest.TestCase):
+    """`/api/attain/history` —— 「历史记录」页读的就是它。
+
+    ⚠ 这一页**只读**：存档是"锁住"的那份，接口里**没有**写入口（唯一的写
+      发生在 `attain.run()` 里换周那一下）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        # ⚠ **别依赖开发机那个配置**：达成页 2026-09-21 起按**画像**过滤，
+        #   而开发机的 `config/store-*.yaml` 可能写着某家真店 ⇒ 过滤掉所有行。
+        #   这里钉成"平台岗"（看全区），测的才是这一页本身。
+        #   ⚠ **只打 `store_profile`**，别打 `load_raw` —— 后者被门禁读（登录/授权），
+        #     打成空配置会让请求先被门禁挡掉（400），测的就不是这一页了。
+        from src import config_io
+        #   ⚠ 画像要**给全**：门禁查 `needs_linglong`，缺键会被兜成
+        #     `参数不对：'needs_linglong'`（400）—— 那是 mock 不完整，不是产品问题。
+        pr = mock.patch.object(
+            config_io, "store_profile",
+            lambda *a, **k: {"erp_name": "平台岗", "huawei_code": "", "marker": "",
+                             "kind": "平台岗", "huawei_name": "", "in_roster": True,
+                             "platform": True, "show_all": True,
+                             "needs_linglong": False, "type": "platform"})
+        pr.start()
+        self.addCleanup(pr.stop)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def _archive(self, period, stores=1, total=0.5):
+        from src.features.sales.attain import attain as A
+        d = A.archive_dir(self.root)
+        d.mkdir(parents=True, exist_ok=True)
+        A.archive_path(self.root, period).write_text(json.dumps({
+            "exists": True, "period": period, "start": "2026-09-14", "end": "2026-09-20",
+            "locked_at": "2026-09-21 08:00:00", "columns": ["A"], "weights": [1.0],
+            "rows": [{"store": "甲%d" % i, "total": total, "targets": [2], "actuals": [1],
+                      "rates": [0.5], "people": []} for i in range(stores)],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def test_没存档时给空列表_不是报错(self):
+        code, body = self.srv.request("GET", "/api/attain/history")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["items"], [])
+
+    def test_列表带上周数和平均达成(self):
+        self._archive("2026-W38", stores=2, total=0.6)
+        self._archive("2026-W39", stores=4, total=0.4)
+        _, body = self.srv.request("GET", "/api/attain/history")
+        self.assertEqual([x["period"] for x in body["items"]], ["2026-W39", "2026-W38"])
+        self.assertEqual(body["items"][0]["stores"], 4)
+        self.assertAlmostEqual(body["items"][0]["avg"], 0.4)
+        self.assertTrue(body["items"][0]["locked_at"])
+
+    def test_按周取那一份_并标明是锁住的(self):
+        self._archive("2026-W38", stores=3)
+        _, body = self.srv.request("GET", "/api/attain/history?period=2026-W38")
+        self.assertTrue(body["exists"])
+        self.assertTrue(body["locked"], "历史是锁住的 —— 前端要能这么说")
+        self.assertEqual(len(body["rows"]), 3)
+
+    def test_取不存在的周给_exists_false(self):
+        code, body = self.srv.request("GET", "/api/attain/history?period=2026-W01")
+        self.assertEqual(code, 200)
+        self.assertFalse(body["exists"])
+
+    def test_历史这页只读_没有写入口(self):
+        """⚠ 存档就是"锁住"的那一份 —— 接口里**不能**有写入口。
+
+        唯一的写发生在 `attain.run()` 里换周那一下（`archive_rolled`）。
+        这里给个 PUT/POST 的话，"锁住"就不成立了，而复盘引用的正是它。
+        """
+        for method in ("POST", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                code, _ = self.srv.request(method, "/api/attain/history",
+                                           {"period": "2026-W38"})
+                self.assertNotEqual(code, 200, "%s 竟然被受理了" % method)
+
+
+class Test定时器的那一屏(unittest.TestCase):
+    """用户 2026-09-20：「加一个**定时器执行日志**，记录什么时间唤醒了什么，成功了没。
+    然后定时器设置页面**最上面大字**写着**下一次执行的是啥，什么时间**。
+    **右下角的控制板也加上这个**」。
+
+    三个落点，各测一条：
+
+    | 落点 | 数据 |
+    |---|---|
+    | 定时器页顶上那行大字 | `/api/timer` 的 `next_run` |
+    | 执行日志那张表 | `/api/timer` 的 `history` |
+    | 右下角「本机状态」 | `/api/status` 的 `上次自动跑`（⚠ **"下次"那一行 2026-09-21 删了**，见下）|
+
+    ⚠ 2026-09-21 用户：「**这个悬浮窗就别显示下次时间了**」—— 悬浮窗是"读一眼状态"
+      的地方，"下一次什么时候跑"只留在「定时器设置」页（那行大字，还能点进去改）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        db = self.root / "out" / "cbg-2026.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+        conn.close()
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_接口给下一次和日志(self):
+        code, body = self.srv.request("GET", "/api/timer")
+        self.assertEqual(code, 200)
+        nxt = body["next_run"]
+        self.assertTrue(nxt["at"], "得说清下一次什么时候")
+        self.assertTrue(nxt["label"], "还得说清跑什么")
+        # ⚠ 2026-09-21 起「下一次」= **每天干活那趟**（自动更新不进前端了，见
+        #   `Test自动更新不进前端`）—— 所以白天问也是五步那一批，不是 :17。
+        self.assertNotIn("autoupdate", nxt["cmds"], "「下一次」是每天那趟，不含内部步骤")
+        self.assertIn("dump", nxt["cmds"])
+        self.assertEqual(body["history"], [], "还没跑过 ⇒ 空列表，不是报错")
+
+    def test_顶上那行按实际排的时间算_不按default筛(self):
+        """⚠⚠ 2026-09-21 用户：「我把**数据交换改到 21:00**，**这个位置不加上啊**，
+        要注意以后这个地方」。
+
+        `上报数据` / `收取门店上报` 是 `Step.default=False`（各有自己的时刻），
+        原来那行字按 `default=True` 筛 ⇒ 用户把它们调到 21:00 之后，
+        **那一刻真会跑**，可这行字照样不列它们。
+        ⇒ 判据改成"是不是**内部步骤**"（只排自动更新那种每小时跑的）。
+        """
+        from src.modules import timer
+        timer.set_whens(self.root, "report",
+                        [{"kind": "daily", "time": "21:00"}])
+        _, body = self.srv.request("GET", "/api/timer")
+        nxt = body["next_run"]
+        self.assertIn("上报数据", nxt["labels"], "调到同一刻了，这行字还是不带它")
+        # ⚠ `/api/timer` 走的是**真实时钟**（这一层没有注入口）⇒ "今天/明天"得按当前时间推：
+        #   21:00 一过，"下一个 21:00"就是明天 —— 写死"今天 21:00"的话**每天 21 点后必红**
+        #   （2026-09-21 21:42 跑三头就是这么红的，看着像代码坏了）。
+        now = datetime.datetime.now()
+        at = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        if at <= now:
+            at += datetime.timedelta(days=1)
+        expect = ("今天 " if at.date() == now.date() else "明天 ") + "21:00"
+        self.assertEqual(nxt["at_text"], expect)
+        # 再调回自己的 21:15 ⇒ 它不该再挤进 21:00 那一趟
+        timer.set_whens(self.root, "report",
+                        [{"kind": "daily", "time": "21:15"}])
+        _, body = self.srv.request("GET", "/api/timer")
+        self.assertNotIn("上报数据", body["next_run"]["labels"])
+        self.assertNotIn("自动更新", body["next_run"]["labels"],
+                         "内部步骤（每小时那趟）永远不许进这行字")
+
+    def test_跑过之后日志里有那一条(self):
+        runlog.record("wake", True, note="内置定时器：销售达成",
+                      detail={"slot": "2026-09-20 21:00", "steps": ["attain"],
+                              "exit_code": 0, "seconds": 3.5}, root=self.root)
+        _, body = self.srv.request("GET", "/api/timer")
+        one = body["history"][0]
+        self.assertEqual(one["slot"], "2026-09-20 21:00")
+        self.assertEqual(one["label"], "销售达成")
+        self.assertTrue(one["ok"])
+        self.assertEqual(one["seconds"], 3.5)
+
+    def test_控制板只留上次_不显示下次时间(self):
+        """⚠ 2026-09-21（用户：「**这个悬浮窗就别显示下次时间了**」）。
+
+        "下一次什么时候跑"挪回「定时器设置」页（那行大字还能点进去改）；
+        悬浮窗只留**发生过的事**（不会因为看的时间而变）。
+        """
+        runlog.record("wake", True, detail={"slot": "2026-09-20 21:00",
+                                            "steps": ["attain"]}, root=self.root)
+        _, body = self.srv.request("GET", "/api/status")
+        rows = {r["label"]: r for r in body["rows"]}
+        self.assertNotIn("下次自动跑", rows, "悬浮窗里又显示下次时间了")
+        self.assertIn("上次自动跑", rows)
+        self.assertIn("成功", rows["上次自动跑"]["value"])
+
+    def test_没跑过也有一行_不是崩(self):
+        _, body = self.srv.request("GET", "/api/status")
+        rows = {r["label"]: r for r in body["rows"]}
+        self.assertIn("上次自动跑", rows)
+        self.assertIn("还没跑过", rows["上次自动跑"]["value"])
+
+    def test_开关滑块走_PUT_enabled(self):
+        """⭐ 用户 2026-09-20：「开了就注册到定时器，不开就不注册」——
+        界面上那个滑块拨一下 = `PUT /api/timer {cmd, enabled}`。"""
+        code, body = self.srv.request("PUT", "/api/timer",
+                                      {"cmd": "pools", "enabled": False})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["enabled"])
+        self.assertIn("不再注册", body["message"])
+        # 关掉之后：任务表里它是关的、下一次里没有它
+        _, t = self.srv.request("GET", "/api/timer")
+        row = [x for x in t["tasks"] if x["cmd"] == "pools"][0]
+        self.assertFalse(row["enabled"])
+        self.assertNotIn("pools", t["next_run"]["cmds"])
+
+    def test_开关拨回去就恢复(self):
+        self.srv.request("PUT", "/api/timer", {"cmd": "pools", "enabled": False})
+        _, body = self.srv.request("PUT", "/api/timer",
+                                   {"cmd": "pools", "enabled": True})
+        self.assertTrue(body["enabled"])
+        self.assertIn("已注册到定时器", body["message"])
+        _, t = self.srv.request("GET", "/api/timer")
+        # ⚠ 别断言"下一次里有它"：白天最近的一趟通常是**每小时的自动更新**，
+        #   要看的是"它注册回来了"（开关是开的）。
+        row = [x for x in t["tasks"] if x["cmd"] == "pools"][0]
+        self.assertTrue(row["enabled"])
+
+    def test_只改时间点不带开关_别把开关掀了(self):
+        """⚠ `PUT` 一个入口两件事：只传 `whens` 时**不能**顺手把 `enabled` 也改了
+        （`whens` 缺省 = "恢复默认时间"，跟"关掉"是两回事）。"""
+        self.srv.request("PUT", "/api/timer", {"cmd": "pools", "enabled": False})
+        # ⚠ 后面的步骤不能早于数据抓取 ⇒ 先把抓取挪到 08:00（两个抓取一起同步）
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "dump",
+                          "whens": [{"kind": "daily", "time": "08:00"}]})
+        code, _ = self.srv.request("PUT", "/api/timer",
+                                   {"cmd": "pools",
+                                    "whens": [{"kind": "daily", "time": "08:15"}]})
+        self.assertEqual(code, 200)
+        _, t = self.srv.request("GET", "/api/timer")
+        row = [x for x in t["tasks"] if x["cmd"] == "pools"][0]
+        self.assertFalse(row["enabled"], "改时间把开关掀开了？")
+        self.assertEqual(row["when_text"], "每天 08:15")
+
+    def test_改时间的提示语只说这一步的下一趟(self):
+        """⚠⚠ 2026-09-21 用户（看着定时器页）：
+
+        「『**dump**』改成：每天 21:00（下一趟 **2026-09-21 15:17**）。
+         这个下一趟是自动更新的，**不要显示自动更新的**」
+
+        15:17 是**自动更新**那趟（每小时 :17 跑一次）—— 原来提示语里那个"下一趟"
+        是**全局**最近的一趟（`timer.next_at` / `next_run` 把所有步骤放一起取最小），
+        白天任何时候都是自动更新。⇒ 现在一律算**这一步自己的**下一次。
+        """
+        code, body = self.srv.request("PUT", "/api/timer",
+                                      {"cmd": "dump",
+                                       "whens": [{"kind": "daily", "time": "21:00"}]})
+        self.assertEqual(code, 200)
+        # ⚠ 提示语里**不带下次时间**了（那句就贴在行里，旁边那列写着下次，
+        #   重复一遍只会长到换行）——"下一次"当**数据**回：`next_at`。
+        self.assertNotIn(":17", body["message"], "又把自动更新那趟写进去了")
+        self.assertNotIn(":17", body["next_at"])
+        self.assertTrue(body["next_at"].endswith("21:00"), body["next_at"])
+        self.assertIn("21:00", body["message"])
+
+    def test_一个字没动就说没改动(self):
+        """⚠ 点「保存」但值没变时，说"改成…"本身就怪（用户：「单击保存会弹出来
+        一些奇怪的东西」）——该说"没改动"。"""
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "dump", "whens": [{"kind": "daily", "time": "08:15"}]})
+        _, body = self.srv.request("PUT", "/api/timer",
+                                   {"cmd": "dump",
+                                    "whens": [{"kind": "daily", "time": "08:15"}]})
+        self.assertFalse(body["changed"])
+        self.assertIn("没改动", body["message"])
+        self.assertNotIn("已保存", body["message"])
+
+    def test_点默认要说是恢复默认(self):
+        """⚠ 用户 2026-09-21：「默认不是恢复默认 21:00 时间嘛，怎么提示是
+        『attain』改成：**只手动跑**」——「默认」按钮发的是 `whens: []`，
+        那是"跟随模块声明的默认值"，不是"改成只手动跑"。"""
+        # 先把抓取挪早，否则 attain 08:30 会撞上「不能早于数据抓取」
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "dump",
+                          "whens": [{"kind": "daily", "time": "08:00"}]})
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "attain",
+                          "whens": [{"kind": "weekly", "weekdays": [1],
+                                     "time": "08:30"}]})
+        code, body = self.srv.request("PUT", "/api/timer",
+                                      {"cmd": "attain", "whens": []})
+        self.assertEqual(code, 200)
+        self.assertIn("恢复默认", body["message"])
+        self.assertIn("每天 21:00", body["message"])
+        self.assertNotIn("只手动跑", body["message"])
+        self.assertTrue(body["changed"], "从 08:30 改回默认 21:00，这是**真改了**")
+        _, t = self.srv.request("GET", "/api/timer")
+        row = [x for x in t["tasks"] if x["cmd"] == "attain"][0]
+        self.assertEqual(row["when_text"], "每天 21:00")
+        self.assertFalse(row["overridden"])
+
+    def test_关着的步骤要说它没在跑(self):
+        """⚠ 开关关着 ⇒ 它现在**根本不会跑**。这时候只说"已保存"会让人以为到点会跑。"""
+        self.srv.request("PUT", "/api/timer", {"cmd": "pools", "enabled": False})
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "dump",
+                          "whens": [{"kind": "daily", "time": "08:00"}]})
+        code, body = self.srv.request("PUT", "/api/timer",
+                                      {"cmd": "pools",
+                                       "whens": [{"kind": "daily", "time": "08:15"}]})
+        self.assertEqual(code, 200, body.get("error") or body.get("message"))
+        self.assertIn("没在跑", body["message"])
+        self.assertEqual(body["next_at"], "")
+
+    def test_调顺序走_PUT_order(self):
+        """⭐ 2026-09-21 用户：「相同时间执行的任务，**按照定时器这个列表从上到下执行**，
+        然后定时器列表给个调顺序的功能」。
+
+        界面把**整张表的顺序**发过来（不是"把某一步上移一格"）——
+        后端不用猜"现在什么顺序"，也不会因为两次点击之间别人改过而错位。
+        ⭐ 2026-09-23：两个抓取**钉回最前**（界面怎么排都一样）。
+        """
+        order = ["attain", "pos", "dump", "erp-dump", "film", "benefit", "pools",
+                 "report", "report-inbox", "plan"]
+        code, body = self.srv.request("PUT", "/api/timer", {"order": order})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertIn("执行顺序已更新", body["message"])
+        want = ["dump", "erp-dump"] + [c for c in order
+                                       if c not in ("dump", "erp-dump")]
+        self.assertEqual([t["cmd"] for t in body["tasks"]], want)
+        # 重新读一遍也是这个顺序（真存下来了，不是只在这一次的返回里）
+        _, t = self.srv.request("GET", "/api/timer")
+        self.assertEqual([x["cmd"] for x in t["tasks"]], want)
+
+    def test_调顺序时时间和开关一个字都不动(self):
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "dump",
+                          "whens": [{"kind": "daily", "time": "08:00"}]})
+        self.srv.request("PUT", "/api/timer",
+                         {"cmd": "pos", "whens": [{"kind": "daily", "time": "08:15"}]})
+        self.srv.request("PUT", "/api/timer", {"cmd": "pools", "enabled": False})
+        self.srv.request("PUT", "/api/timer",
+                         {"order": ["attain", "dump", "erp-dump", "pos", "pools",
+                                    "report", "report-inbox"]})
+        _, t = self.srv.request("GET", "/api/timer")
+        rows = {x["cmd"]: x for x in t["tasks"]}
+        self.assertEqual(rows["pos"]["when_text"], "每天 08:15")
+        self.assertFalse(rows["pools"]["enabled"])
+        self.assertEqual(rows["dump"]["when_text"], "每天 08:00")
+        self.assertEqual(rows["erp-dump"]["when_text"], "每天 08:00")
+
+    def test_顺序名单里认不出来的步骤要_400(self):
+        """⚠ 落回的后果是"界面调了顺序、实际按老顺序跑"（界面说一套、跑另一套）。"""
+        code, body = self.srv.request("PUT", "/api/timer",
+                                      {"order": ["dump", "没有这一步"]})
+        self.assertEqual(code, 400)
+        self.assertIn("没有这一步", body["error"])
+
+    def test_两样都不给就_400(self):
+        code, body = self.srv.request("PUT", "/api/timer", {"cmd": "pools"})
+        self.assertEqual(code, 400)
+        self.assertIn("enabled", body["error"])
+
+
+class Test刷新按钮会先抓新数据(unittest.TestCase):
+    """⭐ 用户 2026-09-20：「周度重点的刷新按钮，还有 pos 合规和报量查询的刷新按钮
+    **需要单独调用一次抓取新数据**」。
+
+    ⚠ 原来那三个「刷新」只是**重读**已经算好的落盘 —— 想看新数据得自己跑去别处
+      （或者等定时任务）先抓一遍，界面上完全看不出来这件事。
+    ⇒ 现在它们 = **抓新数据 + 重新读这一页**（起后台任务，跟手动「跑一次」同一条路）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_三页各要哪几步(self):
+        """⚠ 一个都不能少、也一个都不能多 —— 各页读的是不同的数据源：
+        达成读云商销售明细 / POS 读玲珑单据 / 双平台两边都要。"""
+        self.assertEqual(web.REFRESH_STEPS["attain"], ("erp-dump", "attain"))
+        self.assertEqual(web.REFRESH_STEPS["pos"], ("dump", "pos"))
+        self.assertEqual(web.REFRESH_STEPS["pools"], ("dump", "erp-dump", "pools"))
+        for page, steps in web.REFRESH_STEPS.items():
+            with self.subTest(page=page):
+                for s in steps:
+                    self.assertIn(s, run_daily.STEPS, "步骤名写错了：%s" % s)
+
+    def test_起的是后台任务_不是同步等(self):
+        """⚠ 抓数要一两分钟 —— 挂在 HTTP 请求里只会让页面转圈、还看不出卡在哪。"""
+        with mock.patch.object(web.manager, "start_steps") as m:
+            m.return_value = mock.Mock(snapshot=lambda _n: {"id": "abc", "running": True})
+            code, body = self.srv.request("POST", "/api/refresh", {"page": "pos"})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(m.call_count, 1)
+        _, args, kwargs = m.mock_calls[0]
+        self.assertEqual(args[2], ("dump", "pos"))
+
+    def test_命令是_steps_不是_skip(self):
+        """⚠ 必须用 `--steps`（**就这几步**）：用 `--skip-*` 的话会被
+        `ALWAYS_STEPS`（dump/attain）补回来，于是"只抓云商 + 算达成"会变成整批都跑，
+        而界面上写着"正在抓新数据"。"""
+        m = runner.RunManager()
+        with mock.patch.object(runner.subprocess, "Popen") as popen:
+            popen.return_value.stdout = iter([])
+            popen.return_value.wait.return_value = 0
+            job = m.start_steps(self.root, "c.yaml", ("erp-dump", "attain"))
+        cmd = " ".join(job.argv)
+        self.assertIn("--steps erp-dump,attain", cmd)
+        self.assertNotIn("--skip-", cmd)
+        self.assertEqual(job.what, "refresh")
+
+    def test_已经在跑就_409_并说人话(self):
+        with mock.patch.object(web.manager, "current", return_value=object()):
+            code, body = self.srv.request("POST", "/api/refresh", {"page": "attain"})
+        self.assertEqual(code, 409)
+        self.assertFalse(body["ok"])
+        self.assertIn("一趟在跑", body["error"])
+
+    def test_不认识的页面_400(self):
+        code, body = self.srv.request("POST", "/api/refresh", {"page": "没有这页"})
+        self.assertEqual(code, 400)
+        self.assertIn("不认识的页面", body["error"])
+
+    def test_半小时内拉过就跳过抓取步(self):
+        """⭐ 2026-09-22 用户：「手动拉取时半个小时内不重复拉取云商和玲珑」。
+
+        跳过的只是**抓库**那几步；算的那几步（attain/plan/film）照跑。
+        ⚠ 定时器**不过这道闸** —— 闸只装在 `/api/refresh`（手动）上。
+        """
+        with mock.patch.object(web, "_cool_skip",
+                               return_value=(("attain",), ("erp-dump",))), \
+                mock.patch.object(web.manager, "start_steps") as m:
+            m.return_value = mock.Mock(snapshot=lambda _n: {"id": "x", "running": True})
+            code, body = self.srv.request("POST", "/api/refresh", {"page": "attain"})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["skipped"], ["erp-dump"])
+        self.assertEqual(body["steps"], ["attain"])
+        self.assertIn("跳过", body["message"])
+        self.assertEqual(m.call_args[0][2], ("attain",))
+
+    def test_全被冷却挡住时不硬跑(self):
+        with mock.patch.object(web, "_cool_skip",
+                               return_value=((), ("erp-dump",))), \
+                mock.patch.object(web.manager, "start_steps") as m:
+            code, body = self.srv.request("POST", "/api/refresh", {"page": "film"})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(m.call_count, 0, "只该重读，不该再起抓取")
+        self.assertIn("不用再抓", body["message"])
+
+    def test_冷却只认成功的那次(self):
+        """拉失败了**不算**「刚拉过」—— 失败当然该再拉。"""
+        from src.app import data_state as ds
+        db = self.root / "out" / "cbg-2026.db"
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        try:
+            ds.ensure_attempt_table(conn)
+            ds.record_attempt(conn, "erp-sales", False, why="超时")
+            self.assertFalse(ds.fetched_within(self.root, ("erp-sales",), 30))
+            ds.record_attempt(conn, "erp-sales", True, rows=1)
+            self.assertTrue(ds.fetched_within(self.root, ("erp-sales",), 30))
+        finally:
+            conn.close()
+
+
+class Test自动更新不进前端(unittest.TestCase):
+    """⭐ 用户 2026-09-21：「自动更新**不进入计时器前端显示，前端日志也不显示**」。
+
+    自动更新每小时跑一趟 ⇒ 摆在任务表里既占地方、又关不掉（`required`），
+    日志里更会把真活淹掉（实测一晚上攒了 8 条"已经是最新版"，
+    而对账那趟只有 1 条）。
+
+    ⚠ 它**照样记进 runlog**（排查要用）—— 这条也一起钉住：
+      "不显示" ≠ "不记录"。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        # ⚠ **得有库**：`runlog.record()` 在没库时是**静默不写**的
+        #   （`Test定时器的那一屏` 那儿的注释写过）。不建库的话这些断言
+        #   全成了"记录本来就没有"，测的是空气。
+        db = self.root / "out" / "cbg-2026.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+        conn.close()
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def _wake(self, slot, steps, ok=True):
+        runlog.record("wake", ok, detail={"slot": slot, "steps": steps}, root=self.root)
+
+    def test_任务表里没有它(self):
+        _, body = self.srv.request("GET", "/api/timer")
+        cmds = [t["cmd"] for t in body["tasks"]]
+        self.assertNotIn("autoupdate", cmds)
+        # ⚠ 只断言"这几步都在、`autoupdate` 不在"，**不写死全部**
+        #   （注册表里加一步就红的测试，守的不是这件事）
+        self.assertNotIn("autoupdate", cmds)
+        for want in ("dump", "erp-dump", "pos", "pools", "attain"):
+            self.assertIn(want, cmds)
+
+    def test_下一次是每天那趟_不是每小时的更新(self):
+        _, body = self.srv.request("GET", "/api/timer")
+        self.assertNotIn("autoupdate", body["next_run"]["cmds"])
+        self.assertIn("dump", body["next_run"]["cmds"])
+
+    def test_执行日志里没有它(self):
+        self._wake("2026-09-20 21:00", ["dump", "attain"])
+        for hh in range(3):                     # 三趟自动更新
+            self._wake("2026-09-21 0%d:17" % hh, ["autoupdate"])
+        _, body = self.srv.request("GET", "/api/timer")
+        labels = [w["label"] for w in body["history"]]
+        self.assertEqual(len(labels), 1, "只该剩那趟真活")
+        self.assertNotIn("自动更新", labels)
+
+    def test_但_runlog_里照样记着(self):
+        """⚠ 「不显示」≠「不记录」—— 排查时要能查到它到底跑没跑。"""
+        self._wake("2026-09-21 05:17", ["autoupdate"])
+        rows = runlog.recent(self.root, limit=5, kind="wake")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0].get("detail") or {}).get("steps"), ["autoupdate"])
+
+    def test_控制板那行也跳过它(self):
+        """⚠ 悬浮窗里剩下的那一行（「上次自动跑」）也要跳过"只有自动更新"的那几趟 ——
+        每小时一趟会把真活淹掉（那正是当初加这条过滤的原因）。"""
+        self._wake("2026-09-20 21:00", ["dump", "attain"])
+        self._wake("2026-09-21 05:17", ["autoupdate"])
+        _, body = self.srv.request("GET", "/api/status")
+        rows = {r["label"]: r["value"] for r in body["rows"]}
+        self.assertIn("抓取玲珑数据", rows["上次自动跑"])
+        self.assertNotIn("自动更新", rows["上次自动跑"])
+
+
+class Test运行日志跳过内部步骤(unittest.TestCase):
+    """抽屉里的「运行日志」不该被自动更新顶掉（它每小时一趟）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_认得内部步骤(self):
+        from src import runner as R
+
+        class J:
+            def __init__(self, argv):
+                self.argv = argv
+        auto = J(["python", "-m", "src.cli", "daily", "--steps", "autoupdate"])
+        self.assertTrue(R.is_internal_job(auto))
+        normal = J(["python", "-m", "src.cli", "daily", "--steps", "dump,attain"])
+        self.assertFalse(R.is_internal_job(normal))
+        both = J(["python", "-m", "src.cli", "daily", "--steps", "autoupdate,attain"])
+        self.assertFalse(R.is_internal_job(both), "掺了真活就不是内部任务")
+        self.assertFalse(R.is_internal_job(J(["python", "-m", "src.cli", "daily"])),
+                         "没有 --steps 不算")
+
+    def test_最近一趟跳过它(self):
+        from src import runner as R
+        m = R.RunManager()
+        def add(job_id, steps):
+            job = R.RunJob(job_id, ["python", "-m", "src.cli", "daily",
+                                    "--steps", steps], str(self.root))
+            m.jobs[job.id] = job
+            m.order.append(job.id)
+
+        add("j0", "autoupdate")
+        add("j1", "dump,attain")
+        self.assertEqual(m.latest().id, "j1")
+        # 再来一趟自动更新（最新的），"给人看的"那条仍然是对账那趟
+        add("j2", "autoupdate")
+        self.assertEqual(m.latest().id, "j2")
+        self.assertEqual(m.latest_visible().id, "j1", "抽屉要显示真活那趟")
+
+
+class Test数据告警的收起来(unittest.TestCase):
+    """`POST /api/data-state/dismiss` —— 只关**当前这一条**。
+
+    ⚠ 指纹写 `.secrets/ui-dismissed.json`（这台机器自己的界面状态）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_关掉之后就藏起来(self):
+        _, ov = self.srv.request("GET", "/api/overview")
+        fp = ov["data_state"]["fingerprint"]
+        if not fp:                       # 这台机器数据全好 ⇒ 没什么可关的
+            self.skipTest("这份 fixture 里没有要关的告警")
+        self.assertFalse(ov["data_state"]["dismissed"])
+        code, body = self.srv.request("POST", "/api/data-state/dismiss")
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertIn("再出新的", body["message"])
+        _, ov2 = self.srv.request("GET", "/api/overview")
+        self.assertTrue(ov2["data_state"]["dismissed"])
+
+    def test_指纹变了就重新露出来(self):
+        """⚠ "关掉"必须**只关这一条** —— 否则就是把告警永久关掉了。"""
+        from src.app import data_state as DS
+        app = self.srv.app if hasattr(self.srv, "app") else None
+        # 直接测文件那一层：写一个**别的**指纹进去 ⇒ 当前这条不算被关
+        p = self.root / ".secrets" / "ui-dismissed.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"data_state": "failed|别的源|failed|2020-01-01 00:00:00"}',
+                     encoding="utf-8")
+        _, ov = self.srv.request("GET", "/api/overview")
+        self.assertFalse(ov["data_state"]["dismissed"], "指纹不一样就该露出来")
+
+
+class Test达成页按登录身份过滤(unittest.TestCase):
+    """⭐ 用户 2026-09-21 报的 bug：「我登录了个门店的账号，他的**周度重点达成情况
+    显示的是全部的**，不是他们店的」。
+
+    根因：落盘那份 `out/attain-<年>.json` 是**算的时候**按当时的门店过滤的，
+    而页面读的是**别人（或上一次）**算好的那一份 ⇒ 门店账号下看到全区。
+    ⇒ 读的时候**再按当前画像过一遍**（`show_all` 的平台岗照旧看全部）。
+    """
+
+    ROWS = [{"store": "青岛城阳万象汇店", "erp_name": "青岛城阳万象汇店"},
+            {"store": "城阳大润发店", "erp_name": "城阳大润发店"}]
+
+    def _app(self, profile):
+        from src import web as W
+        app = W.App(root=".", config="x.yaml")
+        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
+             mock.patch.object(W.config_io, "store_profile", lambda *a, **k: profile):
+            return app
+
+    def test_门店账号只看自己那一行(self):
+        from src import web as W
+        app = self._app({"show_all": False, "erp_name": "城阳大润发店"})
+        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
+             mock.patch.object(W.config_io, "store_profile",
+                               lambda *a, **k: {"show_all": False,
+                                                "erp_name": "城阳大润发店"}):
+            d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
+        self.assertEqual([r["store"] for r in d["rows"]], ["城阳大润发店"])
+        self.assertEqual(d["store_filter"], "城阳大润发店")
+
+    def test_平台岗照旧看全部(self):
+        from src import web as W
+        app = self._app({"show_all": True, "erp_name": "平台岗"})
+        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
+             mock.patch.object(W.config_io, "store_profile",
+                               lambda *a, **k: {"show_all": True, "erp_name": "平台岗"}):
+            d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
+        self.assertEqual(len(d["rows"]), 2)
+        self.assertEqual(d["store_filter"], "")
+
+    def test_过滤完没剩_要说清而不是空白(self):
+        """⚠ "看着很合理的空"最坑 —— 得说清是"这份数据里没有本店"。"""
+        from src import web as W
+        app = self._app({"show_all": False, "erp_name": "别的店"})
+        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
+             mock.patch.object(W.config_io, "store_profile",
+                               lambda *a, **k: {"show_all": False, "erp_name": "别的店"}):
+            d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
+        self.assertEqual(d["rows"], [])
+        self.assertIn("没有「别的店」那一行", d["error"])
+
+
+class Test展开门店时列全部在职人员(unittest.TestCase):
+    """⭐ 用户 2026-09-21：「点开门店名称时下面的人员名单应该是**门店在职全部的**，
+    不是谁有数据才显示谁」。
+
+    ⚠ 原来那份名单是"这周卖过东西的人"推出来的 ⇒ **没开单的人根本分不了目标**。
+    ⇒ 后端自己补：`store.staff.rosters_by_store()`（组织架构树 + 240 个账号按机构归堆，
+      两次调用拿全区、缓存 12 小时）。前端那条 `roster=` 参数仍然认，但不再依赖它。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        # ⚠ 达成那一份现在按**画像**过滤（门店账号只看本店）——
+        #   测试里钉成"平台岗"，否则请求会被滤成"这份数据里没有这家店"。
+        from src import config_io
+        pr = mock.patch.object(
+            config_io, "store_profile",
+            lambda *a, **k: {"erp_name": "平台岗", "huawei_code": "", "marker": "",
+                             "kind": "平台岗", "huawei_name": "", "in_roster": True,
+                             "platform": True, "show_all": True,
+                             "needs_linglong": False, "type": "platform"})
+        pr.start()
+        self.addCleanup(pr.stop)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_在册名单由后端补上(self):
+        import json as _json
+        from src.features.sales.attain import attain as A
+        # 造一份达成数据：这家店这周**只有一个人**有数据
+        (self.root / "out" / "attain-2026.json").write_text(_json.dumps({
+            "exists": True, "period": "2026-W38", "start": "2026-09-14", "end": "2026-09-20",
+            "columns": ["X"], "weights": [1.0], "data_until": "2026-09-20",
+            "rows": [{"store": "甲店", "erp_name": "甲店", "matched": True,
+                      "targets": [2], "actuals": [1], "rates": [0.5], "total": 0.5,
+                      "people": [[["张三", 1, ["X"]]]]}]}, ensure_ascii=False),
+            encoding="utf-8")
+        with mock.patch("src.features.store.staff.rosters_by_store",
+                        lambda *a, **k: {"甲店": ["张三", "李四", "王五"]}):
+            # ⚠ 中文要 URL 编码：`http.client` 的请求行只收 ASCII
+            code, d = self.srv.request(
+                "GET", "/api/attain/split?store=%E7%94%B2%E5%BA%97&period=2026-W38")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["roster_source"], "erp")
+        self.assertEqual([m["name"] for m in d["members"]], ["张三", "李四", "王五"],
+                         "没开单的人也要在名单里（不然没法给他分目标）")
+
+    def test_读不到在册名单时不炸_但说清(self):
+        import json as _json
+        (self.root / "out" / "attain-2026.json").write_text(_json.dumps({
+            "exists": True, "period": "2026-W38", "start": "2026-09-14", "end": "2026-09-20",
+            "columns": ["X"], "weights": [1.0], "data_until": "2026-09-20",
+            "rows": [{"store": "甲店", "erp_name": "甲店", "matched": True,
+                      "targets": [2], "actuals": [1], "rates": [0.5], "total": 0.5,
+                      "people": [[["张三", 1, ["X"]]]]}]}, ensure_ascii=False),
+            encoding="utf-8")
+        with mock.patch("src.features.store.staff.rosters_by_store",
+                        side_effect=RuntimeError("云商连不上")):
+            # ⚠ 中文要 URL 编码：`http.client` 的请求行只收 ASCII
+            code, d = self.srv.request(
+                "GET", "/api/attain/split?store=%E7%94%B2%E5%BA%97&period=2026-W38")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["roster_source"], "none")
+        self.assertIn("云商连不上", d["roster_error"])
+        self.assertEqual([m["name"] for m in d["members"]], ["张三"], "至少还有有数据的人")
+
+
+class Test壁纸接口(unittest.TestCase):
+    """GET/POST/DELETE /api/wallpaper —— **只管文件**；选中态在浏览器，不在这儿。
+
+    ⚠ 不提供 /api/theme（执行规范 7.2）：主题切换仍是前端 localStorage。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def _raw(self, method, path, data: bytes, ctype="image/png"):
+        from http.client import HTTPConnection
+        c = HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        c.request(method, path, body=data, headers={"Content-Type": ctype})
+        r = c.getresponse()
+        raw = r.read().decode("utf-8")
+        c.close()
+        try:
+            return r.status, json.loads(raw)
+        except ValueError:
+            return r.status, raw
+
+    def test_get_list_empty_then_after_upload(self):
+        code, d = self.srv.request("GET", "/api/wallpaper")
+        self.assertEqual(code, 200)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["items"], [])
+        self.assertEqual(set(d["exts"]), {".png", ".jpg", ".jpeg", ".webp", ".gif"})
+
+        code, d = self._raw("POST", "/api/wallpaper?name=%E5%BA%97%E5%BA%86.png",
+                            b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d["name"], "店庆.png")
+        self.assertTrue((self.root / "web" / "wallpaper" / "店庆.png").is_file())
+
+        code, d = self.srv.request("GET", "/api/wallpaper")
+        self.assertEqual(code, 200)
+        self.assertEqual([w["name"] for w in d["items"]], ["店庆.png"])
+
+    def test_post_rejects_bad_extension_and_traversal(self):
+        for name in ("x.svg", "x.exe", "noext", "..%2F..%2Fevil.png"):
+            with self.subTest(name=name):
+                code, d = self._raw("POST", "/api/wallpaper?name=" + name, b"xx")
+                self.assertEqual(code, 400, d)
+                self.assertIn("error", d)
+        # 没写进 web 外
+        self.assertFalse((self.root / "evil.png").exists())
+        self.assertFalse((self.root / "web" / "evil.png").exists())
+
+    def test_post_rejects_empty_and_oversize(self):
+        code, d = self._raw("POST", "/api/wallpaper?name=a.png", b"")
+        self.assertEqual(code, 400, d)
+        code, d = self._raw("POST", "/api/wallpaper?name=a.png",
+                            b"x" * (5 * 1024 * 1024 + 1))
+        self.assertEqual(code, 400, d)
+
+    def test_delete_roundtrip(self):
+        self._raw("POST", "/api/wallpaper?name=a.png", b"png")
+        code, d = self.srv.request("DELETE", "/api/wallpaper?name=a.png")
+        self.assertEqual(code, 200, d)
+        self.assertTrue(d["ok"])
+        self.assertFalse((self.root / "web" / "wallpaper" / "a.png").exists())
+        code, d = self.srv.request("DELETE", "/api/wallpaper?name=a.png")
+        self.assertEqual(code, 404)
+        self.assertFalse(d["ok"])
+        self.assertIn("error", d)
+
+    def test_不提供_theme_接口(self):
+        """主题切换不许有后端接口 —— 有就多一处要和 localStorage 对账的状态。"""
+        code, _d = self.srv.request("GET", "/api/theme")
+        self.assertEqual(code, 404)
+        code, _d = self.srv.request("POST", "/api/theme", {"name": "dark"})
+        self.assertEqual(code, 404)
+        # 路由源码里也不该出现这个 path 分支
+        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        self.assertNotIn('path == "/api/theme"', src)

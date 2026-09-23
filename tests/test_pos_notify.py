@@ -16,7 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src import mailer, pos_report as pr, wecom
+from src import mailer, wecom
+from src.features.compliance.pos import pos_report as pr
 
 ROWS = [
     {"month": "2026-07", "provisional": False,
@@ -123,19 +124,19 @@ class TestPosPushDoesNotMention(unittest.TestCase):
 
 
 class TestShouldSendIgnoresWhenForPos(unittest.TestCase):
-    """⚠ POS 没有"差异"这个概念，「只有差异才推」是给报量排查的。"""
+    """⚠ 2026-09-22 设置改版：发送时机已去掉 —— `when` / `has_diff` 都不再看。"""
 
-    def test_配了只有差异才推_POS_照样发(self):
+    def test_when_and_diff_ignored(self):
         wc = _wc(when="only_diff")
         ok, why = wecom.should_send(wc, has_diff=False)
-        self.assertFalse(ok, "报量排查那边无差异就该跳过")
+        self.assertTrue(ok, "配了路径就推：" + why)
         ok2, _ = wecom.should_send(wc, has_diff=False, ignore_when=True)
-        self.assertTrue(ok2, "POS 不受这个开关约束")
+        self.assertTrue(ok2, "签名里的 ignore_when 仍收")
 
-    def test_没开推送_POS_也不发(self):
+    def test_没配路径_POS_也不发(self):
         ok, why = wecom.should_send(_wc(enabled=False), has_diff=False, ignore_when=True)
         self.assertFalse(ok)
-        self.assertIn("没开", why)
+        self.assertIn("没有企微推送路径", why)
 
     def test_配置不全_POS_也不发(self):
         ok, _ = wecom.should_send(_wc(webhook=""), has_diff=False, ignore_when=True)
@@ -151,9 +152,29 @@ class TestPosMail(unittest.TestCase):
         self.assertIn("44.73%", subj)
         self.assertNotIn("报量对账", mailer.POS_SUBJECT_PREFIX)
 
+    def test_没有官方字段时不许标成官方(self):
+        """⚠ 官方分数只有在 payload 里**真有** `official` 时才报。
+
+        回落成"我们那个数"再标上「官方」= **撒谎**（判据和显示不一致，
+        这个项目最忌讳的一类错）。老 fixture / 老 `pos-<年>.json` 走这条。
+        """
+        lines = pr.notify_lines(ROWS)
+        self.assertNotIn("官方", "".join(lines))
+
+    def test_有官方字段时两个口径都给(self):
+        rows = [dict(ROWS[1], official={"label": {"rate": 49.5, "rate_sum": 44.49},
+                                        "remark": {"rate": 49.6, "rate_sum": 44.6}})]
+        text = "".join(pr.notify_lines(rows))
+        self.assertIn("官方 49.50%", text)
+        self.assertIn("旧口径 44.73%", text)
+        self.assertEqual(pr.official_rate(rows[0]), 49.5)
+
     def test_正文含口径和暂定说明(self):
         _, body = mailer.build_pos_mail(_ctx(), pr.notify_lines(ROWS), pr.headline(ROWS))
-        self.assertIn("分母 = 非国补", body)
+        # ⚠ 2026-09-21 起正文口径说明换成了**官方那套**（PPT）
+        self.assertIn("先按天算再取日均值", body)
+        self.assertIn("不含退货", body)
+        self.assertIn("异常金额", body, "得说清这一项暂时没数据源")
         self.assertIn("退货", body)
         self.assertIn("暂定", body)
 

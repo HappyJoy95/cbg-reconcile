@@ -1,0 +1,68 @@
+/* 深色 —— 完整覆盖（含 rate 四档）
+   一主题一文件：本文件 = 这套主题的全部覆盖色值。
+   未覆盖的令牌从 `default.css`（:root）继承。
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 深色 */
+body[data-theme="dark"] {
+
+  --rate-red: #7a2f2f;
+  --rate-orange: #6b4a1f;
+  --rate-lg: #2f5229;
+  --rate-g: #245c33;
+
+  --bg: #0f172a;
+  --card: #1e293b;
+  --line: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --brand: #3b82f6;
+  --brand-dark: #2563eb;
+  --brand-2: #8b5cf6;
+  --on-brand: #ffffff;
+  --ok: #4ade80;
+  --ok-bg: #14532d;
+  --bad: #f87171;
+  --bad-bg: #7f1d1d;
+  --warn: #fbbf24;
+  --warn-bg: #78350f;
+  --idle: #94a3b8;
+  --idle-bg: #334155;
+  --on-ok: #bbf7d0;
+  --on-bad: #fecaca;
+  --on-warn: #fde68a;
+  --on-warn-strong: #fcd34d;
+  --info-bg: #1e293b;
+  --on-info: #cbd5e1;
+  --warn-line: #a16207;
+  --overlay: rgba(0, 0, 0, .6);
+  --ink: #020617;
+  --ink-2: #020617;
+  --ink-text: #cbd5e1;
+  --hover: #334155;
+  --field: #0f172a;
+  --code-bg: #334155;
+  --th-bg: #1a2333;
+  --row-alt: #172033;
+  --icon-muted: #94a3b8;
+  --brand-wash: rgba(59, 130, 246, .16);
+  --line-strong: #475569;
+  --focus-ring: #1d4ed8;
+  --text-2: #cbd5e1;
+  --film-lo: #4c1d1d;
+  --film-hi: #1e3a5f;
+  /* ⚠ 2026-09-22 用户：深色分区「共计」也是正红难受 —— 跟浅色一起从
+     #b91c1c 调柔到 #a84848（白字对比度仍 ~5.7）；别写回高饱和正红。 */
+  --film-sum: #a84848;
+  --on-film-sum: #ffffff;
+  --hot: #f87171;
+  --log-ok: #4ade80;
+  --log-bad: #fca5a5;
+  --log-dim: #64748b;
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, .45);
+  --shadow-float: 0 18px 46px rgba(0, 0, 0, .55);
+  --shadow-modal: 0 18px 48px rgba(0, 0, 0, .6);
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, .5);
+  --glow-fab: drop-shadow(0 5px 14px rgba(59, 130, 246, .45));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(59, 130, 246, .55));
+}

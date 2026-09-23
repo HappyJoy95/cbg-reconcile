@@ -62,6 +62,11 @@ NAME="cbg-reconcile"                              # 包内顶层目录用 ASCII 
 # 版本号从代码里读，别手写 —— 手写迟早跟 version.py 对不上
 VER="$(sed -n 's/^VERSION *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/version.py")"
 [ -n "${VER}" ] || { echo "读不出版本号（src/version.py）"; exit 1; }
+# 正式包：发版号 = 封包时刻 yy.mmdd.hhmmss（beta 仍用仓库里现有 VERSION）
+if [ "${BETA_N}" = "" ]; then
+  VER="$(date +%y.%m%d.%H%M%S)"
+  echo "==> 发版号（封包时间 yy.mmdd.hhmmss）：${VER}"
+fi
 DIST="${ROOT}/dist"
 
 # beta 自动编号：数一下 dist 里**同一个版本**已经打到 beta 几了，接着往下排。
@@ -94,14 +99,34 @@ STAGE="${STAGE_ROOT}/${NAME}"
 echo "==> 打包 ${ZIPNAME}"
 mkdir -p "${STAGE}" "${DIST}"
 
+# ------------------------------------------------- 工作区必须是干净的（2026-09-19）
+# ⚠ 为什么卡这一条：下面那句 `rsync -a "${ROOT}/"` 拷的是**工作区**，不是 HEAD。
+#   于是**未提交/未跟踪**的文件也会进包 —— 而门店走自更新的那条路拿的是
+#   GitHub 上的 zip（**没有**这些文件）。两者不一致的后果很具体：
+#   门店装了这种包、下一次自更新就被"清理旧文件"当成残留删掉（新版里没有它），
+#   等于发了一个**短命包**。
+#   "发布必须来自已提交状态"本来就是发版纪律，这里只是把它变成机器拦得住的。
+if command -v git >/dev/null 2>&1 && [ -d "${ROOT}/.git" ]; then
+  _dirty="$(git -C "${ROOT}" status --porcelain 2>/dev/null || true)"
+  if [ -n "${_dirty}" ]; then
+    echo "    ✗ 工作区不干净 —— 打出来的包会跟仓库里的不一致："
+    echo "${_dirty}" | sed 's/^/       /'
+    echo "    先 commit（或 stash）再打包；确要跳过就设 CBG_ALLOW_DIRTY=1。"
+    [ "${CBG_ALLOW_DIRTY:-}" = "1" ] || exit 1
+    echo "    （CBG_ALLOW_DIRTY=1，继续打包 —— 这份包**只能自己测**，别发门店）"
+  fi
+fi
+
 # ---------------------------------------------------------------- 复制源码
 rsync -a \
   --exclude '.secrets/' \
   --exclude '.dsh/' \
   --exclude 'config/store-*.yaml' \
   --exclude 'out/' \
+  --exclude 'in/' \
   --exclude 'dist/' \
   --exclude 'tools/' \
+  --exclude 'tests/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude '.pytest_cache/' \
@@ -115,8 +140,13 @@ rsync -a \
   --exclude 'README.md' \
   --exclude 'AGENTS.md' \
   --exclude 'agent.md' \
+  --exclude '设计文档.md' \
+  --exclude 'packaging/' \
   --exclude '运维手册.md' \
   "${ROOT}/" "${STAGE}/"
+# ⚠ `tests/` **不进门店包**（用户 2026-09-22 方案 2）：门店不跑 pytest；
+#   仓库 git 里保留测试。自更新 `_targets` 用 `SKIP_APPLY` 同步跳过 ——
+#   两条路径一致，避免"手工包干净、自更新又把 tests 铺回来"。
 # ⚠ `.dsh/` **必须排除** —— 它是工作区隔离区（记忆日志 / 备份 / 临时任务 /
 #   本机 venv），跟 `.secrets/` 一样是**这台电脑自己的东西**，进包毫无意义，
 #   而且里面写着踩坑记录和内部路径，发给门店既没用也不合适。
@@ -125,6 +155,62 @@ rsync -a \
 # ⚠ `update-debug.py` 不排除：自更新是"照仓库原样铺"，包里有、更新后也该有 ——
 #   不然同一个版本号会有两种内容（zip 装的没有、自更新的有）。
 #   它是更新失败时的现场诊断脚本，留着有用。
+
+# ------------------------------------------------- 中台邮箱（3.0.0 起）
+# 用户 2026-09-19：「能不能在 3.0.0 安装时把授权码给门店，然后后续仓库里就不带这个，
+# 以后一直默认？」⇒ 授权码**只在这里**从本机 `.secrets/mail.env` 读出来塞进包，
+# 仓库/git 里始终没有它。安装时 `bootstrap._seed_central_mail()` 会把它播进
+# 门店的 `.secrets/mail.env`（已有键不覆盖），自更新不会动 `.secrets/` ⇒ 一直有效。
+CENTRAL_SRC="${ROOT}/.secrets/mail.env"
+if grep -q '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" 2>/dev/null; then
+  grep '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" > "${STAGE}/central-mail.env"
+  echo "  · 已把中台邮箱授权码塞进包（之后门店一直默认用它）"
+else
+  if [ -n "${BETA_N}" ]; then
+    echo "  ! 本机 .secrets/mail.env 里没有中台授权码 —— beta 包先这样"
+  else
+    echo "  ✗ 正式包必须有中台邮箱授权码：在 .secrets/mail.env 里加一行"
+    echo "      MAIL_CENTRAL_PASSWORD=…"
+    echo "    （它是**安装时给门店**的，不在仓库里；漏了就整包不带，门店发不出邮件）"
+    exit 1
+  fi
+fi
+
+# ------------------------------------------------- 邮件附件加密密钥（3.0.0 起）
+# 用户 2026-09-21：「设计一个加密算法，**所有走邮件渠道的推送都用这个加密算法加密**。
+# 解密密钥**随着大版本的安装包走，不进入小版本推包**」
+# ⇒ 跟上面那个中台授权码是**同一条链**（照着抄的）：
+#   ① 只在这里从本机 `.secrets/mail-key.json` 读出来、塞进**包根** `mail-key.json`；
+#   ② 仓库 / git 里**始终没有**它 —— 仓库是**公开**的（自更新匿名读 api.github.com），
+#      进去一次，附件加密就当场归零；
+#   ③ 安装时 `bootstrap._seed_mail_key()` 把它**合并**进门店的 `.secrets/mail-key.json`；
+#   ④ `.secrets/` 在 `selfupdate.NEVER_TOUCH` 里 ⇒ **小版本推包（自更新）永远碰不到它**，
+#      这就是"不进小版本推包"的落地方式。
+#
+# ⚠ **反查断言（第一道）**：仓库根不许有 `mail-key.json`。
+#   它和下面那几本开发者文档一个待遇 —— `--exclude` / `.gitignore` 是一道，
+#   这儿反查是第二道。区别是文档进了包只是"没用"，密钥进了仓库是**加密作废**。
+if [ -e "${ROOT}/mail-key.json" ]; then
+  echo "  ✗ 仓库根出现了 mail-key.json —— 那是打包注入的产物，不该留在仓库里"
+  echo "    （.gitignore 已排掉它，但文件还在这儿；删掉再打）"
+  exit 1
+fi
+KEY_SRC="${ROOT}/.secrets/mail-key.json"
+if [ -f "${KEY_SRC}" ]; then
+  cp "${KEY_SRC}" "${STAGE}/mail-key.json"
+  _kid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("current","?"))' \
+          "${KEY_SRC}" 2>/dev/null || echo '?')"
+  echo "  · 已把邮件密钥塞进包（当前 ${_kid}）—— 门店装包时播进 .secrets/，之后一直用它"
+else
+  if [ -n "${BETA_N}" ]; then
+    echo "  ! 本机没有 .secrets/mail-key.json —— beta 包先这样（附件不会加密）"
+  else
+    echo "  ✗ 正式包必须带邮件密钥，否则门店发出去的附件全是明文。先生成一把："
+    echo "      python -m src.cli mail-key-new"
+    echo "    （只在**打包这台机器**上生成；它不进仓库、也不进小版本推包）"
+    exit 1
+  fi
+fi
 
 # ------------------------------------------------- 凭据 / 报告 / 门店配置
 # 这三样一个都不放进包（.secrets/ 、out/ 、config/store-*.yaml）。
@@ -155,6 +241,35 @@ pathlib.Path(dst).write_bytes(out)
 print(f"    [OK] {name}.bat（纯 ASCII，CRLF）")
 BATCONV
 done
+
+# ------------------------------------------------------------ 写入发版号
+# 包内 version.py 的 VERSION = 本次 VER；正式包再写回仓库（push 后门店才看得到）。
+if [ -f "${STAGE}/src/version.py" ]; then
+  python3 - "${STAGE}/src/version.py" "${VER}" <<'PYVER'
+import pathlib, re, sys
+path, ver = sys.argv[1], sys.argv[2]
+t = pathlib.Path(path).read_text(encoding="utf-8")
+pat = r'(VERSION\s*=\s*")[^"]+(")'
+t2, n = re.subn(pat, lambda m: m.group(1) + ver + m.group(2), t, count=1)
+if n != 1:
+    sys.exit("包内 version.py 改写 VERSION 失败")
+pathlib.Path(path).write_text(t2, encoding="utf-8")
+print("==> 包内 VERSION =", ver)
+PYVER
+fi
+if [ "${BETA_N}" = "" ] && [ -f "${ROOT}/src/version.py" ]; then
+  python3 - "${ROOT}/src/version.py" "${VER}" <<'PYVER'
+import pathlib, re, sys
+path, ver = sys.argv[1], sys.argv[2]
+t = pathlib.Path(path).read_text(encoding="utf-8")
+pat = r'(VERSION\s*=\s*")[^"]+(")'
+t2, n = re.subn(pat, lambda m: m.group(1) + ver + m.group(2), t, count=1)
+if n != 1:
+    sys.exit("仓库 version.py 改写 VERSION 失败")
+pathlib.Path(path).write_text(t2, encoding="utf-8")
+print("==> 仓库 VERSION =", ver, "（正式包已写回，commit + push 才算发版）")
+PYVER
+fi
 
 # ------------------------------------------------------------ 构建指纹
 # 门店电脑上跑的往往是拷过去的旧版本 —— 没有这个，没人知道对面是哪一版，
@@ -580,13 +695,42 @@ check_absent "${STAGE}/.secrets/cbg-SCN231409.json"
 check_absent "${STAGE}/.secrets/browser-profile"
 check_absent "${STAGE}/.secrets/curl.txt"
 check_absent "${STAGE}/.dsh"
-# 这三个目录是「这台电脑自己的东西」，进包 = 手工拷贝时冲掉门店设置
+check_absent "${STAGE}/tests"
+# ⚠ 开发期「数字怎么算的」逆推稿 / 源表文件名 **不进正式包**（用户 2026-09-22）：
+#   正式包只带运行时代码 + 门店手册；口径分析留在仓库 `.dsh/`（上面已整目录排除）。
+#   只查**增值口径逆推**相关禁词；别误伤其它模块里无害的 `.dsh/docs/…` 设计指针。
+if grep -R -I -n -E '汇机保数据统计|9月钢化膜数据目标|口径倒推|无忧会员权益-开发目标' \
+    "${STAGE}/src" "${STAGE}/web" "${STAGE}/config" 2>/dev/null \
+    | grep -v '开发逆推稿不进正式包' | head -20; then
+  echo "    ✗ 包内出现开发逆推/源表文件名文案（正式包不要带这些）"
+  fail=1
+fi
+for _junk_xlsx in "${STAGE}"/*汇机保* "${STAGE}"/src/**/*汇机保* \
+                   "${STAGE}"/*钢化膜数据目标*; do
+  [ -e "${_junk_xlsx}" ] || continue
+  echo "    ✗ 包内混进源表 Excel：${_junk_xlsx#${STAGE}/}"
+  fail=1
+done
+# 这几个目录是「这台电脑自己的东西」，进包 = 手工拷贝时冲掉门店设置
+# ⚠ `in/`（2026-09-21 晚加）= **收进来的**东西（各店发来的上报包 / 收信库）——
+#   跟 `out/` 一样，而且它里面是**别家店的业务数据**，更不该进包。
 check_absent "${STAGE}/.secrets"
 check_absent "${STAGE}/out"
+check_absent "${STAGE}/in"
 check_absent "${STAGE}/run.sh"
 check_absent "${STAGE}/dist"
 [ -f "${STAGE}/src/cli.py" ]      || { echo "    ✗ 缺 src/cli.py"; fail=1; }
 [ -f "${STAGE}/web/index.html" ]  || { echo "    ✗ 缺 web/index.html"; fail=1; }
+# ⚠ 库存盘点那一页（M16）**必须整份进包**：`web/inventory.html` 是壳，
+#   五个 js + 一个 css 在 `web/inventory/` 下 —— 少任何一个，
+#   门店点开「库存盘点」看到的是白板，而 Python 测试全绿。
+#   （它**不是构建产物**：没有 `build.mjs`，六个文件照原样发，见该页头部注释。）
+for _inv in inventory.html inventory/core.js inventory/api.js inventory/store.js \
+            inventory/xlsx.js inventory/ui.js inventory/style.css \
+            tools/price-tag/index.html tools/price-tag/js/app.js \
+            tools/price-tag/css/style.css; do
+  [ -f "${STAGE}/web/${_inv}" ] || { echo "    ✗ 缺 web/${_inv}（库存/小工具前端）"; fail=1; }
+done
 [ -f "${STAGE}/config/stores.yaml" ] || { echo "    ✗ 缺 config/stores.yaml"; fail=1; }
 # 门店配置模板**必须**在包里 —— 没有它，新机器装完就没有配置文件，程序起不来
 [ -f "${STAGE}/src/store-config.default.yaml" ] \

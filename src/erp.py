@@ -27,15 +27,44 @@ from pathlib import Path
 import requests
 
 from . import envfile
+from .paths import ROOT as _ROOT
 from .xlsx_io import read_rows
-
-_ROOT = Path(__file__).resolve().parent.parent
 
 API_BASE = "https://api.yserp.cc"
 REPORT_BASE = "https://apireport.yserp.cc"
 ERP_ORIGIN = "https://erp.yserp.cc"
 ERP_REFERER = "https://erp.yserp.cc/"
 DEFAULT_COMPANY = "00001937"
+
+#: **门店云商账号**的存放文件 —— 跟公司账号**完全分开，两边不互相回落**。
+#:
+#: 用户 2026-09-18（第二次提，这次目的明确）：「加个门店的登录设置吧，
+#: 主要是读取这个账号的门店信息。来匹配不同门店的设置，
+#: 当然公司云商账号也是加密保留的，门店云商账号可以不加密」。
+#:
+#: ⚠ 上午（同一个下午）曾经删过一次，理由是"没必要" —— 那时**没有用途**，
+#:   实测也证明取数上它没有任何优势（销售明细两边一模一样）。
+#:   现在有了用途：**认"这台机器是哪家店"**，见 `branch_self()`。
+#:
+#: ⚠ 明文存（不加密）：公司账号那对是内置混淆的（`_BUILTIN_*`），
+#:   门店账号按用户的话**不加密** —— 它就存在这台机器的 `.secrets/` 里，
+#:   那份文件自更新一根手指都不碰。
+STORE_ENV_FILE = ".secrets/erp-store.env"
+
+#: 组织架构树 —— ⚠ **唯一一个按账号收窄的接口**（2026-09-18 两个账号实测对比）：
+#:
+#: | 接口 | 公司账号 | 门店账号 |
+#: |---|---|---|
+#: | `api/branch/OrgTreeBranchList` 组织架构 | 平台 + **41 家店** | **只有自己那一家** |
+#: | `Api/Store/List` 仓库列表 | 50 个仓 | 50 个仓（**一模一样**） |
+#: | `Api/Branch/CompanyStore` 公司门店对照 | 45 条 | 45 条（**一模一样**） |
+#: | `sales_rows` 销售明细 | 42 家店 | 42 家店（**一模一样**） |
+#:
+#: 所以「这台机器是哪家店」**只能**从这个接口认。
+BRANCH_TREE_URL = f"{API_BASE}/api/branch/OrgTreeBranchList"
+
+#: 云商「用户」名单 —— 登录名 / 姓名 / 手机 / 所属机构 / 状态。
+USER_LIST_URL = f"{API_BASE}/Api/User/UserList"
 SALES_MAX_DAYS = 10
 # 单据类型：6,7=零售 / 666,667=零售退 / 3,4=分销 / 668,669=分销退 / 71,72=客情 / 10,95=其它
 DEFAULT_BILL_TYPES = "6,7,666,667,3,4,668,669,71,72,10,95"
@@ -47,7 +76,12 @@ SALES_COLUMNS = [
     ("CategoryName1", "一级分类", 8), ("CategoryName2", "二级分类", 9),
     ("CategoryName3", "三级分类", 10), ("CategoryName4", "四级分类", 10),
     ("Brand", "品牌", 11), ("Model", "型号", 12), ("Color", "颜色", 13),
-    ("Imei", "串号", 14), ("OldFlag", "串号标识", 5), ("BillDate", "支付时间", 15),
+    ("Imei", "串号", 14), ("OldFlag", "串号标识", 5),
+    # ⚠ 销售报表**能带出**串号2/3 表头（2026-09-23 实测 9/1~20 全空 ——
+    #   服务端对销售行不填副串号）。真 SN 在**库存**三列（imei/sub_imei/sub_imei1），
+    #   待领页走库存反查（`claim.compute`）。列仍请求：上游哪天填了就能进库。
+    ("Imei2", "串号2", 519), ("Imei3", "串号3", 520),
+    ("BillDate", "支付时间", 15),
     ("CreateDate", "制单时间", 155), ("ReceivingDate", "入库时间", 36),
     ("ProPrice", "单价", 16), ("ProCount", "数量", 17), ("SubTotal", "金额", 18),
     ("SubTotalCost", "财务成本", 19), ("SubTotalProfit", "财务毛利", 20),
@@ -100,6 +134,41 @@ INVENTORY_IMEI_EXCEL_COLUMNS = [
     (0, 0, "Left", 1, 0, "", "Status", "1", "状态", 80),
     (0, 0, "Left", 1, 0, "", "Description", "1", "备注", 100),
 ]
+
+#: 自定义库存表（`RptStoreNow`）的**维度列** —— `groupBy` 决定服务端返回哪些列。
+#:
+#: ⚠ 这份字符串是从 `Inventory Check/src/erp.js` 的 `GROUP_BY` 原样搬过来的
+#:   （那边线上跑了很久）。**别顺手改**：少一列**不报错**，只是那一列全空 ——
+#:   比如少了 `OldFlag`，"串号标识"整列变空，"只看样机/演示机"那个筛选就永远筛不出东西。
+STORE_NOW_GROUP_BY = ("Store,Category1,Category2,Category3,Brand,Model,ProName,OldFlag,"
+                      "Category4,Imei,Imei2,Imei3,ProId,SNCode,PriceLabel")
+
+#: `outCol` 只认这两列（写别的列名服务端报「列名无效」）。
+#: `ProCount` = 在库数量，`ProCount_OnTransfer` = **在途数量** ——
+#: 盘点页「在途待入库」那个页签全靠后一列，少了它整页是空的（且不报错）。
+STORE_NOW_OUT_COLS = "ProCount,ProCount_OnTransfer"
+
+#: 盘点账面的接口。本项目走**表单式**（`ErpClient.call()` 的既有风格）。
+#:
+#: ⚠⚠ **"这个端点不认 JSON"是个假结论，别照着它写代码**（2026-09-20 自己踩的）：
+#:   当时同一轮里先发 JSON 拿到 `ResponseID=1 未登录`，就记成"只认表单式"——
+#:   而那一发用的是**开头抓的旧 token**，同一轮的表单式那发其实刚触发过重登。
+#:   回头用**当下这个新 token** 只改 body 编码再 A/B 一次：
+#:   `表单式 ResponseID=0 / JSON 式 ResponseID=0`，**两种都行**。
+#:   ⇒ 教训跟 erp-api skill 坑 3b 是同一条：**限流期、token 过期期的报错不是接口规则**，
+#:     下结论前必须换个干净的时刻复现一次（`test_erp_store_now.py` 钉的是行为，不是这条）。
+STORE_NOW_URL = REPORT_BASE + "/api/supplier/RptStoreNow"
+
+#: 一次要多少行。前端用的就是 30000（一个仓的账面一次拿全）。
+#:
+#: ⚠ erp-api skill 里那句「PageSize 调大 → 服务端 NRE」说的是**另一条路径**
+#:   （`file.yserp.cc/api/export/ExportRptStoreNow`，那边默认 100）；
+#:   本路径 2026-09-20 实测 PageSize=3 正常。拿全拿不全由下面的行数自检兜住 ——
+#:   **不靠"页够大"这种假设**。
+STORE_NOW_PAGE = 30000
+
+#: 分页上限 —— 到了还没拉全就报错，别一直拉。
+STORE_NOW_MAX_PAGES = 40
 
 LEGACY_ENV_PATHS = [
     Path.cwd() / ".secrets" / "erp.env",
@@ -171,6 +240,37 @@ class ErpError(RuntimeError):
     pass
 
 
+# ⚠ **必须重试**（2026-09-21 用户报的）：`InventoryImei_Excel` 会撞
+#   `SSLEOFError: EOF occurred in violation of protocol` —— TLS 被间歇掐断，
+#   手动再试一次就好。`selfupdate._get` 早就是这个形状（走代理的网络同病）。
+#   不重试的话，整步 `daily` 会以「没预料到的错误」+ 退出码 9 收场，
+#   而那本该是可恢复的网络抖动（应用 `ErpError` → 退出码 2）。
+NET_TRIES = 3
+NET_BACKOFF = 1.5          # 秒；第 n 次失败后等 n * BACKOFF
+
+
+def _is_transient_net_error(exc):
+    """这一票网络错**值得原样重试**（连接被掐 / 超时），不是业务错误。"""
+    return isinstance(exc, (
+        requests.exceptions.SSLError,       # 含 SSLEOFError
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    ))
+
+
+class ErpIncomplete(ErpError):
+    """**拉不全** —— 响应结构不对 / 行数跟服务端自报的对不上 / 分页中途变卦。
+
+    用户 2026-09-20「页面找数据抓取模块抓取最新的库存」那一版加的。
+    单独一个异常类，是因为**它的处理方式跟别的错不一样**：
+    别的错可以重试，这一种**绝不能拿半份账面接着用** ——
+    盘点的账面少一半，扫到的机器会被判成「表外码」（窜货嫌疑），
+    那是把"接口少给了"变成了"门店的台账有问题"。所以宁可整步失败。
+
+    判据搬自 `Inventory Check/src/erp.js`（那边线上跑了很久，6 条全在）。
+    """
+
+
 class ErpCaptchaRequired(ErpError):
     """账号要图形验证码（ResponseID=2）。
 
@@ -208,6 +308,20 @@ def env_chain(extra_env_file: str | None = None) -> list[Path]:
 
 #: 老名字。`_role_chain` 随"两个账号"一起删了，这里留个别名免得外面还得改一轮。
 _env_chain = env_chain
+
+
+#: 服务端"这一段没有数据"的说法 —— 记住它，别当成错误（见 `is_empty_result`）。
+EMPTY_HINTS = ("暂无数据",)
+
+
+def is_empty_result(err) -> bool:
+    """这个云商报错是不是"**这一段没数据**"（而不是真出错）。
+
+    ⚠ 判据只在**这一个字符串**上，别扩大：真正的鉴权/限流错误是
+      `ResponseID=1 未登录` / 「登录超时」那种，那些**必须抛**（重登或等一会儿）。
+    """
+    msg = str(err or "")
+    return "ResponseID=2" in msg and any(h in msg for h in EMPTY_HINTS)
 
 
 def load_credentials(extra_env_file: str | None = None) -> dict:
@@ -311,6 +425,94 @@ def save_credentials(env_file: str | None = None, *, username=None, password=Non
     return envfile.update(resolve_env_path(env_file), updates)
 
 
+def _flatten_tree(node, out=None) -> list:
+    """把组织树摊平。`Data` 可能是 list，门店也可能嵌在 `Childs` 里。"""
+    if out is None:
+        out = []
+    if isinstance(node, list):
+        for x in node:
+            _flatten_tree(x, out)
+    elif isinstance(node, dict):
+        out.append(node)
+        _flatten_tree(node.get("Childs") or [], out)
+    return out
+
+
+def branch_nodes(data) -> list:
+    """从组织树里挑出**门店**节点 —— 判据是 `IsBranch == 1`。
+
+    ⚠ 判据是实测出来的（2026-09-18，两个账号各拉一次对比）：
+
+    * 公司账号：42 个节点 = 1 个 `IsBranch=0` 的容器「平台」（`Level=1`、
+      `StoreNum=null`、`PId=-1`）+ **41 个 `IsBranch=1` 的门店**（`Level=2`）；
+    * 门店账号：**1 个** `IsBranch=1`。
+
+    所以别用"摊平后只有一条"当判据 —— 容器节点也占一条，将来多一层机构就错。
+    """
+    return [n for n in _flatten_tree(data) if n.get("IsBranch")]
+
+
+# ------------------------------------------------------------ 门店云商账号
+def store_env_path(path=None) -> Path:
+    """门店账号文件在哪。
+
+    ⚠ 默认按**项目根**解析（生产环境里那正是安装目录，所以对）；
+      但 Web 那边手上是 `app.root`，测试里那是个临时目录 ——
+      不给它一个显式路径的话，**测试会去读开发机上那份真凭据**，
+      于是"没配的机器应该被门禁拦住"这类断言会莫名其妙地通过（实测踩到）。
+    """
+    return Path(path) if path else resolve_env_path(STORE_ENV_FILE)
+
+
+def load_store_credentials(path=None) -> dict:
+    """门店云商账号 —— **只用来认"这台机器是哪家店"**。
+
+    ⚠ 故意**没有回落链**：公司账号登进去能看到 41 家店，拿它"认本店"只会
+       读到一大堆、认不出是哪一家。有就是有，没有就是没有。
+    """
+    d = _parse_env_file(store_env_path(path))
+    return {
+        "token": d.get("ERP_TOKEN", ""),
+        "username": d.get("ERP_USERNAME", ""),
+        "password": d.get("ERP_PASSWORD", ""),
+        "company": d.get("ERP_COMPANY_CODE") or DEFAULT_COMPANY,
+    }
+
+
+def save_store_credentials(path=None, **kw) -> Path:
+    """写门店账号文件（定点替换、保留注释）。只传要改的字段。"""
+    updates = {}
+    #: `who` = 云商登录**这个人**的姓名（`UserInfo` 里的 Name/RealName…）。
+    #: ⚠ 2026-09-19 才落盘 —— 原来只在登录那一刻拿得到、用完就扔，
+    #:   于是左下角想显示"谁登的"就没数据了（用户：「也显示账号人员姓名吧」）。
+    for key, name in (("username", "ERP_USERNAME"), ("password", "ERP_PASSWORD"),
+                      ("company", "ERP_COMPANY_CODE"), ("token", "ERP_TOKEN"),
+                      ("who", "ERP_WHO")):
+        if kw.get(key) is not None:
+            updates[name] = kw[key]
+    if kw.get("clear_token") and "ERP_TOKEN" not in updates:
+        updates["ERP_TOKEN"] = ""
+    return envfile.update(store_env_path(path), updates)
+
+
+def describe_store_credentials(path=None) -> dict:
+    """给界面看的门店账号状态 —— **永不回显密码**。"""
+    p = store_env_path(path)
+    d = _parse_env_file(p)
+    tok = d.get("ERP_TOKEN", "")
+    return {
+        "env_file": str(p),
+        "exists": p.exists(),
+        "username": d.get("ERP_USERNAME", ""),
+        "company": d.get("ERP_COMPANY_CODE") or DEFAULT_COMPANY,
+        "has_password": bool(d.get("ERP_PASSWORD")),
+        "has_token": bool(tok),
+        # 「谁登的」—— 给左下角那行显示用（不是店员，是**登录这台机器的人**）
+        "who": d.get("ERP_WHO", ""),
+        "token": f"{tok[:6]}…{tok[-4:]}" if len(tok) > 12 else "",
+    }
+
+
 def _column_form(cols=SALES_COLUMNS) -> dict:
     out = {}
     for i, (name, label, cid) in enumerate(cols):
@@ -323,7 +525,51 @@ def _column_form(cols=SALES_COLUMNS) -> dict:
     return out
 
 
+def _inventory_column_form(cols=INVENTORY_IMEI_EXCEL_COLUMNS) -> dict:
+    """库存串号**分页接口**要的 `column[i][...]`（小写 column）。
+
+    ⚠ 跟 `_column_form`（销售报表那套 `Column[i][...]`）**不是一个东西**：
+      大小写、属性名都不同，服务端两种写法各认一套。
+      这里只发 7 个属性（照 erp-api skill 的 `_column_nested`），
+      比导出版那 10 个少 —— 导出版少发会报「操作失败，请稍后重试」，
+      分页版多发没验过，所以各按其道。
+    """
+    out = {}
+    for i, spec in enumerate(cols):
+        cid, key, title = spec[0], spec[6], spec[8]
+        p = "column[%d]" % i
+        out[p + "[Id]"] = str(cid)
+        out[p + "[__Key]"] = key
+        out[p + "[__Title]"] = title
+        out[p + "[__Align]"] = "Left"
+        out[p + "[__DataType]"] = ""
+        out[p + "[__Show]"] = "1"
+        out[p + "[__Width]"] = "100"
+    return out
+
+
 # ------------------------------------------------------------------- 客户端
+#: 「登录这台机器的人叫什么」—— 从 `Api/User/UserIndex` 的返回里**按这个顺序找**。
+#:
+#: ⚠⚠ **顺序是踩出来的，别凭字面改**（2026-09-19）：原来写的是
+#:   `("UserName", "Name", "RealName", "NickName", "CompanyName")` ——
+#:   而实测（拿门店 token 调一次 `UserIndex`，82 个字段）：
+#:
+#:   | 字段 | 值 | 是什么 |
+#:   |---|---|---|
+#:   | `UserName` | `sl18917405716` | **登录账号**，不是姓名 |
+#:   | **`Real`** | `赵海培` | ⭐ **姓名就在这儿** —— 而原列表里**没有它** |
+#:   | `TLClerkName` | `赵海培` | 同一个人的另一种写法 |
+#:   | `CompanyName` | `山东盛联数码科技有限公司` | 公司名，不是人 |
+#:
+#:   ⇒ 原来那个列表**一个都命中不了真名**，一路落到 `UserName` ——
+#:     于是左下角显示的是 `sl18917405716`（用户 2026-09-19：「姓名没有啊」）。
+#:
+#: ⚠ 真名放**最前**，登录账号和公司名是**最后兜底**（有总比空着强，但它们不是名字）。
+WHO_FIELDS = ("Real", "RealName", "Name", "NickName", "TLClerkName",
+              "UserName", "CompanyName")
+
+
 class ErpClient:
     def __init__(self, creds: dict | None = None, timeout: int = 180, verbose: bool = False,
                  env_file: str | None = None):
@@ -339,6 +585,34 @@ class ErpClient:
         self.s = requests.Session()
         self._relogin_tried = False
         self._apply_headers()
+
+    def _with_net_retry(self, fn, what, tries=None):
+        """跑一次 HTTP 调用；**瞬时网络错**重试，耗尽后抛 `ErpError`。
+
+        ⚠ 耗尽后必须转成 `ErpError`：`SSLError` 不是 `ErpError`，
+          `_fetch_erp_stock` 只接后者 —— 漏出去会变成顶层「程序 bug」+ 退出码 9。
+        ⚠ 同一个 `Session` 上重试（登录态要留着）；坏连接由 urllib3 丢弃，
+          不像 `selfupdate` 那样每次新开 Session。
+        """
+        n = NET_TRIES if tries is None else max(1, int(tries))
+        last = None
+        for attempt in range(1, n + 1):
+            try:
+                return fn()
+            except Exception as e:                              # noqa: BLE001
+                if not _is_transient_net_error(e):
+                    raise
+                last = e
+                if attempt < n:
+                    print("[云商] %s 网络中断（%s），%.1fs 后重试 %d/%d"
+                          % (what, type(e).__name__, NET_BACKOFF * attempt,
+                             attempt, n - 1),
+                          file=sys.stderr)
+                    time.sleep(NET_BACKOFF * attempt)
+        raise ErpError(
+            "%s失败：连试 %d 次网络都被掐断（%s: %s）"
+            % (what, n, type(last).__name__, last)
+        ) from last
 
     def _apply_headers(self):
         c = self.creds
@@ -365,7 +639,9 @@ class ErpClient:
         body = {"token": "", "userName": c["username"], "userPwd": c["password"]}
         if vcode:
             body["VCode"] = vcode               # 参数名就是 VCode（见 Inventory Check/src/erp.js）
-        r = self.s.post(f"{API_BASE}/api/User/Login", data=body, timeout=30)
+        r = self._with_net_retry(
+            lambda: self.s.post(f"{API_BASE}/api/User/Login", data=body, timeout=30),
+            "登录")
         r.raise_for_status()
         j = r.json()
         rid = j.get("ResponseID")
@@ -390,9 +666,31 @@ class ErpClient:
         return token
 
     def _save_token(self, token: str):
-        save_credentials(self.env_file, token=token,
-                         username=self.creds.get("username"),
-                         company=self.creds.get("company"))
+        """把新 token 写回**凭据实际来源那个文件**（别写错地方）。
+
+        ⚠⚠ 这一步是 2026-09-21 踩出来的：`ErpClient().env_file` 常常是 **`None`**
+          （调用方多数不传），于是 `save_credentials(None, …)` 写的是**默认路径**
+          `.secrets/erp.env` —— 而密码实际来自 `~/.dsh/secrets/erp.env`
+          （`used_from` 报的就是它）。**写到了另一个文件** ⇒ 下次照样读旧的过期 token
+          ⇒ 表现就是"改了还是每次都提醒"，而且**看不出来**（两个文件里都有 token）。
+        ⚠ 密码来自**环境变量**时**不写盘**：环境变量优先级最高，写了也不会被读到，
+          白写还让人以为"已经修好了"。这时只打一句，让人去改环境。
+        """
+        target = self.env_file or (str(effective_env_file()) if effective_env_file() else None)
+        if os.environ.get("ERP_TOKEN") or os.environ.get("ERP_PASSWORD"):
+            print("[重登] 新 token 拿到了，但凭据来自**环境变量** —— 不写盘"
+                  "（下次仍以环境变量为准；要持久化就把它写进 .secrets/erp.env）",
+                  file=sys.stderr)
+            return
+        try:
+            save_credentials(target, token=token,
+                             username=self.creds.get("username"),
+                             company=self.creds.get("company"))
+        except Exception as e:                                 # noqa: BLE001
+            # ⚠ 存不上**不影响这一次**（token 已经在内存里、这次调用是好的），
+            #   但要说出来 —— 不然就是"下次又提醒一次，而没人知道为什么"。
+            print("[重登] ⚠ 新 token 没存下来（下次还会重登一次）：%s: %s"
+                  % (type(e).__name__, e), file=sys.stderr)
 
     def login_and_verify(self, vcode: str | None = None, save: bool = True) -> dict:
         """登录 → 存 token → 再拉一次用户资料。
@@ -405,7 +703,7 @@ class ErpClient:
         try:
             data = self.user_index() or {}
             if isinstance(data, dict):
-                for k in ("UserName", "Name", "RealName", "NickName", "CompanyName"):
+                for k in WHO_FIELDS:
                     if data.get(k):
                         who = str(data[k])
                         break
@@ -416,7 +714,9 @@ class ErpClient:
         return {"token": token, "who": who}
 
     def call(self, url: str, body: dict, timeout: int | None = None) -> dict:
-        r = self.s.post(url, data=body, timeout=timeout or self.timeout)
+        r = self._with_net_retry(
+            lambda: self.s.post(url, data=body, timeout=timeout or self.timeout),
+            "云商接口 %s" % url.rsplit("/", 1)[-1])
         r.raise_for_status()
         j = r.json()
         rid = j.get("ResponseID")
@@ -427,7 +727,11 @@ class ErpClient:
         if rid in (1, 9) and "！！！" in msg and not self._relogin_tried:
             self._relogin_tried = True
             print("[重登] token 已失效，用缓存账密重登一次", file=sys.stderr)
-            self.login()
+            # ⚠⚠ `save=True` —— 2026-09-21 用户报的「数据更新时**一直**有 token 过期的提醒」
+            #   就是这儿：默认 `save=False` ⇒ 新 token 只用这一次、**不写回凭据文件**
+            #   ⇒ 下一趟又拿那个过期的旧 token ⇒ 每跑一次提醒一次。
+            #   （这是"缓存"和"真源"没同步，不是接口的问题。）
+            self.login(save=True)
             body = dict(body)
             if "token" in body:
                 body["token"] = self.creds["token"]
@@ -440,6 +744,79 @@ class ErpClient:
         """用户资料 —— 用来证明 token 真能用（顺带回显登录人）。"""
         j = self.call(f"{API_BASE}/Api/User/UserIndex", {"token": self.creds.get("token", "")})
         return j.get("Data") or {}
+
+    def branch_scope(self) -> dict:
+        """这个云商账号能看到**几家店** —— 由此判它是哪种身份。
+
+        用户 2026-09-19：「云商**平台岗账号**登录时提示是能匹配四十一家门店，
+        不是按我要求的**给到所有功能页面的权限**」。
+
+        ⚠ 原来 `branch_self()` 一看到多于一家的就报错（把它当成"公司账号填错了"）——
+          那是**把平台岗挡在门外**。平台岗本来就是第三类身份：它挂在「平台」节点下，
+          本来看得到全部门店，该给的是**全部功能**，不是"认不出本店"。
+
+        返回 `{"platform": bool, "node": 唯一那家 or None, "count": n}`：
+        * 1 家 → 门店账号（`node` 有值）
+        * >1 家 → **平台岗**（`node` 为 None）
+        * 0 家 → 抛错（这账号确实什么都看不到）
+        """
+        j = self.call(BRANCH_TREE_URL, {"token": self.creds.get("token", "")})
+        shops = branch_nodes(j.get("Data"))
+        if not shops:
+            raise ErpError(
+                "这个云商账号看不到任何门店档案 —— 请填**门店自己的**账号，"
+                "或者平台岗的账号")
+        if len(shops) == 1:
+            return {"platform": False, "node": shops[0], "count": 1}
+        return {"platform": True, "node": None, "count": len(shops)}
+
+    def branch_self(self) -> dict:
+        """用**门店账号**读它自己那一家门店的档案 —— 「这台机器是哪家店」。
+
+        ⚠ 只认**唯一一家店**：0 家或 2 家以上都**直接报错，不许猜**。
+        猜错就是把配置填成隔壁那家店 —— 而门店名看着都像对的，
+        界面上根本看不出来（这个项目栽在"静默取错数"上太多次了）。
+
+        返回云商那边的**原始字段**（实测 23 个：`Name` `Id` `StoreId`
+        `FinanceCode` `Contact` `Phone` `Address` `ParOrgName` `StoreNum`
+        `ContractOpenTime` `ContractEndTime` `TLStoreName` …）。
+        目前只用得上 `Name`（拿去匹配门店名单），其余原样留着 ——
+        免得下次要看又得从头探一遍。
+        """
+        j = self.call(BRANCH_TREE_URL, {"token": self.creds.get("token", "")})
+        shops = branch_nodes(j.get("Data"))
+        if not shops:
+            raise ErpError(
+                "这个云商账号看不到任何门店档案 —— 请填**门店自己的**账号"
+                "（公司账号登进去看到的是全公司，认不出「本店」是哪家）")
+        if len(shops) > 1:
+            names = "、".join(str(n.get("Name") or "?") for n in shops[:5])
+            raise ErpError(
+                "这个云商账号能看到 %d 家门店（%s…）—— 那是**公司账号**，"
+                "认不出本店是哪一家。请用门店自己的账号。"
+                % (len(shops), names))
+        return shops[0]
+
+    # ------------------------------------------------------------- 用户名单
+    def users(self, branch_id=None) -> list:
+        """云商「设置 → 用户」的账号名单。
+
+        用户 2026-09-18：「能通过系统账号抓到设置里面的用户名单吗，
+        应该不止这些店，还有平台岗的账号」→ 实测 **239 个**。
+
+        返回 `UserName`(登录名) / `Real`(姓名) / `Phone` / `BranchId` / `Status`。
+
+        ⚠ **`Status` 实测 239 个全是 3** —— 从它身上**区分不出离职**。
+          所以"谁还在职"只能靠人工勾（见 `web` 的「人员设置」）。
+        ⚠ `PageIndex`/`PageSize` **传了不生效**（静默忽略），但 `BranchId` 是**真筛**
+          （瞎编值 → 0 条）。别信参数名，按"瞎编值 → 0"验。
+        """
+        body = {"token": self.creds.get("token", "")}
+        if branch_id is not None and str(branch_id) != "":
+            body["BranchId"] = branch_id
+        j = self.call(USER_LIST_URL, body)
+        d = j.get("Data")
+        return d if isinstance(d, list) else []
 
     # ------------------------------------------------------------- 库存串号
     def inventory_imei(self, snapshot: datetime.date | None = None, *,
@@ -486,7 +863,9 @@ class ErpClient:
         if not isinstance(path, str) or not path:
             raise ErpError(f"库存导出没返回文件路径：{str(j)[:200]}")
         url = path if path.startswith("http") else f"{API_BASE}{path}"
-        r = self.s.get(url, timeout=timeout)
+        r = self._with_net_retry(
+            lambda: self.s.get(url, timeout=timeout),
+            "下载库存 xlsx")
         r.raise_for_status()
         if r.content[:2] != b"PK":
             raise ErpError(f"下载到的不是 xlsx（前 80 字节：{r.content[:80]!r}）")
@@ -498,6 +877,156 @@ class ErpClient:
         if dest:
             Path(dest).write_bytes(r.content)
         return _inventory_rows(tmp)
+
+    # ------------------------------------------------- 仓库列表 / 盘点账面
+    def warehouses(self) -> list:
+        """**仓库列表**（含所属门店）—— 实测 45 个仓。
+
+        字段：`Id` / `Name`（仓名，如「青岛正阳路利客来店库」）/ `StoreType` /
+        `BranchName`（所属门店）/ `BranchId` / `HonorStoreCode` …
+
+        ⚠ **「门店」和「仓」是两层**（`青岛正阳路利客来店` vs `青岛正阳路利客来店库`），
+          名字只差一个字。盘点盘的是**仓**（`Id`），所以界面上两个都显示 ——
+          只给仓名的话，人会选到隔壁那家店的仓，而账面看着也挺正常。
+
+        ⚠ `api.yserp.cc` 和 `apicommon.yserp.cc` **两个域都返回 45 个仓**（实测），
+          这里跟本项目其余调用一样走 `API_BASE`。
+        """
+        j = self.call(f"{API_BASE}/API/USER/STORE",
+                      {"token": self.creds.get("token", ""), "DataPower": 1,
+                       "StoreCheckPower": ""}, timeout=60)
+        d = j.get("Data")
+        return d if isinstance(d, list) else []
+
+    def store_now(self, snapshot: datetime.date | None = None, *, store_id: str = "",
+                  page_size: int = STORE_NOW_PAGE, timeout: int = 300) -> dict:
+        """**自定义库存表**（在库 + 在途，串号级）—— 盘点账面就取这一张。
+
+        用户 2026-09-20：「页面找**数据抓取模块**抓取最新的库存」。
+        实测（2026-09-20）：表单式 `ResponseID=0`，全库 `TotalRows=26410`，
+        行键与盘点页 `core.js` 逐字对得上（`Imei` / `ProCount` / `ProCount_OnTransfer` /
+        `OldFlag` / `Category1..4` …）⇒ **后端原样交出这些行，页面口径一行不用改**。
+
+        | 参数 | 说明 |
+        |---|---|
+        | `snapshot` | 库存快照日（不给 = 今天）。⚠ 历史快照日能不能拿在途列没验过 |
+        | `store_id` | **仓**的 Id（`warehouses()` 里那个 `Id`）。空 = 全公司 |
+        | `page_size` | 一次多少行；本函数**不假设它够大**，靠行数自检 |
+
+        返回 `{"rows": [...], "total": n, "pages": k, "store_id": …, "date": …}`。
+
+        ⚠ **行数对不上就抛 `ErpIncomplete`**（不返回半份）——
+          "应有 3 行只收到 1 行"必须被拦住，理由见 `ErpIncomplete` 的注释。
+        ⚠ 合法的**零库存**（`TotalRows=0` 且没有明细）**算成功**：
+          店里真没货和"接口没给"是两件事，前者不该报错。
+        """
+        snap = snapshot or datetime.date.today()
+        size = int(page_size or STORE_NOW_PAGE)
+        rows: list[dict] = []
+        seen = set()
+        total = None
+        page = 1
+        while True:
+            body = {"token": self.creds.get("token", ""), "BranchId": "",
+                    "DateOfSnapshot": snap.isoformat(), "StoreIds": str(store_id or ""),
+                    "CustomerId": "", "vendorIds": "", "CategoryId": "", "ProName": "",
+                    "Brands": "", "Models": "", "Config": "", "Imei": "", "SubImei": "",
+                    "groupBy": STORE_NOW_GROUP_BY, "outCol": STORE_NOW_OUT_COLS,
+                    "Sort": "", "OrderBy": "", "PriceLabelIdStr": "",
+                    "PageSize": size, "PageIndex": page}
+            d = self.call(STORE_NOW_URL, body, timeout=timeout).get("Data")
+            if not isinstance(d, dict):
+                raise ErpIncomplete("库存表的 Data 不是对象：%s" % type(d).__name__)
+            batch = d.get("Data")
+            if not isinstance(batch, list):
+                raise ErpIncomplete("库存表的 Data.Data 不是明细数组：%s" % type(batch).__name__)
+            got = d.get("TotalRows")
+            if isinstance(got, bool) or not isinstance(got, (int, float)):
+                raise ErpIncomplete("库存表没给 TotalRows（拿到 %r）—— 没法判断拉全了没" % (got,))
+            got = int(got)
+            if total is None:
+                total = got
+            elif got != total:
+                raise ErpIncomplete("总行数中途变了：第 1 页说 %d，第 %d 页说 %d"
+                                    % (total, page, got))
+            if not batch:
+                if len(rows) < total:
+                    raise ErpIncomplete("提前返回空页：第 %d 页是空的，可只拿到 %d/%d 行"
+                                        % (page, len(rows), total))
+                break
+            # ⚠ 指纹用「首尾 RowId + 本页行数」——服务端把同一页重复给回来时，
+            #   光看行数看不出来（结果就是账面里同一台机器出现两次）。
+            fp = (str(batch[0].get("RowId")), str(batch[-1].get("RowId")), len(batch))
+            if fp in seen:
+                raise ErpIncomplete("第 %d 页跟前面某一页重复（首尾 RowId 一样）" % page)
+            seen.add(fp)
+            rows.extend(batch)
+            if len(rows) >= total:
+                break
+            if len(batch) < size:
+                raise ErpIncomplete("第 %d 页只给了 %d 行（不足一页），却还差 %d 行"
+                                    % (page, len(batch), total - len(rows)))
+            page += 1
+            if page > STORE_NOW_MAX_PAGES:
+                raise ErpIncomplete("拉了 %d 页还没拉全（%d/%d 行）—— 不拉了，别把服务端刷爆"
+                                    % (STORE_NOW_MAX_PAGES, len(rows), total))
+        if len(rows) != total:
+            raise ErpIncomplete("实际拿到 %d 行，服务端自报 %d 行 —— 不一致"
+                                % (len(rows), total))
+        return {"rows": rows, "total": total, "pages": page,
+                "store_id": str(store_id or ""), "date": snap.isoformat()}
+
+    def transit_imei(self, snapshot: datetime.date | None = None, *, store_id: str = "",
+                     page_size: int = 500, max_pages: int = 20,
+                     timeout: int = 180) -> list:
+        """**在途串号**（`InventoryType=1`）—— 账面那张表没给在途列时的兜底。
+
+        | 参数 | 说明 |
+        |---|---|
+        | `snapshot` | 快照日。⚠ `InventoryType` **只对当天生效**：历史日期上传 1 也拿全量（skill 坑 6） |
+        | `store_id` | 仓 Id（`StoreId` 是真筛；仓名不是 —— skill 坑 3b） |
+
+        ⚠ 契约来自 erp-api skill（分页版 `Api/Report/InventoryImei`）：
+          `ageStart` / `ageEnd` **必传**（可以空串），不传报「参数错误」；
+          还要带 `column[]` 规格。`Inventory Check/src/erp.js` 里那条同类链路
+          **没拿真凭证验证过**，所以返回结构只认两种形状，别的直接报错 ——
+          **绝不悄悄当成"没有在途"**（那会让"在途待入库"整页消失且不报错）。
+        """
+        snap = snapshot or datetime.date.today()
+        rows: list[dict] = []
+        page = 1
+        total = None
+        while True:
+            body = {"token": self.creds.get("token", ""), "DateOfSnapshot": snap.isoformat(),
+                    "InventoryType": "1", "ageStart": "", "ageEnd": "",
+                    "ProName": "", "BranchId": "", "BranchName": "",
+                    "StoreId": str(store_id or ""), "StoreName": "",
+                    "WarningFlag": "", "Category": "", "IsBorrowed": "", "old": "",
+                    "Imei": "", "ReceivingCode": "", "Brand": "", "ModelId": "", "Model": "",
+                    "OrderBy": "Ages", "Sort": "0",
+                    "PageIndex": str(page), "PageSize": str(page_size)}
+            body.update(_inventory_column_form())
+            d = self.call(f"{API_BASE}/Api/Report/InventoryImei", body,
+                          timeout=timeout).get("Data")
+            if isinstance(d, list):
+                batch = d
+            elif isinstance(d, dict) and isinstance(d.get("Data"), list):
+                batch = d["Data"]
+                if total is None and isinstance(d.get("TotalRows"), (int, float)):
+                    total = int(d["TotalRows"])
+            else:
+                raise ErpIncomplete(
+                    "在途查询返回结构异常：既不是数组，也没有 Data.Data 数组（%s）"
+                    % type(d).__name__)
+            rows.extend(batch)
+            if not batch or len(batch) < page_size:
+                break
+            if total is not None and len(rows) >= total:
+                break
+            page += 1
+            if page > max_pages:
+                break
+        return rows
 
     # ------------------------------------------------------------- 销售明细
     def sales_range(self, start: datetime.date, end: datetime.date, *,
@@ -536,13 +1065,26 @@ class ErpClient:
             "BillType": DEFAULT_BILL_TYPES, "TimeType": "0", "InvoiceStatus": "-1",
         }
         body.update(_column_form())
-        j = self.call(f"{REPORT_BASE}/Api/ReportNew/SalesReportDetailToExcel", body)
+        try:
+            j = self.call(f"{REPORT_BASE}/Api/ReportNew/SalesReportDetailToExcel", body)
+        except ErpError as e:
+            if is_empty_result(e):
+                # ⚠⚠ **这一段真的没有数据 —— 不是失败**（2026-09-21 实测钉的）。
+                #   拉"当月到今天"时最后一段就是**今天单独那一天**，而今天的销售
+                #   还没进报表 ⇒ 服务端回 `ResponseID=2 暂无数据`。
+                #   原来它一路抛上去 ⇒ **整步算失败**（`erp-dump` 退出码 2），
+                #   而前面几段的数据**已经落库了** —— 用户看到的就是
+                #   「显示失败，但数据刷新了」（他 2026-09-21 专门问过这句）。
+                return []
+            raise
         path = j.get("Data")
         if not path:
             raise ErpError(f"销售报表导出失败：{j.get('Message')}")
 
         url = path if str(path).startswith("http") else f"{REPORT_BASE}{path}"
-        r = self.s.get(url, timeout=300)
+        r = self._with_net_retry(
+            lambda: self.s.get(url, timeout=300),
+            "下载销售 xlsx")
         r.raise_for_status()
         if r.content[:2] != b"PK":
             raise ErpError(f"下载到的不是 xlsx（前 80 字节：{r.content[:80]!r}）")

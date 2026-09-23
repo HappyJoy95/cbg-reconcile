@@ -1,0 +1,92 @@
+/* 自定义照片主题 —— 背景垫门店自己传的图（web/wallpaper/）。
+   一主题一文件：本文件 = 这套主题的全部覆盖色值。
+   ⚠ rate 四档必须在（test_theme 契约）。
+   ⚠ 背景图**不写在这儿**：选中哪张只记 localStorage（cbg-wallpaper），
+     由 app.js 的 applyWallpaper() 设 body 背景 —— 后端不存「当前壁纸」。 */
+/* label: 自定义照片主题 */
+body[data-theme="photo"] {
+
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 略透的页面底：背景图透出来时不至于被纯色盖死；
+     卡片保持高不透明，花背景上字也要能读。 */
+  --bg: rgba(245, 246, 248, 0.72);
+  --card: rgba(255, 255, 255, 0.92);
+  --line: #e3e6ea;
+  --text: #1c2024;
+  --muted: #6b7280;
+  --muted-2: #4b5563;
+  --brand: #2563eb;
+  --brand-dark: #1d4ed8;
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --idle: #6b7280;
+  --idle-bg: #eceef1;
+  --ink: #0f172a;
+  --ink-2: #111827;
+  --ink-text: #cbd5e1;
+  --hover: rgba(241, 245, 249, 0.92);
+  --field: rgba(255, 255, 255, 0.96);
+  --code-bg: #eef1f5;
+  --brand-2: #7c3aed;
+  --on-brand: #fff;
+  --icon-muted: #9aa4b2;
+  --brand-wash: rgba(37, 99, 235, 0.09);
+  --line-strong: #c9ced6;
+  --focus-ring: #bfdbfe;
+  --text-2: #374151;
+  --th-bg: rgba(250, 251, 252, 0.92);
+  --overlay: rgba(15, 23, 42, 0.45);
+  --warn-line: #fcd34d;
+  --on-warn: #78350f;
+  --on-warn-strong: #7c2d12;
+  --on-ok: #14532d;
+  --on-bad: #7f1d1d;
+  --info-bg: rgba(241, 245, 249, 0.92);
+  --on-info: #334155;
+  --row-alt: rgba(247, 248, 250, 0.88);
+  --film-lo: #fce4e4;
+  --film-hi: #dde7f7;
+  --film-sum: #c0392b;
+  --on-film-sum: #fff;
+  --hot: #d4380d;
+  --log-ok: #4ade80;
+  --log-bad: #fca5a5;
+  --log-dim: #64748b;
+  --shadow-menu: 0 12px 30px rgba(15, 23, 42, 0.16);
+  --shadow-float: 0 18px 46px rgba(15, 23, 42, 0.22);
+  --shadow-modal: 0 18px 48px rgba(0, 0, 0, 0.28);
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.22);
+  --glow-fab: drop-shadow(0 5px 14px rgba(10, 111, 219, 0.38));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(10, 111, 219, 0.48));
+}
+
+/* 有选中壁纸时：背景图铺满（cover）+ 轻微固定视差感。
+   ⚠ 由 JS 打/摘 `has-wallpaper`；没选中时保持 --bg 半透明纯色。 */
+body[data-theme="photo"].has-wallpaper {
+  background-position: center;
+  background-attachment: fixed;
+}
+/* 三档显示（用户 2026-09-23）—— 由 JS 打 wallpaper-fit-*；
+   默认 class 缺省 = cover。不拉伸：cover/contain 都是等比。 */
+body[data-theme="photo"].has-wallpaper.wallpaper-fit-cover {
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+body[data-theme="photo"].has-wallpaper.wallpaper-fit-contain {
+  background-size: contain;
+  background-repeat: no-repeat;
+  /* 留边区域用 --bg 染色垫住（body 背景颜色仍来自 --bg） */
+}
+body[data-theme="photo"].has-wallpaper.wallpaper-fit-repeat {
+  background-size: auto;
+  background-repeat: repeat;
+  background-attachment: scroll;
+}

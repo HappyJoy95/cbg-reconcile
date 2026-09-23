@@ -12,7 +12,8 @@ import os
 import re
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+# 项目根 —— 从 src/paths.py 取（⚠ 别再自己 `parent.parent`：搬文件会静默算错根，见那儿顶部）
+from .paths import ROOT as _ROOT
 
 
 def resolve(path, root: Path | None = None) -> Path:

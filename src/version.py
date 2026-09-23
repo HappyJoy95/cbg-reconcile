@@ -24,8 +24,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Tuple
 
-APP_NAME = "CBG报量对账"
-VERSION = "2.1.1"           # 功能有增删就动这个；打包时间看 BUILD.txt
+# ⚠ 项目根从 `src/paths.py` 取 —— 全项目只有那一处知道"自己在第几层"。
+#   `paths.py` 只依赖标准库，所以这一行不会给"检查更新"那条路添失败面。
+#   ⚠ 反过来说：这个文件本身**永远不许移动**（远端锚点），`src/paths.py` 也跟着不许动。
+from .paths import ROOT
+
+#: 产品名 —— **只有这一处定义**（`autostart` 从这里 import，别各写一份）。
+#:
+#: ⚠ 2026-09-19 改过名（用户：「3.0.0的项目名能改吗，cbg-reconcile 名字有点怪。
+#:   **仓库和链接就别改了**」）：`CBG报量对账` → `盛联门店数据平台`。
+#:   仓库名（`HappyJoy95/cbg-reconcile`）和自更新链接**一个字都没动** ——
+#:   `selfupdate` 根本不读 `APP_NAME`。
+#:
+#: ⚠ 它进了**开机自启的注册表键名**和**计划任务名** ⇒ 改名会"出现两份"、
+#:   开机启两次。所以 `autostart.LEGACY_APP_NAMES` 记着旧名字，建新的时顺手删旧的。
+APP_NAME = "盛联门店数据平台"
+
+# ── 版本号定义（用户 2026-09-23）────────────────────────────────
+#   * **开发版本** = git 短 commit（`dev_version()` / 界面 `shown_version()`）
+#   * **发版版本** = 封包时刻 **`yy.mmdd.hhmmss`**（`pack_version()`）
+#     —— 正式打包时写入本文件的 `VERSION`，自更新比的就是它。
+#   * 本常量在**首次按新格式打正式包之前**仍是旧号；打完正式包会被
+#     `tools/build_package.sh` 改写成时间戳并需 commit + push。
+#
+# 自更新：`selfupdate` 读远端 `version.py` 的 `VERSION` 与本地比大小。
+# 时间戳定宽 ⇒ `parse_version` 按点拆数字即可比（26.0923.101530）。
+VERSION = "2.1.1"           # 发版号；正式打包会改成 yy.mmdd.hhmmss
                             # 2.1.1：**beta 包能升回同号的正式版**
                             #        ① 现象：装过 `2.1.0-beta3` 的机器 VERSION
                             #           也是 2.1.0，正式版推上去之后
@@ -117,7 +141,6 @@ VERSION = "2.1.1"           # 功能有增删就动这个；打包时间看 BUIL
                             #           （`.secrets/schedule.json`），提权建的任务
                             #           照样看得到时间和命令
 
-ROOT = Path(__file__).resolve().parent.parent
 BUILD_FILE = ROOT / "BUILD.txt"
 UNPACKAGED = "源码运行（未打包）"
 
@@ -248,6 +271,39 @@ def is_beta(build: Optional[str] = None) -> bool:
     return BETA_MARK in str(txt or "").lower()
 
 
+#: 发版号格式：`yy.mmdd.hhmmss`（如 `26.0923.153045`）
+PACK_VERSION_RE = __import__("re").compile(r"^\d{2}\.\d{4}\.\d{6}$")
+
+
+def pack_version(now=None) -> str:
+    """**发版版本号** = 封包时刻 `yy.mmdd.hhmmss`。"""
+    import datetime as _dt
+    n = now or _dt.datetime.now()
+    return n.strftime("%y.%m%d.%H%M%S")
+
+
+def is_pack_version(v: Optional[str] = None) -> bool:
+    """是不是新格式发版号（`yy.mmdd.hhmmss`）。"""
+    text = VERSION if v is None else str(v or "")
+    return bool(PACK_VERSION_RE.match(text))
+
+
+def dev_version() -> str:
+    """**开发版本号** = git 短 commit（读 `.git`，不调 git 命令）。"""
+    got = git_revision()
+    return got[1] if got else "nogit"
+
+
+def shown_version() -> str:
+    """界面上显示的版本：**已发版用 VERSION（时间戳），开发中用 commit**。"""
+    if is_pack_version():
+        return VERSION
+    return dev_version()
+
+
 def describe() -> str:
-    """一行说清楚：`CBG报量对账 v1.2.0 · 2026-09-15 13:42`"""
-    return f"{APP_NAME} v{VERSION} · {build_id()}"
+    """一行说清楚：发版 `盛联门店数据平台 26.0923.153045 · …`；
+    开发 `盛联门店数据平台 5a72ea3 · git main@5a72ea3`。"""
+    sv = shown_version()
+    # 发版号不带 v 前缀也行；带 v 更醒目 —— 统一 v 前缀
+    return f"{APP_NAME} v{sv} · {build_id()}"

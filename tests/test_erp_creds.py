@@ -329,3 +329,101 @@ class TestPendingLogin(unittest.TestCase):
         self.assertFalse(self.p.alive())
         self.assertIsNone(self.p.client, "client 必须被丢掉，别留着连接")
         self.assertEqual(self.p.image, "")
+
+
+class Test空区间不算失败(unittest.TestCase):
+    """⚠⚠ 2026-09-21 实测钉的：**「这一段没数据」不是错误**。
+
+    用户那天问「为啥显示失败但是数据刷新了」—— 根因就是它：
+    `erp-dump` 拉"当月到今天"时，**最后一段是今天单独那一天**，
+    而今天的销售还没进报表 ⇒ 服务端回 `ResponseID=2 暂无数据` ⇒ 一路抛上去
+    ⇒ **整步算失败**（退出码 2），可前面几段的数据**早就落库了**。
+    """
+
+    def test_认得暂无数据(self):
+        from src import erp
+        e = erp.ErpError("云商接口报错 ResponseID=2：暂无数据（若是「登录超时」…）")
+        self.assertTrue(erp.is_empty_result(e))
+
+    def test_别的错不许当成空(self):
+        """⚠ 判据只认 `ResponseID=2` + 「暂无数据」——鉴权/限流那些**必须抛**。"""
+        from src import erp
+        for msg in ("云商接口报错 ResponseID=1：未登录！！！",
+                    "云商接口报错 ResponseID=9：登录超时",
+                    "云商接口报错 ResponseID=-1：操作失败，请稍后重试",
+                    "下载到的不是 xlsx"):
+            with self.subTest(msg=msg):
+                self.assertFalse(erp.is_empty_result(erp.ErpError(msg)))
+
+    def test_空区间返回空列表而不是抛(self):
+        from src import erp
+
+        class Fake(erp.ErpClient):
+            def __init__(self):
+                self.s = None
+                self.creds = {"token": "t"}
+                self.timeout = 1
+                self._relogin_tried = False
+
+            def call(self, url, body, timeout=None):
+                raise erp.ErpError("云商接口报错 ResponseID=2：暂无数据")
+
+        import datetime
+        self.assertEqual(Fake().sales_rows(datetime.date(2026, 9, 21),
+                                           datetime.date(2026, 9, 21)), [])
+
+class Test重登要把新token存下来(unittest.TestCase):
+    """⚠⚠ 用户 2026-09-21 报的「数据更新时**一直**有 token 过期的提醒」的根因。
+
+    `call()` 里 token 失效时会重登一次，而它原来调的是 `self.login()`（`save=False`
+    是默认）⇒ 新 token **只用这一次、不写盘** ⇒ 下一趟又拿那个过期的旧 token
+    ⇒ 每跑一次提醒一次。而且 `ErpClient().env_file` 常常是 `None`（调用方多数不传），
+    写回**默认路径**也没用 —— 密码实际来自哪个文件（`effective_env_file()`）才是该写的那个。
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home" / ".dsh" / "secrets"
+        self.home.mkdir(parents=True)
+        self.mine = self.root / ".secrets"
+        self.mine.mkdir(parents=True)
+
+    def _patch_env(self, files):
+        """把回落链**钉死**成我们给的这几个文件（不碰真环境）。"""
+        from src import erp
+        paths = []
+        for path, body in files:
+            path.write_text(body, encoding="utf-8")
+            paths.append(path)
+        return mock.patch.object(erp, "env_chain", lambda extra=None: list(paths)), \
+            mock.patch.dict(erp.os.environ, {"HOME": str(self.root / "home")})
+
+    def test_写到密码实际来源那个文件(self):
+        from src import erp
+        p_home = self.home / "erp.env"
+        p_mine = self.mine / "erp.env"
+        p_mine.write_text("ERP_USERNAME=\nERP_PASSWORD=\nERP_TOKEN=\n", encoding="utf-8")
+        p_home.write_text("ERP_USERNAME=u\nERP_PASSWORD=pw\nERP_TOKEN=old\n",
+                          encoding="utf-8")
+        c = erp.ErpClient()                       # ⚠ env_file 不传（调用方多数这样）
+        with mock.patch.object(erp, "env_chain", lambda extra=None: [p_mine, p_home]):
+            c._save_token("new-token")
+        self.assertIn("new-token", p_home.read_text(encoding="utf-8"),
+                      "新 token 没写回**密码实际来源**那个文件（下次照样读旧的）")
+        self.assertNotIn("new-token", p_mine.read_text(encoding="utf-8"),
+                         "写到了默认那个文件 —— 那不是凭据真正来自的地方")
+
+    def test_来源是环境变量就不写盘(self):
+        from src import erp
+        p_home = self.home / "erp.env"
+        p_home.write_text("ERP_USERNAME=u\nERP_PASSWORD=pw\n", encoding="utf-8")
+        c = erp.ErpClient()
+        with mock.patch.object(erp, "env_chain", lambda extra=None: [p_home]), \
+                mock.patch.dict(erp.os.environ, {"ERP_TOKEN": "from-env"}):
+            c._save_token("new-token")
+        self.assertNotIn("new-token", p_home.read_text(encoding="utf-8"),
+                         "环境变量优先级最高，写了也不会被读到")

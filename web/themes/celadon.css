@@ -1,0 +1,70 @@
+/* 1 · 青瓷绿 × 月桂米 —— 温润清雅
+   主色 青瓷绿 #3FA796 · 辅色 月桂米 #E8D9B5 · 突出色 深青 #2A7F70
+   ⚠ rate 四档必须在（test_theme 契约）。 */
+/* label: 青瓷绿 × 月桂米 */
+body[data-theme="celadon"] {
+  --rate-red: #f28b8b;
+  --rate-orange: #f8c887;
+  --rate-lg: #c9ecbe;
+  --rate-g: #a3ddad;
+
+  /* 底：月桂米偏冷的浅调，不是纯灰 */
+  --bg: #f4f6f2;
+  --card: #fffefb;
+  --line: #e2e8df;
+  --text: #1a2420;
+  --muted: #6b7a72;
+  --muted-2: #4a5a52;
+  --text-2: #374740;
+
+  /* 主色：青瓷绿 */
+  --brand: #2f9e8c;
+  --brand-dark: #258574;
+  --on-brand: #ffffff;
+  --brand-wash: rgba(63, 167, 150, .12);
+  --focus-ring: #9ee0d4;
+  --glow-fab: drop-shadow(0 5px 14px rgba(47, 158, 140, .40));
+  --glow-fab-hover: drop-shadow(0 7px 18px rgba(47, 158, 140, .52));
+
+  /* 辅色：月桂米 —— logo 渐变 / 表头 / hover / 信息底都往暖米靠 */
+  --brand-2: #d4b878;
+  --info-bg: #f3efe4;
+  --on-info: #5a5240;
+  --th-bg: #f6f3ea;
+  --row-alt: #f7f5ef;
+  --hover: #eef2ea;
+  --field: #fffefb;
+  --code-bg: #eef1e8;
+  --idle: #7a8478;
+  --idle-bg: #eceee6;
+  --icon-muted: #9aa898;
+  --line-strong: #c8d0c4;
+
+  /* 状态：贴青瓷环境 */
+  --ok: #1a7a5c;
+  --ok-bg: #d4f0e4;
+  --on-ok: #0f4a38;
+  --bad: #b91c1c;
+  --bad-bg: #fde8e8;
+  --on-bad: #7f1d1d;
+  --warn: #a06820;
+  --warn-bg: #faf0d8;
+  --on-warn: #6b4410;
+  --on-warn-strong: #7c4010;
+  --warn-line: #e8c878;
+  /* 突出色：深青，热点/强调 */
+  --hot: #2a7f70;
+  --log-ok: #3dcea8;
+  --log-bad: #fca5a5;
+  --log-dim: #6b7a72;
+
+  --film-lo: #fce4e4;
+  --film-hi: #dde7f0;
+  --film-sum: #b54850;
+  --on-film-sum: #fff;
+
+  --ink: #12201c;
+  --ink-2: #0f1a16;
+  --ink-text: #c5d8d0;
+  --overlay: rgba(18, 32, 28, .45);
+}

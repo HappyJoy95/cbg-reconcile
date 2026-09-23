@@ -58,8 +58,7 @@ RAW_VERSION = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/src/version.py
 # 你以为更新了，实际拿到的是旧代码，甚至是旧的目录结构。
 # `api.github.com/.../zipball` 拿到的是当前提交，实测是新的。
 #
-# `ref` 可以是分支名、tag，也可以是**某个 commit 的 sha** —— 回退功能靠它
-# 拿历史版本（见 `download` / `rollback`）。
+# `ref` 可以是分支名或 tag（升级走 main；一般不用 sha）。
 WEB_URL = f"https://github.com/{REPO}"
 
 
@@ -116,7 +115,10 @@ def _log(msg: str) -> None:
 #
 # ⚠ 万一哪天有人把 `config/` 提交进仓库了，这个名单是最后一道闸 ——
 #   tests/test_selfupdate.py 里有一条测试专门验它。
-NEVER_TOUCH = ("config", ".secrets", "out", "dist", "tools", "__pycache__", ".dsh",
+#: ⚠ `in`（2026-09-21 晚加）：**收进来的东西**（各店发来的上报包 / 收信库）——
+#:   跟 `out` 一样是"这台电脑自己的"，自更新一根手指都不许碰。
+#:   它跟 `out` 是一对：`out` 是我生出来的，`in` 是别人发来的。
+NEVER_TOUCH = ("config", ".secrets", "out", "in", "dist", "tools", "__pycache__", ".dsh",
                "agent.md")
 
 # ⚠ `.dsh/` 也在名单里：它是**工作区隔离区**（记忆日志 / 备份 / 临时任务 /
@@ -150,9 +152,31 @@ ANCHORS = (
     ("bootstrap.py", "install / start 那些 bat 的统一入口"),
 )
 
+# ⚠ **门店目录不下发的顶层目录**（用户 2026-09-22 方案 2）：
+#   正式包 `--exclude 'tests/'`，自更新也**跳过** —— 两边一致，门店用不上 pytest。
+#   仓库 git 里**保留** `tests/`（开发三头全靠它）。
+#   ⚠ 不要塞进 `NEVER_TOUCH`：那是"门店自己的数据不许碰"；
+#     这里是"程序安装件里不带测试"。旧机器上残留的 `tests/` 交给 prune
+#     （`PRUNE_PREFIXES` 仍含 `tests`；zip 里没有 ⇒ 到点可清）。
+SKIP_APPLY = ("tests",)
+
 
 class UpdateError(RuntimeError):
     pass
+
+
+class PartialUpdate(UpdateError):
+    """**改到一半失败了**：已经落地的文件是完整的，现场在 journal 里。
+
+    ⚠ 调用方（控制台）应当**不要重启服务** —— 当前进程还跑在"改之前"的代码上，
+    它正是唯一还能干活的那一份。把错误和"修复"入口显示出来就行。
+
+    `result` 里带着这次已经改了什么（`changed` / `added` / `backup` / `journal`）。
+    """
+
+    def __init__(self, message, result=None):
+        super().__init__(message)
+        self.result = result or {}
 
 
 # ⚠ **必须重试**。实测（走代理的网络）：TLS 握手会被间歇性掐断，
@@ -289,78 +313,6 @@ def _raw_version_source(timeout: int):
         r = _get(RAW_VERSION, timeout=timeout)
         return _version_in_text(r.text)
     return "raw.githubusercontent.com", fetch
-
-
-# ------------------------------------------------------------------ 历史版本 / 回退
-def _git_json(url: str, timeout: int = 20, tries: int = 2):
-    """调 GitHub API 拿 JSON。
-
-    `tries=2` 是折中：门店网络间歇性抽风（实测 TLS 会被掐断），试一次太容易失败；
-    但也不能像别处那样试 3 次 —— 匿名配额只有 60 次/小时，失败请求也计数。
-    """
-    r = _get(url, timeout=timeout, tries=tries)
-    try:
-        return r.json()
-    except ValueError as e:
-        raise UpdateError(f"返回的不是 JSON：{e}") from e
-
-
-def _version_from_message(message: str) -> str:
-    """从提交信息里抠版本号。
-
-    ⚠ **只认 `release: v1.4.2` 这种形式**，不能见 `vX.Y.Z` 就抓。
-
-    实测踩到：`fix(update): 检查更新优先走…` 这种提交，正文里往往会提到
-    "顺带把 CACHE_TTL…（v1.3.4 就这样）"。用宽松正则的话，这个 fix 提交会被
-    贴上 `v1.3.4` 的标签 —— 列表里于是出现两个 v1.3.4，而且**都不是它真正的版本**。
-    门店照着这个列表回退，等于闭着眼睛选。
-
-    抠不出来就返回空串（调用方会把这个提交跳过）。
-    """
-    m = re.search(r"^\s*release:\s*v(\d+\.\d+(?:\.\d+)?)\b",
-                  message or "", re.M | re.I)
-    return m.group(1) if m else ""
-
-
-def history(limit: int = 20) -> list:
-    """能回退到的历史版本（最近的在前面）。
-
-    每条：`{version, sha, short, date, message}`。**没有版本号的提交不返回** ——
-    回退列表里要是塞满 `refactor:` / `fix:` 这种条目，人根本不知道该选哪个。
-    """
-    data = _git_json(f"https://api.github.com/repos/{REPO}/commits"
-                     f"?sha={BRANCH}&per_page={min(max(limit, 1), 100)}")
-    if not isinstance(data, list):
-        raise UpdateError("拿历史版本失败：返回的结构不对（大概是被限流了）")
-
-    out = []
-    for item in data:
-        commit = item.get("commit") or {}
-        msg = commit.get("message") or ""
-        ver = _version_from_message(msg)
-        if not ver:
-            continue
-        sha = item.get("sha") or ""
-        out.append({
-            "version": ver,
-            "sha": sha,
-            "short": sha[:7],
-            "date": (commit.get("committer") or {}).get("date", ""),
-            "message": msg.splitlines()[0].strip(),
-        })
-    return out
-
-
-def rollback(root, *, ref: str, current: str = "") -> dict:
-    """把代码换成 `ref`（某个 commit sha）那一版。
-
-    ⚠ **回退 = 一次普通的铺代码**，跟升级走同一条路（`apply_update`）——
-    同样只碰代码，`config/`、`.secrets/`、`out/` 一根手指都不动。
-    所以门店的配置、会话、历史报告都不会丢。
-    """
-    if not ref or not re.fullmatch(r"[0-9a-fA-F]{7,40}", (ref or "").strip()):
-        raise UpdateError(f"这个看着不像 commit：{ref!r}")
-    return apply_update(root, current=current, ref=ref.strip())
 
 
 # ------------------------------------------------------------------ 检查
@@ -505,7 +457,7 @@ def _iter_files(zip_root: Path) -> list:
 
 
 def _targets(zip_root: Path) -> list:
-    """(zip 里的文件, 安装目录里的相对路径) —— 照原样铺，除了 NEVER_TOUCH。"""
+    """(zip 里的文件, 安装目录里的相对路径) —— 照原样铺，除了 NEVER_TOUCH / SKIP_APPLY。"""
     out = []
     for f in _iter_files(zip_root):
         if not f.is_file():
@@ -513,7 +465,8 @@ def _targets(zip_root: Path) -> list:
         rel = f.relative_to(zip_root)
         rels = _rel_key(rel)          # ⚠ 别用 str() —— Windows 上分隔符是反斜杠
         if rels not in ALLOW_EVEN_IF_NEVER and (
-                rel.parts[0] in NEVER_TOUCH or "__pycache__" in rel.parts):
+                rel.parts[0] in NEVER_TOUCH or rel.parts[0] in SKIP_APPLY
+                or "__pycache__" in rel.parts):
             continue
         if rel.name.startswith(".") and rel.name not in (".gitattributes", ".gitignore"):
             continue
@@ -553,7 +506,7 @@ def _describe_payload(blob: Path, status: int, ctype: str) -> str:
 def download(timeout: int = 120, ref: str = BRANCH) -> Path:
     """把仓库的 zip 下到临时目录，返回解压出来的根目录。
 
-    `ref` 可以是分支名，也可以是**某个 commit 的 sha** —— 回退要用。
+    `ref` 可以是分支名或 tag（默认 main）。
     """
     import requests
     tmp = Path(tempfile.mkdtemp(prefix="cbg-update-"))
@@ -699,16 +652,431 @@ def _dump_inconsistency(root, zip_root: Path, expects: list) -> Path:
         return None
 
 
-def apply_update(root, *, current: str = "", ref: str = BRANCH) -> dict:
+# ------------------------------------------------------------------ 升级现场：journal + 快照
+#
+# ⚠ **为什么要有这个**：升级是**跨进程**的 —— 中途断电 / 被杀 / 磁盘满，
+#   安装目录里就剩下"一半新、一半旧"，而**没有任何人知道**。
+#   下一次启动时 `upgrade.record()` 只比版本号（`upgrade.py:109`），
+#   于是程序照常在混合版本上跑起来 —— 这是最难查的一种状态。
+#
+# 所以：**动第一个文件之前**，先把"我打算干什么"写下来（journal），
+# 并把**即将被覆盖的文件**复制一份（快照）。两样都放 `.secrets/update/`：
+#
+#   * `.secrets/` 在 `NEVER_TOUCH` 里，升级自己不会碰它（有测试盯着）；
+#   * 和 `schedule.json` / `python.txt` / `update-check.json` 同一类 —— "我们自己的记录"。
+#
+# ⚠ 这两样只是**现场**，不是备份策略：真正的恢复是 `restore_backup`（铺备份 zip）。
+#   快照的用途只有一个 ——
+#   **铺到一半失败时能立刻退回去**。
+UPDATE_DIR = ".secrets/update"
+
+
+def update_dir(root) -> Path:
+    return Path(root) / UPDATE_DIR
+
+
+def journal_path(root) -> Path:
+    return update_dir(root) / "journal.json"
+
+
+def read_journal(root) -> dict:
+    """读升级现场。**绝不抛** —— 自检、界面、启动路径都要读它。"""
+    try:
+        data = json.loads(journal_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+#: 走到这些状态就算"收尾了"（`pending()` 不再报它）
+TERMINAL_STATES = ("done", "restored")
+
+
+def pending(root) -> dict:
+    """有没有**没走完**的升级（`state` 不是 `done` / `restored`）。没有就返回 `{}`。
+
+    自检 / 控制台横幅用它 —— 光写 journal 没人看等于没写。
+    """
+    j = read_journal(root)
+    if not j.get("state") or j.get("state") in TERMINAL_STATES:
+        return {}
+    return j
+
+
+def integrity_lines(root) -> list:
+    """「代码完整性」那几行 —— `selftest` 和控制台都显示它。
+
+    没走完的升级要在**人看得见的地方**说出来：不然程序会静默跑在
+    "一半新一半旧"的代码上（这正是加 journal 要解决的事）。
+    """
+    j = pending(root)
+    if not j:
+        return []
+    done = j.get("done") or []
+    lines = [f"✗ 上次升级没走完（{j.get('state')}）：{j.get('error') or '中断了'}",
+             f"  目标是 v{j.get('to') or '?'}，已经改了 {len(done)} 个文件"]
+    if j.get("backup"):
+        lines.append(f"  备份：{j['backup']}")
+    lines.append("  修复：python -m src.cli update --repair（重跑一遍）"
+                 " / --restore（从备份退回去）")
+    return lines
+
+
+def smoke_test(root, timeout: int = 90) -> tuple:
+    """铺完代码**冒烟**一遍：起一个干净进程，真的 import 一次入口。
+
+    返回 `(ok, 说明)`。⚠ **绝不抛异常** —— 抛出去会把"已经铺好的代码"当成失败。
+
+    ⚠ 为什么不在当前进程里 `importlib.reload`：我们正跑在**刚被替换掉**的那些
+    文件上，而且"语法错 / 缺依赖 / 新模块没铺到"这几类问题只有在**干净进程**里
+    才测得准。命令行也故意走 `src.cli` 这个真入口（`bootstrap.py` 最后就是调它）。
+
+    ⚠ 它是"无人值守自动更新"能不能成立的**分界线**：过了它才敢把新代码留着，
+    不过就整个退回升级前（见 `apply_update` 里那段）。
+    """
+    root = Path(root)
+    py = sys.executable or "python"
+    code = ("import src.cli as c\n"          # 语法错 / 缺依赖 / 新模块没铺到，都炸在这一行
+            "c.main(['--help'])\n")
+    try:
+        r = subprocess.run([py, "-c", code], cwd=str(root), timeout=timeout,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"冒烟进程起不来：{e}"
+    out = (r.stdout or b"").decode("utf-8", "replace").strip()
+    if r.returncode != 0:
+        return False, f"退出码 {r.returncode}：{out[-400:] or '(没有任何输出)'}"
+    return True, out[-200:]
+
+
+def restore_backup(root, backup="") -> dict:
+    """把备份里的文件搬回去 —— **不需要网络**。
+
+    `backup` 不传就用 journal 里记的那一份。**只恢复代码**：
+    `out/` 里的数据、`.secrets/`、门店配置一律不碰（代码恢复 ≠ 数据恢复）。
+
+    返回 `{ok, restored, removed, backup, message}`。
+    """
+    root = Path(root)
+    j = read_journal(root)
+    backup = backup or j.get("backup") or ""
+    if not backup or not Path(backup).is_dir():
+        return {"ok": False, "restored": [], "removed": [], "backup": backup,
+                "message": "找不到备份目录 —— 没法恢复（可以手工把安装目录换回旧版）"}
+
+    restored = []
+    for src in sorted(Path(backup).rglob("*")):
+        if not src.is_file() or "__pycache__" in src.parts:
+            continue
+        rel = src.relative_to(Path(backup))
+        try:
+            _write_file(src, root / rel)          # 同样走**原子写**
+            restored.append(_rel_key(rel))
+        except OSError as e:
+            return {"ok": False, "restored": restored, "removed": [], "backup": backup,
+                    "message": f"恢复到 {rel} 时失败：{e}"}
+
+    # 这次升级**新加**的文件：备份里没有它们，要挪走才算真的回到升级前。
+    # ⚠ 用 `plan["add"]`（**当初打算加的**）而不是 `done`（已经写成功的）：
+    #   `done` 只在收尾时落盘，中途被打断时它是空的 —— 那时用 `done` 就
+    #   一个都清不掉，恢复出来是个"多了几个新文件"的伪升级前。
+    #   不存在的直接跳过，所以"打算加但其实没写"的那些天然是安全的。
+    added = set(j.get("plan", {}).get("add") or [])
+    removed = []
+    for rel in sorted(added):
+        p = root / rel
+        if not p.is_file():
+            continue
+        try:
+            dst = Path(backup) / "_新增" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(p), str(dst))
+            removed.append(rel)
+        except OSError as e:
+            return {"ok": False, "restored": restored, "removed": removed, "backup": backup,
+                    "message": f"清不掉这次新加的文件 {rel}：{e}"}
+
+    _write_journal(root, dict(j, state="restored",
+                              restored_at=time.strftime("%Y-%m-%d %H:%M:%S")),
+                   required=False)
+    return {"ok": True, "restored": restored, "removed": removed, "backup": backup,
+            "message": f"已恢复 {len(restored)} 个文件"
+                       + (f"，清掉 {len(removed)} 个这次新加的" if removed else "")}
+
+
+def repair(root, *, current: str = "", mode: str = "auto") -> dict:
+    """把**没走完的升级**收尾。
+
+    * `mode="auto"`（默认）：解压目录还在就**重跑**（不用联网），不在就重新下载再跑；
+    * `mode="restore"`：**从备份退回去**（不管网络，最可靠的那条路）。
+
+    没有没走完的升级就返回 `{ok: False, message: …}` —— 不抛异常（它会从 HTTP 和
+    命令行两条路调进来）。
+    """
+    j = pending(root)
+    if not j:
+        return {"ok": False, "message": "没有没走完的升级，不用修"}
+    if mode == "restore":
+        return restore_backup(root)
+    staging = j.get("staging") or ""
+    if staging and Path(staging).is_dir():
+        _log(f"[更新] 用上次留下的解压目录重跑：{staging}")
+        return apply_update(root, current=current, ref=j.get("ref") or BRANCH,
+                            staging=staging)
+    _log("[更新] 上次的解压目录已经不在了（临时目录被清过）—— 重新下载再跑")
+    return apply_update(root, current=current, ref=j.get("ref") or BRANCH)
+
+
+def _write_journal(root, data: dict, *, required: bool = True) -> bool:
+    """写现场。**先写临时文件再 replace** —— 半个 journal 比没有更糟。
+
+    `required=True` 用在"动第一个文件之前"那一次：写不下来就**别升级**
+    （没有现场的升级，正是我们要消灭的东西）。
+    """
+    path = journal_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+        return True
+    except OSError as e:
+        if required:
+            raise UpdateError(f"写不了升级现场（{path}）：{e}") from e
+        _log(f"⚠ 升级现场没写成（不影响本次升级）：{e}")
+        return False
+
+
+def make_backup(root) -> Path:
+    """开一个备份目录（名字带时间戳，方便人认）。"""
+    base = update_dir(root)
+    base.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(dir=str(base),
+                                prefix=time.strftime("backup-%Y%m%d-%H%M%S-")))
+
+
+def _snapshot(root, rels, dest) -> int:
+    """把即将被覆盖的文件复制到 `dest`，返回份数。
+
+    ⚠ **一个失败就整体放弃**（调用方会让整个升级中止）——
+    宁可不升，也不要"升到一半又没有退路"。
+    """
+    n = 0
+    for rel in rels:
+        src = Path(root) / rel
+        if not src.is_file():
+            continue                     # 这次是新加的文件，没什么可备份的
+        dst = Path(dest) / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        n += 1
+    return n
+
+
+def prune_backups(root, keep: int = 2) -> list:
+    """只留最近 `keep` 份现场（按名字里的时间戳排），返回删掉的目录名。"""
+    base = update_dir(root)
+    try:
+        dirs = sorted((p for p in base.iterdir()
+                       if p.is_dir() and p.name.startswith("backup-")),
+                      key=lambda p: p.name)
+    except OSError:
+        return []
+    gone = []
+    for p in (dirs[:-keep] if keep > 0 else dirs):
+        shutil.rmtree(p, ignore_errors=True)
+        gone.append(p.name)
+    return gone
+
+
+def _replace_retry(tmp: Path, dst: Path, tries: int = 3) -> None:
+    """`os.replace`，被占住时重试几次。
+
+    ⚠ 为什么要重试：Windows 上杀软 / 搜索索引器会**瞬时**占住刚写出来的文件，
+    报 `PermissionError`。门店那台机器上这很常见，而它跟"真的没权限"长得一样 ——
+    不重试就会把一次偶然的占用报成"升级失败"。
+    """
+    for i in range(tries):
+        try:
+            os.replace(str(tmp), str(dst))
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.5 * (i + 1))
+
+
+def _write_file(src: Path, dst: Path) -> None:
+    """把一个文件从 zip 铺到安装目录 —— **原子**的。
+
+    ⚠⚠ 不能直接 `copyfile(src, dst)`：它是"**先截断再写**"，
+    中途断电/被杀就留下**半个 `.py`**（语法错误）—— 门店再也起不来，
+    而且这种损坏"看起来像程序坏了"，根本查不到升级头上。
+
+    改成"临时文件 + `os.replace`"：同一个盘上的 replace 在 Windows 上是
+    `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`，**原子** ——
+    任何时刻中断，这个文件要么是旧的、要么是新的，不会是半截。
+
+    ⚠ 临时名里带 `.new-<pid>`：占位很显眼，真出事时人一眼能看出是升级留下的；
+    删除那一步（1.4c）的闸门也把它排除在"我们的文件"之外。
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".new-" + str(os.getpid()))
+    try:
+        shutil.copyfile(src, tmp)
+        _replace_retry(tmp, dst)
+    finally:
+        # 成功时 tmp 已经不存在；失败时别把垃圾留在门店目录里
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ 清理旧文件（阶段 1.4c）
+#
+# 背景：`apply_update` 以前只记 `changed` / `added` —— **搬走的旧模块会永远留在门店**
+# （`src/pools.py` 搬到 `src/storage/pools.py` 之后，旧文件还在，还可能被 import 到）。
+#
+# 删除判据 = `本机文件 − have`（`have` = 刚下下来的那一版拥有的文件全集），
+# 再过下面**七道闸**。⚠ 不需要任何"本地清单"文件 —— 所以**老门店第一次升级就能清干净**，
+# 不需要先发一版"过渡版"。
+#
+# ⚠⚠ 两道额外的保险，缺一不可：
+#   1. **删之前再问一次文件系统**（`is_file`）。门店**真出过** `os.walk` 漏掉
+#      `src/cli.py`（见 `_iter_files` 的注释）—— 那次后果只是"更新被拒"，
+#      有了删除之后就变成"删掉 cli.py"，量级完全不同。
+#   2. **比例闸**：一次正常重构不会让两成文件消失。候选项一多就**整体不删**，
+#      只报告 —— 那种情况多半是"下到的包不对/解压不全"，而不是真删了。
+#
+# 只有这四个前缀允许删 —— 它们是**两条安装路径里逐字节一致**的部分（见设计文档 0.2）。
+# 根目录一律不碰：`run*.bat` 是本机生成的、`BUILD.txt` 是装完写的、`发布说明.md` 只在包里。
+PRUNE_PREFIXES = ("src", "web", "tests", "config")
+
+#: 认得出"这是我们的代码文件"的扩展名 —— **白名单**，不是黑名单。
+PRUNE_EXTS = (".py", ".js", ".css", ".html", ".yaml", ".yml", ".json", ".md", ".txt")
+
+#: 一看就不是我们铺的东西（手工备份 / 编辑器残留 / 我们自己的临时文件）
+PRUNE_JUNK = (".bak", ".orig", "~", ".tmp", ".new-", ".swp", ".old")
+
+#: 比例闸：超过 `max(5, 本机文件的 20%)` 就整体不删
+PRUNE_MAX_MIN = 5
+PRUNE_MAX_RATIO = 0.2
+
+#: ⚠⚠ **先审计一版**（用户 2026-09-19 定，D2）：只把候选算出来、写进升级结果和日志，
+#:    **不动手删**。这样能先看一版门店的真实候选，代价最低。
+#:    打开真删（改成 True）时**必须**同时把"从备份恢复"和界面上的修复入口做完
+#:    （1.4d）—— 删错了没有退路是不行的。
+PRUNE_ENABLED = False
+
+
+def _local_code_files(root) -> list:
+    """本机在四个前缀下现有的代码文件（相对路径，正斜杠）。"""
+    root = Path(root)
+    out = []
+    for prefix in PRUNE_PREFIXES:
+        base = root / prefix
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for name in filenames:
+                rel = Path(dirpath, name).relative_to(root)
+                out.append(_rel_key(rel))
+    return sorted(out)
+
+
+def prune_reason(root, zip_root, rel) -> str:
+    """`""` = 可以删；否则是**不能删的原因**（原样写进日志给人看）。"""
+    rels = _rel_key(rel)
+    parts = Path(rels).parts
+    name = parts[-1]
+    if not parts or parts[0] not in PRUNE_PREFIXES:
+        return "不在代码前缀里（根目录一律不删）"
+    if "__pycache__" in parts:
+        return "编译缓存"
+    if parts[0] in NEVER_TOUCH and rels not in ALLOW_EVEN_IF_NEVER:
+        return "在 NEVER_TOUCH 里"
+    if rels in ALLOW_EVEN_IF_NEVER:
+        return "随程序走的门店映射表，删了所有店一起瞎"
+    if rels in {a for a, _ in ANCHORS}:
+        return "更新器锚点"
+    if not name.lower().endswith(PRUNE_EXTS):
+        return "看着不是我们铺的文件"
+    if any(j in name for j in PRUNE_JUNK):
+        return "像是手工备份/临时文件"
+    if (Path(zip_root) / rel).is_file():
+        # ⭐ 遍历漏了，但文件在 —— **以文件系统为准**，绝不删
+        return "新版里其实还有它（遍历漏了，按存在处理）"
+    return ""
+
+
+def prune_candidates(root, zip_root, have) -> dict:
+    """算出"新版已经没有、本机还留着"的旧文件。
+
+    返回 `{"files": [...], "skipped": {rel: 原因}, "total": 本机文件数, "blocked": bool}`。
+    **只看不算改** —— 真正搬走是 `_prune()` 的事。
+    """
+    files, skipped = [], {}
+    for rel in _local_code_files(root):
+        if _rel_key(rel) in have:
+            continue                                  # 新版还有它，不是残留
+        why = prune_reason(root, zip_root, rel)
+        if why:
+            skipped[rel] = why
+        else:
+            files.append(rel)
+    total = len(_local_code_files(root))
+    blocked = len(files) > PRUNE_MAX_MIN and len(files) > total * PRUNE_MAX_RATIO
+    return {"files": sorted(files), "skipped": skipped, "total": total, "blocked": blocked}
+
+
+def _prune(root, rels, backup) -> list:
+    """把残留**搬进备份目录**（**永不真删**）。没有备份目录就一个都不动。"""
+    if not backup:
+        _log("⚠ 没有备份目录 —— 本次不清理（宁可不删，也不能删了找不回）")
+        return []
+    gone = []
+    for rel in rels:
+        src = Path(root) / rel
+        if not src.is_file():
+            continue
+        dst = Path(backup) / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            gone.append(rel)
+        except OSError as e:
+            _log(f"⚠ 清不掉 {rel}（不影响本次升级）：{e}")
+    return gone
+
+
+def apply_update(root, *, current: str = "", ref: str = BRANCH, staging=None,
+                 smoke: bool = True) -> dict:
     """把代码换成 `ref` 那一版。**数据目录一根手指都不碰。**
 
-    `ref` 默认 main（= 升级）；传某个 commit sha 就是**回退**到那一版。
+    `ref` 默认 main（升级到最新）。
+    `staging` 是"上次留下的解压目录"（`repair()` 用它重跑，省一次下载）。
+    `smoke=False` 关掉铺完之后的冒烟自检（**只有测试用** —— 假的安装目录 import 不起来）。
+
+    ⚠ **动第一个文件之前**必须先做完两件事：把即将被覆盖的文件**快照**一份、
+    把"我打算干什么"写进 **journal**。中途失败抛 `PartialUpdate`，
+    现场留在 `.secrets/update/journal.json`（详见下面 `UPDATE_DIR` 那段注释）。
     """
     root = Path(root)
     if not root.is_dir():
         raise UpdateError(f"安装目录不存在：{root}")
 
-    zip_root = download(ref=ref)
+    zip_root = (Path(staging) if staging and Path(staging).is_dir()
+                else download(ref=ref))
+    # ⚠ 这三个得在 try **外面**初始化：`except` 里要拿它们拼返回值
+    started = False
+    finished = False
+    backup = ""
+    saved = 0
+    plan = {"update": [], "add": [], "remove": []}
+    base = {}
     try:
         pairs = _targets(zip_root)
         have = {_rel_key(rel) for _, rel in pairs}
@@ -752,7 +1120,9 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH) -> dict:
         except (OSError, AttributeError, ValueError):
             pass
 
-        changed, added = [], []
+        # 第一遍：只算差集（读旧、读新、比一比），**先不写盘** ——
+        # 因为"要写哪些、要备份哪些"必须先知道，才能写 journal。
+        todo, changed, added = [], [], []
         for src, rel in pairs:
             dst = root / rel
             old = None
@@ -760,12 +1130,73 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH) -> dict:
                 old = dst.read_bytes()
             except OSError:
                 pass
-            new = src.read_bytes()
-            if old == new:
+            if old == src.read_bytes():
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+            todo.append((src, rel))
             (changed if old is not None else added).append(_rel_key(rel))
+
+        # ⚠ **入口文件最后落地**：新代码可能 import 新模块，而入口最后写 ⇒
+        #   任何时刻中断，旧入口配着"新模块已经在"的目录都还能跑
+        #   （旧入口不认识新模块，但它也不会去 import 它们）。
+        anchors = {a for a, _ in ANCHORS}
+        todo.sort(key=lambda p: (_rel_key(p[1]) in anchors, _rel_key(p[1])))
+
+        # 残留候选：新版没有、本机还留着的旧文件（只算，不动手）
+        cand = prune_candidates(root, zip_root, have)
+        plan = {"update": sorted(set(changed)), "add": sorted(set(added)),
+                "remove": cand["files"], "remove_blocked": cand["blocked"]}
+        base = {"ref": ref, "from": current, "to": remote,
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"), "plan": plan}
+
+        # ★ 现场：先快照、再写 journal，**然后才动第一个文件**
+        #   （快照失败 = 磁盘满/权限不对 ⇒ 一个文件都没动，抛出去就好）
+        # ⚠ 要把"即将删掉的"也快照进去 —— 它们才是最需要退路的。
+        # ⚠ `BUILD.txt` 也得进快照：它是**这份代码的版本指纹**，
+        #   退回去却留着新版本号的话，界面会显示一个它其实没在跑的版本。
+        if plan["update"] or plan["remove"]:
+            backup = str(make_backup(root))
+            saved = _snapshot(root, sorted(set(plan["update"]) | set(plan["remove"])
+                                           | {"BUILD.txt"}), backup)
+        _write_journal(root, dict(base, state="planned", backup=backup,
+                                  saved=saved, staging=str(zip_root)))
+
+        # 第二遍：真的铺（重新从 zip 读 —— 比把几 MB 内容全揣在内存里干净）
+        started = True
+        _write_journal(root, dict(base, state="applying", backup=backup,
+                                  saved=saved, staging=str(zip_root)), required=False)
+        done = []
+        try:
+            for src, rel in todo:
+                _write_file(src, root / rel)
+                done.append(_rel_key(rel))
+        except OSError as e:
+            # ⚠ 不"跳过它继续" —— 那会造出更乱的混合状态
+            detail = f"铺到一半失败了（{len(done)}/{len(todo)} 个文件）：{e}"
+            _write_journal(root, dict(base, state="failed", backup=backup, saved=saved,
+                                      staging=str(zip_root), error=detail, done=done),
+                           required=False)
+            raise PartialUpdate(detail, {
+                "from": current, "to": remote, "changed": done, "added": [],
+                "count": len(done), "backup": backup, "saved": saved,
+                "journal": str(journal_path(root))}) from e
+
+        # ★ 冒烟：**新代码真的 import 得起来吗**（语法错 / 缺依赖都炸在这一关）。
+        #   ⚠ 必须在写 `BUILD.txt` **之前** —— 冒烟不过就整个退回去，
+        #     那时 BUILD.txt 要是已经写成新版本号，界面就会显示一个它其实没在跑的版本。
+        #   ⚠ 也必须在清理旧文件**之前** —— 新代码还没被证明能用，就先别动旧文件。
+        if smoke and todo:
+            ok, why = smoke_test(root)
+            if not ok:
+                back = restore_backup(root)
+                msg = f"新代码自检没过，已自动退回升级前的代码：{why}"
+                if not back.get("ok"):
+                    msg += f"　⚠ 退回也没成功：{back.get('message')}"
+                _log("[更新] " + msg)
+                raise PartialUpdate(msg, {
+                    "from": current, "to": remote, "changed": [], "added": [],
+                    "count": 0, "backup": backup, "saved": saved,
+                    "rolled_back": bool(back.get("ok")),
+                    "journal": str(journal_path(root))})
 
         # 打完补丁写个指纹 —— 从 GitHub 更新过来的没有打包时间戳
         if remote:
@@ -775,11 +1206,39 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH) -> dict:
             except OSError:
                 pass
 
+        # ---- 清理旧文件（**最后一步**：中断在这里只会"多几个旧文件"，程序照跑）
+        removed = []
+        if plan["remove"]:
+            if PRUNE_ENABLED and not cand["blocked"]:
+                removed = _prune(root, plan["remove"], backup)
+            else:
+                why = "比例闸拦住了" if cand["blocked"] else "本版先只报告（`PRUNE_ENABLED=False`）"
+                _log(f"[更新] 有 {len(plan['remove'])} 个旧文件该清（{why}）："
+                     + "、".join(plan["remove"][:8])
+                     + ("…" if len(plan["remove"]) > 8 else ""))
+
+        _write_journal(root, dict(base, state="done", backup=backup, saved=saved,
+                                  staging=str(zip_root), done=done, removed=removed),
+                       required=False)
+        prune_backups(root, keep=2)
+        finished = True
         return {"ok": True, "from": current, "to": remote,
                 "changed": sorted(set(changed)), "added": sorted(set(added)),
-                "count": len(set(changed) | set(added))}
+                "count": len(set(changed) | set(added)),
+                "backup": backup, "saved": saved,
+                # ⚠ `removed` = 真搬走的；`removed_candidates` = 算出来的（审计版只报告不删，
+                #   所以这个版本里前者恒为空、后者可能有值）
+                "removed": removed, "removed_candidates": plan["remove"],
+                "prune_blocked": cand["blocked"], "prune_enabled": PRUNE_ENABLED,
+                "journal": str(journal_path(root))}
     finally:
-        shutil.rmtree(zip_root.parent, ignore_errors=True)
+        # ⚠ 失败了就**保留**解压目录：重跑要用它，现场也要留给人看
+        #   （系统临时目录重启后可能被清 —— 所以 journal 里记了路径，
+        #     修复时先校验它还在不在）。
+        if started and not finished:
+            _log(f"⚠ 升级没走完 —— 解压目录保留在 {zip_root}（重跑要用，别删）")
+        else:
+            shutil.rmtree(zip_root.parent, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ 重启

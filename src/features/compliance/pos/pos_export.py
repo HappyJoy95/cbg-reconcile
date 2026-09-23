@@ -2,9 +2,10 @@
 
 口径照 `pos_metric.py`（纯函数），这里只负责取数和排版。
 
-用法：
-    python pos_export.py --db out/cbg-2026.db --month 2026-08 --out 明细.xlsx
-    python pos_export.py --db out/cbg-2026.db --month 2026-08 --by remark
+用法（⚠ 2026-09-19 起在 `features/compliance/pos/` 下，别再用老路径）：
+    python -m src.features.compliance.pos.pos_export --db out/cbg-2026.db --month 2026-08 --out 明细.xlsx
+    python -m src.features.compliance.pos.pos_export --db out/cbg-2026.db --month 2026-08 --by remark
+（控制台里还是 `python -m src.cli pos-export`，别的入口没变。）
 
 出三个 sheet：
     汇总       —— 分母/分子/分数，以及**每一步的算式**（人能对着核）
@@ -99,6 +100,10 @@ def main(argv=None) -> int:
     mr = pm.score_month(all_orders, all_returns, args.month, by=args.by)
     # ⭐ 申诉后口径：把团单/团单出单也排掉（用户 2026-09-16 要两个数并排看）
     mr_a = pm.score_month(all_orders, all_returns, args.month, by=args.by, exclude_team=True)
+    # ⭐ 官方口径（PPT《POS合规：计算逻辑及方法》，2026-09-21）：
+    #   现金+记账 扣减、不扣退货、**先按天算再取日均值**。
+    off = pm.score_month_official(all_orders, all_returns, month=args.month,
+                                  by=args.by)
 
     rows = fetch(conn, args.month, args.by)
     rets = []
@@ -152,6 +157,15 @@ def main(argv=None) -> int:
         {"项": "⑥ 分子 = ④ − ⑤", "值": round(mr.num, 2)},
         {"项": "分数 = ⑥ / ③（**现状**）",
          "值": ("%.2f%%" % mr.rate) if mr.rate is not None else "—（分母为 0）"},
+        {"项": "── ⭐ 官方口径（PPT）──", "值": "现金+记账 扣减 · 退货扣掉（净额）· 日均值"},
+        {"项": "官方 · 扣减（现金+记账）", "值": round(off["deduct"], 2)},
+        {"项": "官方 · 总金额", "值": round(off["total"], 2)},
+        {"项": "官方 · 天数（有交易的天）", "值": off["days"]},
+        {"项": "官方 · **POS 使用率**（日均值）",
+         "值": ("%.2f%%" % off["rate"]) if off["rate"] is not None else "—（没有交易）"},
+        {"项": "官方 · 同月汇总法（交叉核对）",
+         "值": ("%.2f%%" % off["rate_sum"]) if off["rate_sum"] is not None else "—"},
+        {"项": "⚠ 官方公式里的「异常金额」", "值": "暂无数据源（要建议零售价），按 0 计"},
         {"项": "── 申诉后口径 ──", "值": "团单/团单出单也排掉"},
         {"项": "申诉后 · 分母", "值": round(mr_a.den, 2)},
         {"项": "申诉后 · 分子", "值": round(mr_a.num, 2)},

@@ -1,0 +1,952 @@
+:root,
+body {
+  /* danger = 控制台的 --bad（名称跟上游盘点一致，值跟主题走）。
+     ⚠ 必须同时挂 body：`:root` 上的 var(--bad) 在 html 就算完了，
+       深色把 --bad 写在 body 上时**不会**回头重算 --danger（踩过）。 */
+  --danger: var(--bad);
+  --danger-bg: var(--bad-bg);
+  /* 表外码：控制台没有这档语义；紫强调 + 浅紫底（深色在下面 body 覆盖） */
+  --info: #7048e8;
+  --info-bg: #f1ecff;
+  --radius: var(--r-md, 12px);
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.06);
+}
+
+/* 深色下表外码别用浅紫底（压在深卡片上会发光）—— 只动盘点自己的两档 */
+body[data-theme='dark'],
+body[data-theme='dusk'],
+body[data-theme='dianye'] {
+  --info: #a78bfa;
+  --info-bg: #2e1065;
+}
+
+/* ⚠ 拆 iframe 后：markup 在控制台 `#subpanel-inventory` 里，包 `.inv-root`。
+   组件选择器一律挂 `.inv-root` 下，避免和控制台 `.card/.toast/.hint` 互盖。 */
+.inv-root {
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 嵌在控制台：底色透出；藏掉自带大标题和「回控制台」 */
+#subpanel-inventory .inv-root {
+  background: transparent;
+}
+#subpanel-inventory .inv-root .topbar h1,
+#subpanel-inventory .inv-root #btn-back {
+  display: none;
+}
+#subpanel-inventory .inv-root .topbar {
+  padding: 2px 0 10px;
+}
+#subpanel-inventory .inv-root .wrap {
+  max-width: none;
+  padding: 12px 16px 0;
+}
+#subpanel-inventory .inv-root #results-card {
+  margin-bottom: 0;
+}
+#subpanel-inventory .inv-root .table-wrap {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+.inv-root .wrap{
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 16px 20px 60px;
+}
+
+/* ---------- 顶栏 ---------- */
+.inv-root .topbar{
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0 16px;
+  flex-wrap: wrap;
+}
+
+.inv-root .topbar h1{
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+.inv-root .topbar h1 span{
+  color: var(--brand);
+}
+
+.inv-root .topbar .session{
+  color: var(--muted);
+  font-size: 13px;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inv-root .pill{
+  background: var(--idle-bg);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: #3c4a63;
+}
+
+.inv-root .pill.on{
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.inv-root .pill.loading{
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* ---------- 卡片 ---------- */
+.inv-root .card{
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.inv-root .card h2{
+  font-size: 15px;
+  margin: 0 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inv-root .card h2 .sub{
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.inv-root .hidden{
+  display: none !important;
+}
+
+/* ---------- 表单 ---------- */
+.inv-root .row{
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.inv-root .field{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inv-root .field > label{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inv-root input[type='text'],
+.inv-root input[type='date'],
+.inv-root input[type='password'],
+.inv-root input[type='number'],
+.inv-root select{
+  font: inherit;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--text);
+  outline: none;
+  min-width: 0;
+}
+
+.inv-root input:focus,
+.inv-root select:focus{
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-wash);
+}
+
+.inv-root select{
+  max-width: 380px;
+}
+
+.inv-root button{
+  font: inherit;
+  cursor: pointer;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--field);
+  color: var(--text);
+  padding: 9px 16px;
+  transition: 0.15s;
+}
+
+.inv-root button:hover{
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+
+.inv-root button.primary{
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+.inv-root button.primary:hover{
+  background: var(--brand-dark);
+  border-color: var(--brand-dark);
+}
+
+.inv-root button.ghost{
+  background: transparent;
+}
+
+.inv-root button:disabled{
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.inv-root .hint{
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 10px;
+  line-height: 1.7;
+}
+
+.inv-root .hint b{
+  color: #3c4a63;
+}
+
+/* ⚠ `.adv`（那个折叠的「云商账号 / 接口设置」块）2026-09-21 删了 ——
+   用户：「接口设置这个页面就不要了」，块里的内容摊平进 ① 那张卡。
+   样式一起删：留着的话下一个人会以为界面上还有这么个折叠块。 */
+
+/* ---------- 扫码台 ---------- */
+.inv-root .scan-grid{
+  display: grid;
+  /* ⚠⚠ **左右并排别拆**（2026-09-21 量出来的）：左栏（扫码+记录）和右栏
+     （统计+进度）并排时高度是"取高的那个"；改成上下叠加就变成**相加** ——
+     实测那样反而更高（377px vs 300px）。所以省空间靠的是**让右栏变矮**，
+     不是把它挪到下面去。右栏 320 → 340px 是让 2 列宽一点，
+     标签「应盘（有串号）」不至于被截断。 */
+  grid-template-columns: 1fr 340px;
+  gap: 18px;
+}
+
+@media (max-width: 900px) {
+  .inv-root .scan-grid{
+    grid-template-columns: 1fr;
+  }
+}
+
+.inv-root .scan-input{
+  width: 100%;
+  font-size: 26px !important;
+  letter-spacing: 1px;
+  padding: 16px 18px !important;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  border: 2px solid var(--brand) !important;
+  border-radius: 12px !important;
+  background: var(--field) !important;
+}
+
+.inv-root .scan-input::placeholder{
+  color: var(--muted);
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.inv-root .feedback{
+  margin-top: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--row-alt);
+  border: 1px solid var(--line);
+  transition: background 0.12s;
+}
+
+.inv-root .feedback .icon{
+  font-size: 26px;
+  line-height: 1;
+}
+
+.inv-root .feedback .fb-main{
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.inv-root .feedback .fb-sub{
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.inv-root .feedback.ok{
+  background: var(--ok-bg);
+  border-color: var(--ok);
+}
+
+.inv-root .feedback.ok .fb-main{
+  color: var(--ok);
+}
+
+.inv-root .feedback.dup{
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+}
+
+.inv-root .feedback.dup .fb-main{
+  color: var(--warn);
+}
+
+.inv-root .feedback.foreign{
+  background: var(--info-bg);
+  border-color: #d6c9ff;
+}
+
+.inv-root .feedback.foreign .fb-main{
+  color: var(--info);
+}
+
+.inv-root .feedback.unknown{
+  background: var(--danger-bg);
+  border-color: var(--bad);
+}
+
+.inv-root .feedback.unknown .fb-main{
+  color: var(--danger);
+}
+
+.inv-root .stat-grid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.inv-root .stat{
+  background: var(--hover);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  /* ⚠⚠ 2026-09-21：**标签和数字改成横排**（原来是上下两行）。
+     用户「扫码盘点这个页面显示区域有点小吧」—— 量出来右侧 7 张统计卡
+     2 列 4 行占掉 334px，是那张卡片 451px 的主要来源（左栏才 217px）。
+     横排后每张卡 76px → 42px，右栏 334 → 232px ⇒ 卡片落到 300px 上下，
+     「盘点结果」跟着上移约 150px（首屏多看 3 行左右）。 */
+  padding: 8px 12px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.inv-root .stat .k{
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* ⚠ 窄屏宁可截断，也别让某一格换行把整行撑高（统计卡的价值在**一眼扫过**） */
+  white-space: nowrap;
+}
+
+.inv-root .stat .v{
+  font-size: 20px;
+  font-weight: 700;
+  /* ⚠ 横排之后 `margin-top` 不再需要（它原来是让数字落在标签下面那行的） */
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.inv-root .stat.ok .v{
+  color: var(--ok);
+}
+
+.inv-root .stat.warn .v{
+  color: var(--warn);
+}
+
+.inv-root .stat.danger .v{
+  color: var(--danger);
+}
+
+.inv-root .stat.info .v{
+  color: var(--info);
+}
+
+.inv-root .progress{
+  height: 10px;
+  background: var(--idle-bg);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 8px 0 4px;
+}
+
+.inv-root .progress > i{
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #35c46f, #12a150);
+  transition: width 0.25s;
+}
+
+.inv-root .progress-label{
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inv-root .recent{
+  margin-top: 14px;
+  font-size: 12.5px;
+}
+
+.inv-root .recent .item{
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed #eef1f6;
+  color: var(--muted);
+}
+
+.inv-root .recent .item .code{
+  font-family: 'SF Mono', Menlo, monospace;
+  color: #3c4a63;
+}
+
+.inv-root .toolbar{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  align-items: center;
+}
+
+.inv-root .toolbar .spacer{
+  flex: 1;
+}
+
+/* ---------- 标签页 ----------
+   ⚠ 拆 iframe 后 markup 在控制台同文档里：侧栏导航也叫 `.tabs`，且是
+   `flex-direction: column`（特异度 0-1-0）。这里不写死 `row` 会被它盖成竖排
+   （2026-09-23 用户截图：在途/未扫到/… 一行一个）。 */
+.inv-root .tabs{
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.inv-root .tabs button{
+  border: none;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 9px 14px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.inv-root .tabs button:hover{
+  background: var(--hover);
+  border-color: transparent;
+  border-bottom-color: #d7dfec;
+}
+
+.inv-root .tabs button.active{
+  color: var(--brand);
+  border-bottom-color: var(--brand);
+  font-weight: 600;
+}
+
+.inv-root .tabs .badge{
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  margin-left: 6px;
+  border-radius: 9px;
+  background: var(--idle-bg);
+  color: #4a5670;
+  font-size: 11px;
+  text-align: center;
+}
+
+.inv-root .tabs button.active .badge{
+  background: var(--brand);
+  color: #fff;
+}
+
+.inv-root .tabs .badge.hot{
+  background: var(--bad-bg);
+  color: var(--danger);
+}
+
+/* ---------- 表格 ---------- */
+.inv-root .table-wrap{
+  overflow: auto;
+  /* ⚠ 这个固定高度是**非嵌入态**（单独打开 `/inventory.html`）用的。
+     嵌在控制台 iframe 里时，由文件末尾那套 `body.embed` 的 flex 把它撑满 ——
+     别在这儿写 `calc(100vh - Npx)`，试过，没用（理由见那段注释）。 */
+  max-height: 560px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.inv-root table{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.inv-root thead th{
+  position: sticky;
+  top: 0;
+  background: var(--hover);
+  text-align: left;
+  padding: 9px 10px;
+  font-weight: 600;
+  color: #46536b;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  z-index: 1;
+}
+
+.inv-root tbody td{
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.inv-root tbody tr:hover{
+  background: var(--hover);
+}
+
+.inv-root td.mono,
+.inv-root .mono{
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.inv-root td.num{
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-root .tag{
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--row-alt);
+  color: #55617a;
+  white-space: nowrap;
+}
+
+.inv-root .tag.ok{
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.inv-root .tag.dup{
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.inv-root .tag.foreign{
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.inv-root .tag.unknown{
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.inv-root .empty{
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.inv-root .empty .big{
+  font-size: 30px;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.inv-root .qty-input{
+  width: 84px;
+  padding: 5px 8px !important;
+  text-align: right;
+}
+
+.inv-root .note-input{
+  width: 100%;
+  min-width: 120px;
+  padding: 5px 8px !important;
+  font-size: 12.5px;
+}
+
+.inv-root .diff-pos{
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.inv-root .diff-neg{
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.inv-root .sum-list{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.inv-root .sum-item{
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--row-alt);
+}
+
+.inv-root .sum-item .k{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inv-root .sum-item .v{
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-root .mini-btn{
+  padding: 4px 10px;
+  font-size: 12.5px;
+  border-radius: 7px;
+  white-space: nowrap;
+  border-color: var(--ok);
+  background: var(--ok-bg);
+  color: #0d7a3d;
+  font-weight: 600;
+}
+
+.inv-root .mini-btn:hover{
+  background: var(--ok-bg);
+  border-color: var(--ok);
+}
+
+.inv-root button.ghost-btn{
+  background: var(--field);
+  border-color: var(--line);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.inv-root button.ghost-btn:hover{
+  background: var(--bad-bg);
+  border-color: var(--bad);
+  color: var(--danger);
+}
+
+.inv-root td.act-cell{
+  white-space: nowrap;
+}
+
+.inv-root button.mini-x{
+  padding: 0 6px;
+  line-height: 20px;
+  font-size: 12px;
+  border-radius: 6px;
+  border-color: transparent;
+  background: transparent;
+  color: #9aa5b8;
+}
+
+.inv-root button.mini-x:hover{
+  background: var(--bad-bg);
+  border-color: var(--bad);
+  color: var(--danger);
+}
+
+/* ---------- 保存状态 ---------- */
+.inv-root .save-status{
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.inv-root .save-status.ok{
+  color: var(--ok);
+}
+
+.inv-root .save-status.err{
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.inv-root #btn-backup.need{
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ---------- 登录区 ---------- */
+/* ⚠ `.login-box` 那个灰底小盒子 2026-09-21 跟着折叠块一起删了（账号那行现在就是
+   卡里普通的一行）；`.login-status`（那行字本身）留着 —— 它还在用。 */
+
+.inv-root .chk{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.inv-root #captcha-img{
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field);
+  cursor: pointer;
+}
+
+.inv-root .login-status{
+  font-size: 12.5px;
+  margin-top: 8px;
+  min-height: 18px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.inv-root .login-status.ok{
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.inv-root .login-status.err{
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.inv-root .login-status.warn{
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.inv-root .login-status.loading{
+  color: var(--brand);
+}
+
+/* ---------- 提示条 ---------- */
+.inv-root .toast{
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  background: var(--ink-2);
+  color: var(--ink-text);
+  padding: 12px 18px;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  z-index: 99;
+  max-width: 420px;
+  font-size: 13.5px;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: 0.2s;
+  pointer-events: none;
+}
+
+.inv-root .toast.show{
+  opacity: 1;
+  transform: none;
+}
+
+.inv-root .toast.err{
+  background: var(--bad);
+  color: var(--on-bad);
+}
+
+.inv-root .loading-mask{
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 90;
+  backdrop-filter: blur(2px);
+}
+
+.inv-root .loading-box{
+  background: var(--card);
+  border-radius: 14px;
+  padding: 26px 34px;
+  box-shadow: var(--shadow);
+  text-align: center;
+  border: 1px solid var(--line);
+}
+
+.inv-root .spinner{
+  width: 30px;
+  height: 30px;
+  border: 3px solid var(--line);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 12px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.inv-root .loading-box .msg{
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.inv-root .loading-box .sub{
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+@media print {
+  .inv-root .topbar .session,
+.inv-root .toolbar,
+.inv-root .tabs,
+.inv-root .export-bar,
+.inv-root #setup,
+.inv-root #scan-card{
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  .inv-root .card{
+    box-shadow: none;
+    border: none;
+    padding: 0;
+  }
+  .inv-root .table-wrap{
+    max-height: none;
+    overflow: visible;
+    border: none;
+  }
+}
+
+/* ==== 接进 cbg-reconcile 后加的（M16，2026-09-20）====================
+   顶部那个「← 回控制台」是个 <a>：上面 `button {...}` 那套（元素选择器）选不到它，
+   不回填样式的话它就是个蓝字下划线的裸链接，跟旁边的按钮完全不搭。 */
+.inv-root .topbar a.ghost{
+  font: inherit;
+  cursor: pointer;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 9px 16px;
+  transition: 0.15s;
+  text-decoration: none;
+}
+
+.inv-root .topbar a.ghost:hover{
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+
+/* ==== 嵌在控制台里（M16）：`?embed=1` ================================
+   控制台把它嵌进 iframe 了（用户 2026-09-20：「做嵌套进来吧，现在单独
+   打开一个页面很奇怪」）。嵌进去之后：
+     * 大标题和「← 回控制台」是多余的（控制台自己有标题、有导航）；
+     * 底色交给控制台那张卡片，不然两层浅底叠在一起显脏；
+     * 左右留白收窄一点 —— iframe 里那 1240px 上限用不上。 */
+
+/* ─────────── 嵌入态：把「盘点结果」的剩余高度吃满（2026-09-21）───────────
+
+   用户圈着一张截图问：「**这个区域，为什么不显示**」—— 那片空白在表格**下面**：
+   `.table-wrap` 写死 `max-height: 560px`，表格里有 3000+px 的行只能在 560px 的
+   框里滚（右边缘那条细滚动条），框下面是页面留白 —— **屏越高那片留白越大**
+   （实测 1440 屏下约 130px），看着就像"这块地方空着不用"。
+
+   ⚠⚠ **先试过 `max-height: calc(100vh - 694px)`，证明没用**：表格长高的同时
+     页面总高也跟着长 ⇒ 那块留白原样还在（净收益 ≈ 0，还平白多出一条滚动）。
+     **留白是"页面比视口矮/等"造成的，光把表格拉长治不了它。**
+   ⇒ 正解是**让浏览器自己算**：整页 flex 竖排，结果卡片和表格各 `flex: 1`，
+     剩余高度全给表格 ⇒ 屏幕多高都铺满，不留白、也不多出滚动。
+
+   ⚠ 只在 `body.embed`（iframe 里）生效 —— 单独打开那一页时保持固定的 560px。 */
+
+/* ⚠⚠ 2026-09-21：用户圈着「盘点结果」下面那片空白问「**这个区域，为什么不显示**」。
+   我为它试了**两条路，实测都不行**，记在这儿免得下一个人再试一遍：
+
+   ① `max-height: calc(100vh - 694px)` —— 表格长高的同时**页面总高也长**，
+      那块留白原样还在（净收益 ≈ 0，还平白多出一条滚动）。
+   ② 嵌入态整页 flex（`body{height:100vh}` + 各层 `flex:1` + `min-height:0`）——
+      高屏下表格 560 → **572px（只多 12px）**，因为表格**上方**的内容（扫码卡片
+      + 结果卡片的头）已经占掉 616px；而**矮屏下从 560 掉到 218px**
+      （上面把地方吃光了）⇒ **净亏**。
+
+   ⇒ 结论：**那片空白填上也就多不到一行**，杠杆根本不在那儿。
+     数据在 `.dsh/tasks/measure-inv-layout.py`（三档屏幕一张表）。
+     ⚠ 想要"一次看到更多行"，能动的只有上面那几块和 `max-height` 本身 ——
+       而动它们之前**先问用户**（AGENTS 坑 16：形态别自己拍）。 */
+
+/* ─────────── 把「盘点结果」下面的空白取消掉（2026-09-21）───────────
+
+   用户：「**把下面空白的地方取消掉吧，太难受了**」
+
+   那片空白 = 表格底部 → 页面底，实测（1440 屏）**136px**。拆开是三笔留白：
+   `.wrap` 的 `padding-bottom: 60` + 结果卡片的 `margin-bottom: 16` + 卡片自己的
+   `padding-bottom: 18` —— **都是留白，表格本可以长上去**（它下面没有别的内容）。
+
+   ⚠⚠ **两件事必须一起做，少一件就白做**：
+     ① 底下那两层留白收掉（下面两行）；
+     ② 表格限高改成**跟着视口算**。
+   上一轮我只做了 ②，结果是"表格长高的同时页面也长高，空白原样在" —— 白改。
+
+   ⚠ 外面那层 `max(560px, …)` **是兜底，不能省**：矮屏（iframe 只有 638px）
+     算出来才 20 几 px，表格会塌成一条 —— 比原来还糟。有它在，矮屏一律保持 560px
+     走"页面滚动"那条老路。
+   ⚠ `706` 是量出来的，三段加起来：
+       · 表格**距视口顶部** 616px（实测；扫码卡片里「最近扫描」变长会跟着变）
+       · 表格**下面剩下** 74px = 结果卡片底部那个「导出本表 CSV」工具条（56）
+         + 卡片自己的 `padding-bottom`（18）
+       · 页脚「前端资源 v131」那行 16px（2026-09-21 加的，**它也算在下面**）
+     ⇒ 表格 = `100vh - 706px` 时，**表格底 + 那 74px 正好落在视口底**，页面不多不少一屏。
+     ⚠ 上一版写的 634 **漏了那 74px**，实测凭 54px 的页面滚动量才看出来
+       （表格 674px 看着够了，滚到底下面还空着 74px）。
+     ⚠ 改了「盘点结果」上面或下面任何一块的高度，`706` 都要重算 ——
+       它就是这两段量出来的，不是拍脑袋。 */
+
+/* 页脚那行版本号（2026-09-21）—— 用户自查"我拿到的是新版吗"用的。
+   ⚠ 它占一行高度（约 16px），所以 `.table-wrap` 那个 `100vh - 690px`
+     要跟着改成 706 —— 不然页面会多出一条小滚动。 */
+.inv-root .foot-ver{
+  margin-top: 6px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+}

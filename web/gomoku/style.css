@@ -1,0 +1,266 @@
+/* 彩蛋五子棋 —— 全部挂在 #gomoku-mask 下，不污染控制台全局。 */
+
+#gomoku-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  background: var(--overlay, rgba(0, 0, 0, 0.55));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+#gomoku-mask[hidden] {
+  display: none;
+}
+
+#gomoku-mask .gomoku-card {
+  position: relative;
+  background: var(--card, #fff);
+  color: var(--ink, #222);
+  border-radius: var(--r-lg, 14px);
+  box-shadow: var(--shadow-modal, 0 16px 48px rgba(0, 0, 0, 0.28));
+  padding: 20px 24px 24px;
+  width: min(560px, 100%);
+  max-height: 95vh;
+  overflow: auto;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+#gomoku-mask .gomoku-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+#gomoku-mask .gomoku-head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+#gomoku-mask .gomoku-status {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--muted, #666);
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+#gomoku-mask #current-player {
+  font-weight: 650;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: var(--ink, #333);
+  color: var(--card, #fff);
+}
+
+#gomoku-mask #current-player.black {
+  background: #222;
+  color: #fff;
+}
+
+#gomoku-mask #current-player.white {
+  background: #f3f3f3;
+  color: #222;
+  border: 1px solid var(--line, #ddd);
+}
+
+#gomoku-mask #learn-info {
+  font-size: 12px;
+  color: var(--muted, #888);
+  width: 100%;
+}
+
+#gomoku-mask .gomoku-foot {
+  margin-top: 16px;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+#gomoku-mask .gomoku-foot .btn.active {
+  background: var(--ok, #4caf50);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* ── 棋盘（作用域内；cell/piece 类名只在 mask 下生效） ── */
+
+#gomoku-mask .board {
+  display: grid;
+  grid-template-columns: repeat(15, 32px);
+  grid-template-rows: repeat(15, 32px);
+  gap: 0;
+  background: #d4a76a;
+  padding: 16px;
+  border-radius: 8px;
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.2);
+  margin: 0 auto;
+  width: max-content;
+  max-width: 100%;
+}
+
+#gomoku-mask .cell {
+  width: 32px;
+  height: 32px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+#gomoku-mask .cell::before,
+#gomoku-mask .cell::after {
+  content: '';
+  position: absolute;
+  background: #8b6914;
+}
+
+#gomoku-mask .cell::before {
+  width: 100%;
+  height: 1px;
+  top: 50%;
+  left: 0;
+}
+
+#gomoku-mask .cell::after {
+  width: 1px;
+  height: 100%;
+  top: 0;
+  left: 50%;
+}
+
+#gomoku-mask .cell:first-child::before,
+#gomoku-mask .cell:nth-child(-n + 15)::before {
+  width: 50%;
+  left: 50%;
+}
+
+#gomoku-mask .cell:nth-child(15n + 1)::after {
+  height: 50%;
+  top: 50%;
+}
+
+#gomoku-mask .cell:nth-child(15n)::after {
+  height: 50%;
+}
+
+#gomoku-mask .cell:nth-child(n + 211)::before {
+  width: 50%;
+}
+
+#gomoku-mask .cell:hover:not(.occupied)::before,
+#gomoku-mask .cell:hover:not(.occupied)::after {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+#gomoku-mask .cell.occupied {
+  cursor: default;
+}
+
+#gomoku-mask .piece {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  animation: gomoku-place 0.2s ease-out;
+}
+
+#gomoku-mask .piece.black {
+  background: radial-gradient(circle at 30% 30%, #555, #000);
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+#gomoku-mask .piece.white {
+  background: radial-gradient(circle at 30% 30%, #fff, #ccc);
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+#gomoku-mask .piece.winning {
+  animation: gomoku-pulse 0.5s ease-in-out infinite;
+}
+
+@keyframes gomoku-place {
+  0% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes gomoku-pulse {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 215, 0, 0.7);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.1);
+    box-shadow: 0 0 20px 10px rgba(255, 215, 0, 0.5);
+  }
+}
+
+/* 胜负层：独立 id，避开控制台全局 .modal */
+
+#gomoku-mask #gomoku-win {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  z-index: 20;
+}
+
+#gomoku-mask #gomoku-win.hidden {
+  display: none;
+}
+
+#gomoku-mask .gomoku-win-card {
+  background: var(--card, #fff);
+  padding: 32px 36px;
+  border-radius: 16px;
+  text-align: center;
+  box-shadow: var(--shadow-modal, 0 12px 40px rgba(0, 0, 0, 0.3));
+}
+
+#gomoku-mask .gomoku-win-card h2 {
+  margin: 0 0 20px 0;
+  font-size: 22px;
+  color: var(--ink, #222);
+}
+
+@media (max-width: 560px) {
+  #gomoku-mask .board {
+    grid-template-columns: repeat(15, 20px);
+    grid-template-rows: repeat(15, 20px);
+    padding: 10px;
+  }
+
+  #gomoku-mask .cell {
+    width: 20px;
+    height: 20px;
+  }
+
+  #gomoku-mask .piece {
+    width: 18px;
+    height: 18px;
+  }
+}

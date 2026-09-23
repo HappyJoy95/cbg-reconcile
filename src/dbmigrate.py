@@ -2,7 +2,7 @@
 
 ## 背景
 
-2.1.0 把 `out/cbg-<年>.db` 从"只有华为订单"扩成"四池同库"，多了三张表
+2.1.0 把 `out/cbg-<年>.db` 从"只有华为订单"扩成"同库"，多了三张表
 （`lg_stock` / `erp_stock` / `erp_sales`）。**其实不迁也能用** ——
 `pools.ensure()` 会建表、`dump.ensure_columns()` 会补列。
 

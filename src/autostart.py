@@ -39,11 +39,19 @@ import tempfile
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
+from . import version
 from .winutil import decode, schtasks, xml_text
 from . import runtime
 
 APP_ID = "cbg-reconcile"
-APP_NAME = "CBG报量对账"
+#: ⚠ **别在这儿再写一份** —— 从 `version` 拿（原来两处各写了一遍 `CBG报量对账`，
+#: 改名时只改一处就漏一处）。
+APP_NAME = version.APP_NAME
+
+#: 改过名之前的那些名字。**开机自启的注册表键名 + 计划任务名都跟着变**，
+#: 所以建新的时必须顺手删旧的 —— 不删的话 Windows 那边**两份并存、开机启两次**
+#: （跟定时任务改名那次一模一样的坑）。
+LEGACY_APP_NAMES = ("CBG报量对账",)
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # 选了"以管理员身份启动"时要跟着一起返回的警告。
@@ -54,9 +62,20 @@ ELEVATED_BREAKS_CAPTURE = (
     "Edge / Chrome 拒绝以管理员运行，会把命令行交棒出去然后自己退出，"
     "我们等不到调试端口。真要用抓会话，把「启动方式」改回**普通权限**。")
 
-# 开机自启用的计划任务名。带后缀，跟「定时执行」那个（CBG报量对账）区分开 ——
+# 开机自启用的计划任务名。带后缀，跟「定时执行」那个（`schedule.TASK_NAME`）区分开 ——
 # 用户在任务表里一眼能看出哪个是"开机常驻"、哪个是"每天跑一次"。
 AUTOSTART_TASK = f"{APP_NAME}-开机自启"
+
+#: **所有**开机自启的任务名（含旧名字的）。
+#:
+#: ⚠⚠ 这个元组是给 `schedule._is_ours` 用的，**不是可有可无的**：
+#:   旧名字那个 `CBG报量对账-开机自启` 正好**以 `CBG报量对账` 开头**，
+#:   而那是 `LEGACY_TASK_NAMES` 里的一项 ⇒ 它会被当成"老名字的定时任务"
+#:   列到「定时执行」那张表上、让门店点「删除」。
+#:   **删了等于把开机自启杀了**（而用户完全不知道服务为什么不再自启）——
+#:   这正是 `_is_ours` 那段注释警告的事，只是换名字会让它重新发生。
+AUTOSTART_TASK_NAMES = (AUTOSTART_TASK,) + tuple(
+    f"{n}-开机自启" for n in LEGACY_APP_NAMES)
 
 # 任务计划 XML 的命名空间。标签名固定英文，不受系统语言影响
 TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
@@ -242,8 +261,13 @@ def _win_status() -> dict:
 
 def _write_task_xml(root) -> Path:
     """schtasks 要求 XML 是 **Unicode**（UTF-16）—— 我们这里带中文描述，
-    写成 UTF-8 有可能被拒。用 utf-16 写（Python 会带 BOM）。"""
-    path = Path(tempfile.gettempdir()) / f"{APP_ID}-autostart-task.xml"
+    写成 UTF-8 有可能被拒。用 utf-16 写（Python 会带 BOM）。
+
+    ⚠ 文件名里**带进程号**（2026-09-19 加）：原来是系统临时目录里一个**固定名字**，
+    两个进程同时跑（比如开发机上并行跑两套测试）会互相覆盖 —— 实测就是这么假红了一条。
+    写法仍然"看得见、找得到"，只是不再共用同一个文件。
+    """
+    path = Path(tempfile.gettempdir()) / f"{APP_ID}-autostart-task-{os.getpid()}.xml"
     path.write_text(task_xml(root), encoding="utf-16")
     return path
 
@@ -303,6 +327,7 @@ def _win_install(root, elevated: bool | None = None) -> dict:
     r = schtasks(["/create", "/tn", AUTOSTART_TASK, "/xml", str(xml_path), "/f"], timeout=30)
     if r is not None and r.returncode == 0:
         _drop_runkey()
+        left = _drop_legacy()
         return {"ok": True, "mode": "task", "elevated": True,
                 "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC",
                 "warning": ELEVATED_BREAKS_CAPTURE}
@@ -314,6 +339,7 @@ def _win_install(root, elevated: bool | None = None) -> dict:
                    "/rl", "HIGHEST", "/tr", str(bat), "/f"], timeout=30)
     if r2 is not None and r2.returncode == 0:
         _drop_runkey()
+        left = _drop_legacy()
         return {"ok": True, "mode": "task", "elevated": True, "script": str(bat),
                 "message": f"已注册开机启动「{AUTOSTART_TASK}」—— 登录后**以管理员身份**自动运行，不弹 UAC",
                 "warning": ELEVATED_BREAKS_CAPTURE}
@@ -348,27 +374,74 @@ def _install_runkey(root) -> dict:
     except OSError as e:
         return {"ok": False, "mode": None, "elevated": False,
                 "message": f"写注册表失败：{e}"}
-    return {"ok": True, "mode": "runkey", "elevated": False,
-            "message": "已注册开机启动（普通权限，注册表启动项）"}
+    # ⚠ **装成功了才清旧的**（不是先删后建）—— 反过来中间失败就变成
+    #   "旧的没了、新的没装上"，开机再也不会自启，而当天没人会发现。
+    left = _drop_legacy()
+    msg = "已注册开机启动（普通权限，注册表启动项）"
+    out = {"ok": True, "mode": "runkey", "elevated": False, "message": msg}
+    if left:
+        # ⚠ 删不掉必须**报出来** —— 否则就是"界面写着普通权限、旧键还在、
+        #   开机启两次"，而用户完全不知道（这个项目为"旧任务删不掉"栽过好几轮）。
+        out["message"] = msg + "；⚠ 旧名字的启动项没删掉：" + "、".join(left)
+        out["leftover"] = left
+    return out
 
 
 def _drop_runkey() -> None:
+    """删**当前名字**那个注册表启动项（装计划任务那条路时要它让位）。"""
+    _drop_runkey_named([APP_NAME])
+
+
+def _drop_runkey_named(names) -> list:
+    """删指定名字的启动项，返回**没删掉的**。
+
+    ⚠ 改名迁移要用（见 `_drop_legacy`）；本来那个"吞掉一切异常"的写法
+      在这条路上不行 —— 删不掉必须**报出来**，不然就是"界面上写着普通权限、
+      实际旧键还在、开机启两次"（这个项目为"旧任务删不掉"栽过好几轮）。
+    """
     import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            winreg.DeleteValue(k, APP_NAME)
-    except (FileNotFoundError, OSError):
-        pass
+    failed = []
+    for name in names:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, name)
+        except FileNotFoundError:
+            pass                      # 本来就没有，正常
+        except OSError:
+            failed.append(name)
+    return failed
 
 
-def _task_exists() -> bool:
+def _drop_legacy() -> list:
+    """把**旧名字**留下的自启痕迹清掉（注册表键 + 计划任务）。返回没清掉的。
+
+    ⚠ 不复用 `_drop_runkey_named` 的话会漏掉计划任务那条路：
+      旧名字可能既有 Run 键、又有个计划任务（老版本两条路都装过）。
+    ⚠ 只在**新名字装成功之后**才调 —— 先删后建的话，中间失败就变成
+      "旧的没了、新的没装上"，**开机再也不会自启，而当天没人会发现**。
+    """
+    failed = list(_drop_runkey_named(list(LEGACY_APP_NAMES)))
+    for legacy in LEGACY_APP_NAMES:
+        name = f"{legacy}-开机自启"
+        try:
+            if _task_exists(name):
+                r = schtasks(["/delete", "/tn", name, "/f"], timeout=30)
+                if r is None or r.returncode != 0:
+                    failed.append(name)
+        except Exception:                                      # noqa: BLE001
+            failed.append(name)
+    return failed
+
+
+def _task_exists(task_name: str = AUTOSTART_TASK) -> bool:
     """那条开机自启的计划任务现在在不在。
 
     ⚠ **先问再删**，不要靠解析 `schtasks /delete` 的报错文案来判断"任务本来就没有"——
     那个文案是**本地化**的（中文 Windows 上是「错误: 系统找不到指定的文件。」），
     按它判断等于把逻辑绑死在某一种系统语言上。`/query` 只看退出码，跟语言无关。
     """
-    r = schtasks(["/query", "/tn", AUTOSTART_TASK])
+    r = schtasks(["/query", "/tn", task_name])
     return r is not None and r.returncode == 0
 
 

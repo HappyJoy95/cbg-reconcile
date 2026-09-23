@@ -1,21 +1,6 @@
-:root {
-  --bg: #f5f6f8;
-  --card: #ffffff;
-  --line: #e3e6ea;
-  --text: #1c2024;
-  --muted: #6b7280;
-  --brand: #2563eb;
-  --brand-dark: #1d4ed8;
-  --ok: #15803d;
-  --ok-bg: #dcfce7;
-  --bad: #b91c1c;
-  --bad-bg: #fee2e2;
-  --warn: #b45309;
-  --warn-bg: #fef3c7;
-  --idle: #6b7280;
-  --idle-bg: #eceef1;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
-}
+/* ⚠ 所有设计令牌（颜色 / 尺寸 / 圆角 / 阴影 / **动效时长**）都在 `theme.css` 里 ——
+   这份只写组件规则。要换主题、要关动画、要做精简模式，**都改那一份**。 */
+
 
 * { box-sizing: border-box; }
 
@@ -32,24 +17,30 @@ body {
    ⚠ 2026-09-18（用户定）：「左右布局吧，然后把上面的门店设置这些放到左下角」。
    原来是一条横顶栏 + 一条横页签，现在合成**左侧一竖列侧边栏**：
    上面是导航，**左下角是这台电脑是谁 / 什么状态 / 立即运行**。
-   好处：内容区更宽（四池和 POS 那两张表列多），页面也少一层。 */
+   好处：内容区更宽（报量查询和 POS 那两张表列多），页面也少一层。 */
+/* 与「周度目标达成情况」同一套壳：侧栏贴满视口、内容区正常流。
+   ⚠ 状态球是 fixed 悬浮 —— **内容底部不为它预留大块 padding**（用户 2026-09-23）。 */
 .shell { display: flex; align-items: stretch; min-height: 100vh; }
 
-/* 侧栏宽度只有一处定义 —— 折叠开关要靠它算位置（写死两处迟早对不上） */
-:root { --side-w: 214px; }
-
+/* 用户 2026-09-18：「左边栏的出现与消失也做个动画」。
+   ⚠ 原来收起写的是 `display: none` —— **`display` 过渡不了**，所以是"啪"地消失。
+     改成滑出去（`margin-left` 负一个侧栏宽）：
+     负 margin 会让这个 flex 项的外框宽度变成 0，内容区自然拿到全宽，
+     而侧栏的内容是往**左**滑出视口的（LTR 下向左溢出不会出滚动条）。 */
 .sidebar {
   flex: 0 0 var(--side-w); background: var(--card); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 12px;
   padding: 16px 12px 14px; position: sticky; top: 0; height: 100vh;
+  transition: margin-left var(--motion-normal) var(--ease-out),
+              visibility 0s linear 0s;
 }
 /* ⚠ 右边留 18px：折叠开关**半个身子探在侧栏边界上**，
    不留够它就把标题挤成两行（实测标题断成"…报量对 / 账"）。 */
 .brand { display: flex; align-items: center; gap: 9px; padding: 0 18px 0 4px; }
 .logo {
   width: 32px; height: 32px; flex: 0 0 32px; border-radius: 9px; display: grid;
-  place-items: center; background: linear-gradient(135deg, var(--brand), #7c3aed);
-  color: #fff; font-size: 16px; font-weight: 700;
+  place-items: center; background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  color: var(--on-brand); font-size: 16px; font-weight: 700;
 }
 .brand h1 {
   font-size: 12.5px; line-height: 1.35; margin: 0; font-weight: 650;
@@ -58,18 +49,243 @@ body {
 .sub { font-size: 12.5px; color: var(--muted); }
 .mono-build { font-size: 11.5px; opacity: .6; }
 
-/* 左下角：门店设置 / 状态徽章 / 版本 / 立即运行。
-   `margin-top: auto` 把它顶到侧边栏底部 —— 内容多少都不会飘。 */
+/* 左下角：门店 / 状态徽章 / 版本 —— **也是设置菜单本身**。
+   `margin-top: auto` 把它顶到侧边栏底部 —— 内容多少都不会飘。
+
+   ⚠ 2026-09-19（用户）先要的是"鼠标移上去在上面浮出一块菜单"，
+     随后改掉：「**不是现在弹出悬浮的这个方式，而是左下角的这个签往上动** ——
+     门店&姓名这一行变成账号设置，版本号这一行变成检查更新，
+     会话导入情况变成玲珑授权。人员设置和通用**插缝出现**」。
+     ⇒ 所以这里**没有浮层**：几行自己"变形"（`.foot-info` 淡出 / `.foot-label` 淡入，
+       两行叠在同一格里），多出来的两条**从 0 高度撑开**插在缝里。 */
 .side-foot {
-  margin-top: auto; display: flex; flex-direction: column; gap: 9px;
-  border-top: 1px solid var(--line); padding: 12px 4px 0;
+  margin-top: auto; display: flex; flex-direction: column; gap: 0;
+  border-top: 1px solid var(--line); padding: 10px 4px 0;
+  position: relative; border-radius: 0 0 8px 8px;
+  cursor: default; outline: none;
+  transition: background var(--motion-fast) var(--ease-out);
 }
-.side-foot .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+/* ⚠ 键盘用户靠 `tabindex="0"` 聚焦到这块才看得到菜单 ——
+   没有焦点提示的话他们不知道自己现在在哪。
+   ⚠ 用 `outline` 不用 `box-shadow`：阴影是**主题**整体换掉的东西，
+     `theme.css` 的规矩是组件里一律 `var(--shadow-*)`（有测试盯着）。 */
+.side-foot:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+
+/* 一行。**固定高度**（变形时行高不许跳），里面两个东西叠在同一格：
+   `.foot-info`（平时显示的门店名 / 版本号 / 徽章）和 `.foot-label`（菜单名）。 */
+.foot-item {
+  display: grid; grid-template-columns: 1fr auto; align-items: center;
+  width: 100%; height: 22px; margin: 0; padding: 0 6px;
+  border: 0; background: none; text-align: left; cursor: default;
+  font: inherit; font-size: 12.5px; line-height: 1;
+  color: var(--muted); border-radius: 6px;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.foot-item > .foot-info,
+.foot-item > .foot-label { grid-column: 1; grid-row: 1; min-width: 0; }
+.foot-item > .pill { grid-column: 2; grid-row: 1; margin-left: 6px; }
+.foot-info {
+  opacity: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  transition: opacity var(--motion-normal) var(--ease-out);
+}
+.foot-label {
+  /* ⚠ 颜色**跟上面的一级标签（`.tab`）对齐**，别单独搞个蓝的 ——
+     用户 2026-09-19：「字的颜色和上面一级标签字的颜色对齐吧，别单独搞个蓝色」。
+     所以这儿是 `var(--muted)` + `font-weight: 550`（跟 `.tab` 一模一样），
+     hover 时变 `var(--text)`（也跟 `.tab:hover` 一样）。
+     ⇒ 展开时**唯一的视觉变化是文字内容**，不是换了一套配色。 */
+  opacity: 0; font-weight: 550; color: var(--muted);
+  overflow: hidden; white-space: nowrap;
+  transition: opacity var(--motion-normal) var(--ease-out),
+              color var(--motion-fast) var(--ease-out);
+}
+.foot-item:hover .foot-label { color: var(--text); }
+/* 鼠标进来（或菜单被键盘/触摸打开）⇒ 信息淡出、菜单名淡入 —— 就是那个"渐变" */
+.side-foot:hover .foot-info, .side-foot.open .foot-info { opacity: 0; }
+.side-foot:hover .foot-label, .side-foot.open .foot-label { opacity: 1; }
+.side-foot:hover .foot-item, .side-foot.open .foot-item { cursor: pointer; }
+.foot-item:hover { background: var(--hover); }
+
+/* 「人员设置」「通用」这两条是**插缝出现**的：高度 0 → 一行。
+   ⚠ 用 `height`（两端都是长度）不用 `max-height` —— 后者过渡到位要猜个够大的数，
+     猜大了动画会"提前结束"、看着发顿。 */
+.foot-gap { height: 0; overflow: hidden;
+  transition: height var(--motion-normal) var(--ease-out); }
+.side-foot:hover .foot-gap, .side-foot.open .foot-gap { height: 22px; }
+
+.foot-item .mono-build { font-size: 11.5px; opacity: .6; }
+
+/* 门店信息旁的天气（2026-09-22）：右侧小胶囊，跟 pill-update 同一格布局 */
+.foot-weather {
+  max-width: 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; font-weight: 550;
+}
+
 .btn.block { width: 100%; }
 
-/* 折叠：整个侧栏收掉，内容区拿到全宽（四池/POS 那两张表列多，看宽表时有用）。
+/* ── 主题设置页：两张风格卡（浅色 / 深色）──────────────────────────
+   ⚠ 预览色块用**固定的示意色**（不是 var 令牌）—— 它要同时代表浅/深两套，
+     跟着当前主题变就失去"对比预览"的意义。选中态边框走品牌令牌。 */
+.theme-picks {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.theme-pick {
+  display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+  margin: 0; padding: 12px; cursor: pointer; text-align: left;
+  border: 2px solid var(--line); border-radius: var(--r-md);
+  background: var(--card); color: var(--text); font: inherit;
+  transition: border-color var(--motion-fast) var(--ease-out),
+              background var(--motion-fast) var(--ease-out);
+}
+.theme-pick:hover { border-color: var(--line-strong); }
+.theme-pick.is-on { border-color: var(--brand); background: var(--hover); }
+.theme-pick:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.theme-swatch {
+  display: grid; grid-template-columns: 56px 1fr; grid-template-rows: 1fr 1fr;
+  gap: 4px; height: 72px; padding: 6px; border-radius: 8px;
+  border: 1px solid var(--line); overflow: hidden;
+}
+.theme-swatch .sw-side { grid-row: 1 / span 2; border-radius: 4px; }
+.theme-swatch .sw-main { border-radius: 4px; }
+.theme-swatch .sw-accent { border-radius: 4px; width: 40%; justify-self: start; }
+.theme-swatch-light { background: #f5f6f8; }
+.theme-swatch-light .sw-side { background: #e8eaee; }
+.theme-swatch-light .sw-main { background: #ffffff; }
+.theme-swatch-light .sw-accent { background: #2563eb; }
+.theme-swatch-dark { background: #0f172a; border-color: #334155; }
+.theme-swatch-dark .sw-side { background: #1e293b; }
+.theme-swatch-dark .sw-main { background: #1e293b; }
+.theme-swatch-dark .sw-accent { background: #3b82f6; }
+/* 风格主题的预览色 —— 卡片缩略图固定值（跟选中后整站令牌是两回事） */
+.theme-swatch-celadon { background: #f4f7f5; }
+.theme-swatch-celadon .sw-side { background: #e0eae6; }
+.theme-swatch-celadon .sw-main { background: #ffffff; }
+.theme-swatch-celadon .sw-accent { background: #3fa796; }
+.theme-swatch-dusk { background: #141a2e; border-color: #2f3a58; }
+.theme-swatch-dusk .sw-side { background: #1e2742; }
+.theme-swatch-dusk .sw-main { background: #1e2742; }
+.theme-swatch-dusk .sw-accent { background: #e8b4a2; }
+.theme-swatch-pome { background: #faf6f3; }
+.theme-swatch-pome .sw-side { background: #f0e4df; }
+.theme-swatch-pome .sw-main { background: #ffffff; }
+.theme-swatch-pome .sw-accent { background: #b5485d; }
+.theme-swatch-pine { background: #f3f5f2; }
+.theme-swatch-pine .sw-side { background: #e0e8e2; }
+.theme-swatch-pine .sw-main { background: #ffffff; }
+.theme-swatch-pine .sw-accent { background: #365b4c; }
+.theme-swatch-mist { background: #f7f5fa; }
+.theme-swatch-mist .sw-side { background: #e8e2f0; }
+.theme-swatch-mist .sw-main { background: #ffffff; }
+.theme-swatch-mist .sw-accent { background: #8877c7; }
+.theme-swatch-bean { background: #f8f5f6; }
+.theme-swatch-bean .sw-side { background: #ece2e6; }
+.theme-swatch-bean .sw-main { background: #ffffff; }
+.theme-swatch-bean .sw-accent { background: #b56e80; }
+.theme-swatch-butter { background: #faf8f0; }
+.theme-swatch-butter .sw-side { background: #f0e8c8; }
+.theme-swatch-butter .sw-main { background: #ffffff; }
+.theme-swatch-butter .sw-accent { background: #d4af37; }
+.theme-swatch-shiqing { background: #f3f6f9; }
+.theme-swatch-shiqing .sw-side { background: #e0e8f0; }
+.theme-swatch-shiqing .sw-main { background: #ffffff; }
+.theme-swatch-shiqing .sw-accent { background: #3d7a99; }
+.theme-swatch-daiqiu { background: #f4f3f0; }
+.theme-swatch-daiqiu .sw-side { background: #e4e4ea; }
+.theme-swatch-daiqiu .sw-main { background: #ffffff; }
+.theme-swatch-daiqiu .sw-accent { background: #3e4a6b; }
+.theme-swatch-zhusha { background: #f8f4f0; }
+.theme-swatch-zhusha .sw-side { background: #f0e4dc; }
+.theme-swatch-zhusha .sw-main { background: #ffffff; }
+.theme-swatch-zhusha .sw-accent { background: #c23b22; }
+.theme-swatch-zhuqing { background: #f5f6f1; }
+.theme-swatch-zhuqing .sw-side { background: #e4ebe0; }
+.theme-swatch-zhuqing .sw-main { background: #ffffff; }
+.theme-swatch-zhuqing .sw-accent { background: #5e8c61; }
+.theme-swatch-taotu { background: #f7f3ee; }
+.theme-swatch-taotu .sw-side { background: #f0e6dc; }
+.theme-swatch-taotu .sw-main { background: #ffffff; }
+.theme-swatch-taotu .sw-accent { background: #c4785a; }
+.theme-swatch-dianye { background: #1a2236; border-color: #34405c; }
+.theme-swatch-dianye .sw-side { background: #222c44; }
+.theme-swatch-dianye .sw-main { background: #222c44; }
+.theme-swatch-dianye .sw-accent { background: #6b8cff; }
+/* 自定义照片主题：预览块用固定示意渐变（和其它 swatch 一样不跟当前主题变） */
+.theme-swatch-photo {
+  background: linear-gradient(135deg, #c7d7e8 0%, #e8d5c4 45%, #d4c4e0 100%);
+  border-color: var(--line-strong);
+}
+.theme-swatch-photo .sw-side { background: rgba(255, 255, 255, 0.55); }
+.theme-swatch-photo .sw-main { background: rgba(255, 255, 255, 0.88); }
+.theme-swatch-photo .sw-accent { background: #2563eb; }
+.theme-pick-body { display: flex; flex-direction: column; gap: 2px; }
+.theme-pick-name { font-size: 13.5px; font-weight: 650; }
+.theme-pick-desc { font-size: 12px; color: var(--muted); }
+
+/* ── 自定义壁纸网格（主题设置页）────────────────────────────────── */
+.wallpaper-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px; margin-top: 12px;
+}
+.wallpaper-grid:empty { display: none; }
+.wallpaper-item {
+  display: flex; flex-direction: column; gap: 0; margin: 0; padding: 0;
+  border: 2px solid var(--line); border-radius: var(--r-md);
+  background: var(--card); overflow: hidden; text-align: left;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.wallpaper-item.is-on { border-color: var(--brand); }
+.wallpaper-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.wallpaper-item img {
+  width: 100%; height: 88px; object-fit: cover; display: block;
+  background: var(--code-bg);
+}
+.wallpaper-item .wp-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 6px 8px; font-size: 12px; color: var(--text);
+}
+.wallpaper-item .wp-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wallpaper-item .wp-use {
+  border: 0; background: var(--brand-wash); color: var(--brand);
+  border-radius: var(--r-sm); padding: 3px 8px; cursor: pointer; font: inherit;
+  font-size: 12px;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.wallpaper-item .wp-use:hover { background: var(--hover); }
+.wallpaper-item .wp-del {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 3px 6px; font: inherit; font-size: 12px;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.wallpaper-item .wp-del:hover { color: var(--bad); }
+
+
+
+/* 左下角「检查更新」「定时器设置」点下去会滚到「通用」页里对应的那张卡 ——
+   闪一下边框，不然切过去只看到一页卡片，**不知道点的是哪一张**。
+   ⚠ 用 `outline` 不用 `box-shadow`（主题那套规矩：组件里一律 `var(--shadow-*)`）。 */
+@keyframes flash-card {
+  0%, 100% { outline-color: transparent; }
+  15%, 70% { outline-color: var(--brand); }
+}
+.card.flash {
+  outline: 2px solid transparent; outline-offset: 3px;
+  animation: flash-card 1.4s var(--ease-out) 1;
+}
+
+/* 折叠：整个侧栏收掉，内容区拿到全宽（报量查询/POS 那两张表列多，看宽表时有用）。
    ⚠ 开关**不在侧栏里**，所以它照常留着 —— 否则收起来就展不开了。 */
-body.side-collapsed .sidebar { display: none; }
+body.side-collapsed .sidebar {
+  margin-left: calc(var(--side-w) * -1);
+  /* ⚠ 光靠"滑出视口"不够：里面的链接**还能被 Tab 聚焦到**，键盘用户会跳进一个
+     看不见的侧栏里。所以滑完再 `visibility: hidden`（延迟一个动画时长）。 */
+  visibility: hidden;
+  transition: margin-left var(--motion-normal) var(--ease-out),
+              visibility 0s linear var(--motion-normal);
+}
 
 /* 折叠开关 —— **不带框**，就是个箭头（用户 2026-09-18：
    「这个按钮能不能不要这样，不要框。展开时突出半个按钮，折叠时留个按钮」）。
@@ -84,17 +300,19 @@ body.side-collapsed .sidebar { display: none; }
   width: 26px; height: 26px; padding: 0;
   display: grid; place-items: center; cursor: pointer;
   border: 0; background: none; border-radius: 50%;
-  color: #9aa4b2;
-  transition: left .16s ease, color .16s ease, background .16s ease;
+  color: var(--icon-muted);
+  transition: left var(--motion-fast) var(--ease-out),
+              color var(--motion-fast) var(--ease-out),
+              background var(--motion-fast) var(--ease-out);
 }
 /* 箭头是 SVG（不是 `‹›` 字形 —— 那两个字形在 Windows 上跟 mac 长得不一样） */
 .side-toggle svg {
   width: 15px; height: 15px; display: block;
   fill: none; stroke: currentColor; stroke-width: 2;
   stroke-linecap: round; stroke-linejoin: round;
-  transition: transform .18s ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
-.side-toggle:hover { color: var(--brand); background: rgba(37, 99, 235, .09); }
+.side-toggle:hover { color: var(--brand); background: var(--brand-wash); }
 body.side-collapsed .side-toggle { left: 10px; color: var(--muted); }
 body.side-collapsed .side-toggle svg { transform: rotate(180deg); }
 
@@ -117,19 +335,21 @@ body.side-collapsed .side-toggle svg { transform: rotate(180deg); }
   padding: 9px 12px; border-radius: 9px; font-size: 14px; font-weight: 550;
   color: var(--muted);
 }
-.tab:hover { color: var(--text); background: #f1f5f9; }
-.tab.active { color: var(--brand); background: #eff6ff; }
+.tab:hover { color: var(--text); background: var(--hover); }
+/* ⚠ 2026-09-19（用户）：「**选中别用蓝底这种奇怪的颜色吧，一级二级字体加粗就行了**」。
+   ⇒ 选中 = **字重 + 明暗**，不铺底色。别再往这儿加 `background`。 */
+.tab.active { color: var(--text); font-weight: 700; }
 
 /* 内容区**占满剩下的宽度** —— 侧栏定宽，它自己 grow。
    ⚠ 别再给它 `max-width: 1180px; margin: 0 auto`：那是横顶栏时代的居中，
    现在左边有侧栏，居中的话右边会空一大块。 */
-main { flex: 1 1 auto; min-width: 0; max-width: none; margin: 0; padding: 22px 26px 70px; }
+main { flex: 1 1 auto; min-width: 0; max-width: none; margin: 0; padding: 22px 26px 20px; }
 .panel { display: none; }
 .panel.active { display: block; }
 
 /* ───────────────────────── 卡片 ───────────────────────── */
 .card {
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
   padding: 18px; margin-bottom: 16px;
 }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -137,7 +357,7 @@ main { flex: 1 1 auto; min-width: 0; max-width: none; margin: 0; padding: 22px 2
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .kpi {
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px 16px;
 }
 .kpi .k { font-size: 12px; color: var(--muted); }
 .kpi .v { font-size: 26px; font-weight: 700; line-height: 1.25; font-variant-numeric: tabular-nums; }
@@ -148,11 +368,11 @@ main { flex: 1 1 auto; min-width: 0; max-width: none; margin: 0; padding: 22px 2
 /* ───────────────────────── 按钮 / 表单 ───────────────────────── */
 .btn {
   border: 1px solid var(--line); background: var(--card); color: var(--text);
-  padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 13.5px;
+  padding: 7px 14px; border-radius: var(--r-sm); cursor: pointer; font-size: 13.5px;
   font-weight: 550; text-decoration: none; display: inline-block;
 }
-.btn:hover { border-color: #c9ced6; }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.btn:hover { border-color: var(--line-strong); }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .btn.primary:hover { background: var(--brand-dark); }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 4px 10px; font-size: 12.5px; }
@@ -161,65 +381,558 @@ main { flex: 1 1 auto; min-width: 0; max-width: none; margin: 0; padding: 22px 2
 .form-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .form-row label { min-width: 150px; color: var(--muted); font-size: 13px; }
 input, select, textarea {
-  font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
-  background: #fff; color: var(--text); min-width: 160px;
+  font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--field); color: var(--text); min-width: 160px;
 }
-input:focus, select:focus, textarea:focus { outline: 2px solid #bfdbfe; border-color: var(--brand); }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--focus-ring); border-color: var(--brand); }
 textarea { width: 100%; font-family: var(--mono); font-size: 12.5px; min-width: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
-.hint code, .steps code { background: #eef1f5; padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
-kbd { background: #eef1f5; border: 1px solid var(--line); border-bottom-width: 2px;
+.hint code, .steps code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
+kbd { background: var(--code-bg); border: 1px solid var(--line); border-bottom-width: 2px;
       border-radius: 5px; padding: 0 5px; font-family: var(--mono); font-size: 12px; }
 .adv { margin: 4px 0 12px; }
 .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 
-.steps { margin: 0 0 14px; padding-left: 22px; color: #374151; }
+.steps { margin: 0 0 14px; padding-left: 22px; color: var(--text-2); }
 .steps li { margin-bottom: 4px; }
 
 /* ───────────────────────── 表格 ───────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--muted); font-weight: 600; font-size: 12.5px; background: #fafbfc; white-space: nowrap; }
-tbody tr:hover { background: #fafbfc; }
+th { color: var(--muted); font-weight: 600; font-size: 12.5px; background: var(--th-bg); white-space: nowrap; }
+tbody tr:hover { background: var(--th-bg); }
 td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
 td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
-.bad-text { color: #b91c1c; }
+.bad-text { color: var(--bad); }
 .nowrap { white-space: nowrap; }
+/* 达成率标色（用户要的开关打开才生效）。
+   ⚠ 哪一档用哪个颜色**不在这儿** —— 在 `app.js` 的 `attainTier()`
+     （2026-09-20 用户把红绿调了个个儿：100%+ 红、<60% 绿）。
+     这里只管"四个类 → 四个令牌"。
+   ⚠⚠⚠ **注释的开标记和闭标记必须一一配对，别把这一大段拆成两截**（真踩过两次）：
+     2026-09-20 我在这段中间补了几行说明、手一滑多加了一个**闭标记** ——
+     结果第一个闭标记之后的文字变成"游离的垃圾 token"，
+     浏览器按错误恢复规则**吞掉了紧跟其后的第一条规则**（正好是 `td.t-red`），
+     表现就是「**100-120% 那档不红**」，而另外三档好好的（看着像颜色配错了，
+     其实是 CSS 根本没解析到那一条）。
+     ⚠ **连"写一行注释解释这件事"都不行** —— 只要那行字里出现闭标记本身，
+       它照样会把注释截断（我在 theme.css 里已经栽过一次，这是第二次）。
+     ⇒ 改这一段之后，**跑 `test_theme.py` 里那条「t-red 的规则真在」的测试**。 */
+/* ⚠⚠ 2026-09-20 **改过一次，这是"永久性"的那一版**：底色原来涂在 `<td>` 上
+   （"整格变色"），而列宽是 `table-layout: fixed` 平均分的 ——
+   **格子的宽窄随屏幕变、数据块的宽窄由内容决定**，两者只在某个宽度下才凑巧一样。
+   宽屏上量出来：格子 184px、数据块 118px ⇒ 色块比数字**多出 66px**，
+   用户看到的就是「**颜色不跟着数据块走**」（截图里色块右边空一大截）。
+
+   ⇒ 现在涂在**数据块自己**身上（`.attain-cell`，它同时也是悬停触发器那一格）：
+     色块和数据**是同一个元素** ⇒ 从构造上不可能再错开，跟屏幕宽度无关。
+   ⚠ 别改回 `td`。有测试钉着（`test_theme.py` 的「底色涂在数据块上」那条）。
+
+   ⚠ 四个颜色是**主题令牌**（`theme.css` 的 `--rate-*`）——
+     换主题时在这里改一行都不用动。 */
+.table-scroll td.t-red .attain-cell { background: var(--rate-red); }
+.table-scroll td.t-orange .attain-cell { background: var(--rate-orange); }
+.table-scroll td.t-lg .attain-cell { background: var(--rate-lg); }
+.table-scroll td.t-g .attain-cell { background: var(--rate-g); }
+
+/* 左右滑块开关（用户 2026-09-19：放在「刷新」左边）。
+   ⚠ 用 `checkbox` + 两个 span 拼，**不引任何库**（前端无构建步骤是红线）。 */
+.switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+          font-size: 12.5px; color: var(--muted); user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track { width: 34px; height: 18px; border-radius: 999px; flex: 0 0 auto;
+  position: relative; background: var(--line); }
+.switch input:checked + .switch-track { background: var(--brand); }
+.switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--card);
+  transition: transform var(--motion-fast) var(--ease-out); }
+.switch input:checked + .switch-track .switch-knob { transform: translateX(16px); }
+                background: var(--line); position: relative;
+                transition: background var(--motion-fast) var(--ease-out); }
+.switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+               border-radius: 50%; background: var(--card);
+               transition: transform var(--motion-fast) var(--ease-out); }
+.switch input:checked + .switch-track { background: var(--ok); }
+.switch input:checked + .switch-track .switch-knob { transform: translateX(16px); }
+.switch:hover { color: var(--text); }
+/* 宽表格（周度达成那种 12 列的）：**内容区能横滚、表头能换行**。
+   ⚠ 全局那条 `th { white-space: nowrap }` 是给窄表用的（宁可挤也不换行）；
+     宽表上它会撑得整张表远超容器 ⇒ 右边几列**被裁掉**，
+     看着就像"表头/数据没显示出来"（用户 2026-09-19 就是照这个方向问的）。 */
+.table-scroll { overflow-x: auto; }
+/* ⚠ 用户 2026-09-20：「这个**能对齐吗**」—— 展开表和主表**上下对齐**靠两件事：
+   ① 两张表**列数一样**（展开行末尾补了个空格子）；
+   ② **固定表格布局**：不等内容撑宽，各列等宽 ⇒ 两张表的列 x 坐标就一致了。
+   ⚠ `table-layout: fixed` 只加在 `.table-scroll` 里，别影响别的表格。
+   ⚠⚠ 2026-09-22 用户：「周度…缩放时是跟着缩放的，其他表比如生意计划，比例固定，
+     窗口缩放后间距不变可以左右滑动」—— 原来是 `width: 100%` + 百分比列宽，
+     窗口一大列就跟着变宽。改成跟 `.plan-table` 一样 **`max-content` + 固定像素列宽**：
+     列宽不随窗口变，容器窄了横向滚，宽了右边留白（比把列拉宽好）。
+   ⚠ 只钉 `#attain-table`（主表）：历史存档那份 `.hist-body` 自己是
+     `table-layout: auto; width: auto`（要按产品名内容撑开），别被这里锁死。 */
+#attain-table .table-scroll table { table-layout: fixed; width: max-content; }
+/* ⚠⚠ 对齐的**唯一可靠办法**：两张表的**每一列宽度都写死且相同**。
+   （用户：「还是不齐啊」—— 只给前两列定宽不够：`table-layout: fixed` 下
+     "没写宽度的列"是**平分剩下的**，而两张表的剩余列数一样才碰巧对齐；
+     一旦列数或内容不同就会错位。所以 1 / 2 / 末列定死，其余列也给固定像素。）
+   ⚠ 主表和展开表**都是 12 列**（展开行末尾补了空格子），所以这套宽度两边通用。
+   ⚠ 门店那列 2026-09-22 几轮调宽：5% 三行柱 → 13% 又空太多、挤了产品列
+     ⇒ **120px** + `line-clamp: 2`（长店名两行）；区域仍由 `#attain-table` 钉在 4.5em。
+   ⚠ **顺序：先给全部 th 产品列宽，再被 first/second/last 覆盖**（同特异性靠后的赢）。
+   ⚠ 首列（区域）**不在这儿钉宽** —— 后面 `#attain-table th:first-child` 钉的是
+     `4.5em`（约 72px），比 130px 窄；在这儿写 130px 会把区域列撑宽、挤掉产品列。 */
+#attain-table .table-scroll th { width: 112px; }
+/* 门店列加宽（用户 2026-09-22：「门店名还是有点挤了，不能占点目标与达成的地方？」）——
+   展开行补齐区域占位后，col2 = 主表门店 / 展开行人名，col3 = 两边都是标签。
+   ⇒ 从标签列匀 32px 给门店：108 → 140，标签 112 → 80（标签只有「达成/目标」四个字，够用）。 */
+#attain-table .table-scroll th:nth-child(2),
+#attain-table .table-scroll td:nth-child(2) { width: 140px; }
+#attain-table .table-scroll th:nth-child(3),
+#attain-table .table-scroll td:nth-child(3) { width: 80px; }
+#attain-table .table-scroll th:last-child,
+#attain-table .table-scroll td:last-child { width: 88px; }
+/* 达成/目标 那一列（表头空、只有两行小字）：**右贴产品列**——
+   用户 2026-09-22 调过三轮：
+   ① 「离第一列远了点」→ 曾改左贴门店；
+   ② 截图反馈「离门店名太近，离右边太远了」⇒ **回到右贴产品**。
+   ⚠ 2026-09-22 起主表和展开行**列位已对齐**（展开行补了区域占位）——
+     标签两边都是 `td:nth-child(3)`，不再错一位。 */
+#attain-table th:nth-child(3),
+#attain-table tbody > tr:not(.attain-detail-row) > td:nth-child(3),
+#attain-table .attain-detail-row > td:nth-child(3) {
+  text-align: right;
+  padding-left: 3px;
+}
+#attain-table th:nth-child(2),
+#attain-table tbody > tr:not(.attain-detail-row) > td:nth-child(2),
+#attain-table .attain-detail-row > td:nth-child(2) {
+  text-align: right;
+  padding-right: 0;
+}
+#attain-table tbody > tr:not(.attain-detail-row) > td:nth-child(3) .attain-pair,
+#attain-table .attain-detail-row > td:nth-child(3) .attain-pair { align-items: flex-end; }
+/* 门店整列（含表头）**垂直居中** —— 用户 2026-09-22：表头产品名折三四行时
+   「门店」顶在上面一大块空；数据行里店名一行、右边标签两行高，也像吊在上面。
+   ⚠ 区域列只有组第一行有字，跟着居中反而更乱 ⇒ 只钉第 2 列。 */
+#attain-table th:nth-child(2),
+#attain-table tbody > tr > td:nth-child(2) { vertical-align: middle; }
+/* 周度达成那种格子：左边上下两行台量（第一列带「达成/目标」），右边达成率。
+   ⚠ 用 `inline-flex` 让"两行"和"右侧那个百分比"**并排**（用户 2026-09-19：
+     「达成率放在目标和达成的右边」）；`align-items: center` 让百分比对着两行的**中间**，
+     看着才不偏。 */
+/* ⚠ `padding` + `border-radius` 是 2026-09-20 加的：底色涂在这一层之后，
+   它得**看起来像个格子**（不然色块紧贴着数字，像高亮笔划过）。
+   圆角走 `--r-sm` 令牌，别写死。 */
+/* ⚠ 2026-09-20（用户：「**百分比数字太靠右了**」）：间距原来 10px/8px，
+   而数字是**居中在 46px 的目标框**里的 —— 框右边那 ~18px 空白也算进了视觉间距，
+   于是百分比离数字看着有 30px 远。⇒ 间距收到 3px，并把三个框从 56px 收到 46px
+   （箭头 ~16px + 两位数字 ~30px，够用；三个状态仍然同宽 ⇒ 点开编辑不会挪位）。 */
+.attain-cell { display: inline-flex; align-items: center; gap: 3px;
+               /* 用户 2026-09-22：「后面数据有点拥挤」—— 产品列多、每格再摊 14px
+                  横向 padding 就更挤 ⇒ 收到 5px（上下仍 2px，圆角色块别贴字）。 */
+               padding: 2px 5px; border-radius: var(--r-sm); }
+/* ⚠ 内边距**故意留得很小**（2px 7px）：格子是 `table-layout: fixed` 平均分的，
+   窄屏上本来就紧，撑宽 14px 就可能让整张表横向滚动。
+   ⚠ 别给"标签列"或"合计行"单独加内边距 —— 展开区的成员行和合计行
+     靠**同一个 `.attain-cell`** + 同一个左起点对齐（用户为这条吵过三次）。
+     一列一个样，那几个数立刻就错开。 */
+/* 「目标拆分」页里每格的输入框：窄一点，别把表格撑爆 */
+.store-link { border: 0; background: none; padding: 0; font: inherit; cursor: pointer;
+              color: var(--text); font-weight: 600;
+              /* 跟 td 一起右对齐：短店名不再在 108px 列里留半截空，紧挨右边的达成/目标 */
+              text-align: right;
+              /* 门店名：列宽有限时**最多折两行**，别把「青岛城阳万象汇店」挤成三行柱子 */
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+              overflow: hidden; max-width: 100%;
+              border-bottom: 1px dashed var(--line); }
+.store-link:hover { border-bottom-color: var(--brand); }
+/* 展开出来的成员行 / 合计行 / 保存行 —— 它们是**主表里的普通行**（不再嵌套表），
+   所以列由浏览器同一套算法算，**天然对齐**。这里只管底色和疏密。 */
+.attain-detail-row > td { background: var(--field); }
+/* ── 门店 → 人 的**上下展开/收起动画**（对齐月度生意计划那套）──
+   ⚠⚠ `tr` 的 `height` 过渡不了（行高是内容顶出来的，height 只是下限）
+     ⇒ 高度压在每个格子里那层 `.attain-in` 上，格子自己的上下内边距一起压。
+   ⚠ 过渡只挂在**正在动画的那一行**上（`.attain-anim`）——
+     给所有行都挂的话，改目标刷新合计时几千个格子的 padding 也跟着动。
+   ⚠ 时长/缓动走 `var(--motion-*)`（**别写死 .34s**）：主题令牌归零 = 关动画。
+   ⚠ 特异性：`.attain-detail-save/total > td` 会盖住单独的 `.attain-row-hide`，
+     所以收起规则要带上 `.attain-detail-row` 这一层。 */
+.attain-in { overflow: hidden; }
+tr.attain-anim .attain-in { transition: height var(--motion-slow) var(--ease-out); }
+/* ⚠ border 也要进 transition —— 只挂 padding 的话，收起时 `.attain-row-hide`
+   里的 `border-*-width: 0` 会**当帧跳没**，高度还在滑 ⇒ 中间顿一下（用户：「收起来顿一下」）。 */
+tr.attain-anim > td {
+  transition: padding var(--motion-slow) var(--ease-out),
+              border-width var(--motion-slow) var(--ease-out);
+}
+.attain-detail-row.attain-row-hide > td {
+  padding-top: 0; padding-bottom: 0;
+  border-bottom-width: 0; border-top-width: 0;
+}
+/* 冻结那一帧（量自然高度 + 写起点高度时挂着）——**过渡必须归零**：
+   量高度要先 `getBoundingClientRect()`，这一读就让格子有了计算样式，
+   接着写 0 高**自己就会走一遍过渡**，第二帧改终点时起点已经走掉一半了。
+   ⚠ 用 `transition-duration: 0s`，**不许写 `transition: none`**（关动画靠令牌归零）。 */
+.attain-frozen, .attain-frozen * { transition-duration: 0s !important; }
+/* ⚠⚠ 2026-09-20（用户给了实测坐标之后定的）：
+   测出来**列 x 坐标和主表一模一样**（`259/344/377/431`）⇒ 列是齐的，
+   差的只是**格子内部**那几个像素 —— 因为我把展开行改成了 `align-items: flex-start`，
+   而主表那格是 `center`。**格子同宽、内部对齐规则不同**，数字自然错开。
+   ⇒ **撤掉这个覆盖**，让展开行用**和主表完全同一条规则**（这就是"壳要同构"那条）。
+   ⚠ 教训：差几像素时先测 `getBoundingClientRect().x` 分清是"列不齐"还是"格内不齐"，
+     再决定改哪儿 —— 我之前五轮都在猜，全猜在列宽上。 */
+/* （原来这里有一条 `align-items: flex-start` 的覆盖，已撤） */
+/* ⚠⚠ 2026-09-20：这里原来有两条"往右挪几像素"的规则（`em` 猜的、后来改成
+   用户给的 1px / 3px）—— 用户试完说「**不行，回复上一版吧，现在还是不齐**」，
+   所以**全部撤掉**，回到"同表行 + 左对齐"那一版定位。
+   ⇒ 结论：**这几个像素不该靠 margin 去凑**。真要对齐得让两边的**壳、字号、
+     内容宽度**都一样（目标那一格现在是"点一下才变输入框"，
+     宽度跟以前的 44px 输入框不同 ⇒ 视觉重心变了）。
+     下次要调，先量两边的 `getBoundingClientRect().x`，别再猜。 */
+/* ⚠ 用户 2026-09-20：「**个人达成那个数字往右移动半个字符**」→ 随后补一句：
+   「**能不能只移动达成，不移动目标**啊，目标原来的位置 ok 的」。
+   ⇒ 只给 `.attain-pair` 的**第一个** `.attain-num`（就是"达成"那一行）加左内边距；
+     下面那个"目标"（`.split-edit` / 输入框）**不动**。
+/* 展开行人名在第 2 格（第 1 格是区域占位）—— 跟主表门店同一列，同样加粗右对齐 */
+.attain-detail-row > td:nth-child(2) { font-weight: 600; }
+.attain-detail-total > td { border-top: 2px solid var(--line); }
+.attain-detail-save > td { padding-top: 8px; }
+.split-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+/* 门店标签卡：⚠ 选中**不加底色**，用加粗 + 描边（跟侧栏那套口径一致） */
+.split-tab { border: 1px solid var(--line); background: var(--card); border-radius: 8px;
+             padding: 5px 12px; font-size: 12.5px; color: var(--muted); cursor: pointer;
+             transition: border-color var(--motion-fast) var(--ease-out),
+                         color var(--motion-fast) var(--ease-out); }
+.split-tab:hover { color: var(--text); border-color: var(--muted); }
+.split-tab.current { color: var(--text); font-weight: 700; border-color: var(--brand); }
+.table-scroll td:first-child, .table-scroll th:first-child { white-space: nowrap; }
+/* ⚠ 拆分页第一列是**人名**：被挤成"王/俊/燕"竖着折是用户点名的问题（「名字好歹铺开啊」）
+   —— 上面那条 nowrap + 这里给一列最小宽度，名字就铺开了。 */
+/* ⚠ 必须写 `min-width: 0`：全局那条 `input { min-width: 160px }`（给设置页的长输入框用的）
+   会把这里的宽度顶掉 —— 用户看图说「这个框太长了，带着达成和上面商品名在一个宽度就行了」。
+   ⇒ 让它跟「达成」那一列、跟表头产品名**同一个宽度**。 */
+/* 平时就是个数字（跟"达成"同字号），**点一下**才变成输入框（用户要的） */
+/* ⚠⚠ 2026-09-20（用户：「**点开编辑时，这个达成能不能不动**」）：
+   根因 —— 编辑态那格是 `<input>`（带上下箭头 + 内边距 ⇒ **更宽**），
+   而上面"达成"那一行在 `.attain-pair` 里是**居中**的 ⇒ 这一格一宽，上面的数字就重新居中、动了。
+   ⇒ 静态和编辑态**强制同宽**（44px，跟原来那个输入框一样），数字都居中；
+     再去掉 number 类型的**上下箭头**（`appearance: textfield`）——
+     它既让宽度不定，又难看。这样点开前后**这一格宽度不变 ⇒ 上面的达成纹丝不动**。 */
+.split-edit { display: inline-block; width: 46px; min-width: 0; box-sizing: border-box;
+              text-align: center; font-size: 15px; font-weight: 600; cursor: text;
+              padding: 1px 4px; border-bottom: 1px dashed transparent; }
+.split-edit:hover { border-bottom-color: var(--line); }
+.split-in { width: 46px; min-width: 0 !important; max-width: 46px; box-sizing: border-box;
+            padding: 1px 4px;
+            font-size: 15px; font-weight: 600; text-align: center;
+            /* ⚠ 跟 `.attain-num` 一样大（用户：上下两个 0 要大小匹配） */
+            text-align: center; }
+.split-in:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* ⚠ 2026-09-20：箭头**放回来了**（用户：「可以在目标设定上加上**上下箭头**设置数量吗」）——
+   之前为了"点开时上面的达成不动"把它们去掉了，现在改成**三种状态的宽度一起定死**：
+   箭头占 ~16px，数字还有 ~30px，且**宽度仍然恒定** ⇒ 既有点击箭头，又不会挪位。
+   ⚠ 现在那个宽度是 **46px**（见下面 `.num-box` 那段：56 会把百分比推远）。 */
+/* 上下两个数字（达成 / 目标）竖着排，**中间一条居中的浅灰分割线**。
+   ⚠ 用 `inline-flex` + `align-items: center` 让线**跟着数字居中**：
+     直接给上面的数字加 `border-bottom` 的话，线的长度只有那个数字那么宽，
+     短数字（0）下面会显得只有一小截（用户要的是"居中"）。 */
+.attain-pair { display: inline-flex; flex-direction: column; align-items: center;
+               line-height: 1.35; white-space: nowrap; }
+/* ⚠ 2026-09-20（用户：「**中间横线是不是太长了**」）：原来 `align-self: stretch`
+   让它撑满整个 `.attain-pair`（= 目标框的宽度 56px），而数字只有 9px 宽 ⇒
+   一条 56px 的线压在两个一位数中间，看着像"整格被划了一道"。
+   ⇒ **给它一个固定的小宽度并居中**（用户 2026-09-19 就说过"分割线要居中"）。
+   ⚠ 别改回 `stretch`。 */
+.attain-sep { align-self: center; width: 22px; height: 1px; min-width: 0;
+              background: var(--line); margin: 3px 0; }
+.attain-cell > b { font-variant-numeric: tabular-nums; }
+/* ⚠⚠ 2026-09-20（用户：「**能不能等宽啊**」）：百分比那一格**定死宽度 + 右对齐**。
+   不定的后果是**一格一个宽度**：量过 0.0% 的块 98px、116.7% 的块 115px（差 17px），
+   整张表看着毛毛糙糙；而百分比自己宽度只在 35~53px 之间晃。
+   ⇒ 53px 是量出来的上限（"120.0%" 52.5px），右对齐让小数点对成一列 ——
+     跟「总达成率」那一列（也靠右）一个路子。
+   ⚠ 用例名 `.rate` 而不是 `b:last-child`：合计行里的 `<b class="attain-num num-box">`
+     也是 `.attain-cell` 的直接子元素，选错会把那个框也撑成 53px ⇒ 跟成员行的目标数错开。 */
+.attain-cell > b.rate { display: inline-block; width: 53px; text-align: right; }
+/* ⚠ 这里原来有个 8px 小圆点当悬停触发点 —— 2026-09-19 用户去掉了：
+   「**这样的话小圆点没必要出现了**」。触发器是**整个格子**，
+   圆点只是"从这里长出来"的视觉起点，没必要常驻。 */
+
+/* 「谁卖的」那块二级菜单：**从那个格子的大小放大成面板**
+   （用户 2026-09-19：「没有圆的话拉长的效果不好看了，改成从格子的大小放大到这个
+   弹出页面的界面的动画吧」）。
+   ⇒ JS 把起点设成**格子自己的矩形**，再给面板的最终位置和大小；
+     四个量（left/top/width/height）**同时**过渡，看着就是"格子撑开成面板"。
+   ⚠ 所以**没有 delay** —— 早先那版"先横后竖"是配 8px 圆点写的，圆点没了就不好看。
+   ⚠ `position: fixed`：表格外面那层 `.table-scroll` 是 `overflow-x: auto`，
+     绝对定位的浮层会被它裁掉。 */
+.attain-pop {
+  position: fixed; z-index: 60; box-sizing: border-box;
+  width: 8px; height: 8px; border-radius: 0;
+  background: var(--card); border: 1px solid var(--line);
+  box-shadow: var(--shadow-menu);
+  overflow: hidden; opacity: 0; pointer-events: none;
+  transition: width var(--motion-normal) var(--ease-out),
+              height var(--motion-normal) var(--ease-out),
+              left var(--motion-normal) var(--ease-out),
+              top var(--motion-normal) var(--ease-out),
+              border-radius var(--motion-fast) var(--ease-out),
+              opacity var(--motion-fast) var(--ease-out);
+}
+.attain-pop.open { border-radius: var(--r-md); opacity: 1; pointer-events: auto;
+                   overflow-y: auto; }
+/* 表头 = 那一列的产品名（用户：把"这几台是谁卖的"换掉），**不换行** ——
+   名字太长就省略号（面板只有 200px 宽），全名挂在 `title` 上。 */
+/* 弹窗顶部那行**产品名**：⚠ 2026-09-19（用户）「**产品名大一点，加粗**吧，
+   现在看着一样」—— 它原来 12px 灰字，跟下面的人名行（13px）几乎一个样，
+   看着不像"这是哪一列"。⇒ 加大到 13.5px、加粗、用正文色，跟人名行拉开。 */
+.attain-pop-head { font-size: 13.5px; font-weight: 700; color: var(--text);
+                   padding: 8px 10px 5px;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attain-pop-row { display: flex; justify-content: space-between; gap: 14px;
+                  padding: 3px 10px; font-size: 13px; }
+.attain-pop-row b { font-variant-numeric: tabular-nums; }
+.attain-pop-row:hover { background: var(--hover); }
+/* 第三级弹窗：**某个人卖了哪些商品**（用户 2026-09-19）——
+   跟在那一行右边，简单的淡入（第一级那套"从格子放大"的动画在这儿没必要）。 */
+.attain-pop2 {
+  position: fixed; z-index: 61; box-sizing: border-box;
+  padding: 6px 10px; font-size: 12px; line-height: 1.5; color: var(--text);
+  word-break: break-word;      /* 商品名特长（`智能手机/华为/Mate X7 …云锦白`）*/
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-menu);
+  max-height: 240px; overflow-y: auto;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.attain-pop2.open { opacity: 1; pointer-events: auto; }
+/* ⚠ 台量数字**放大**（用户 2026-09-19：「这个 2 和 3 数字大点」）——
+   "卖了几台"比"百分比"更该被一眼看到；标签（达成/目标）保持小字不抢。 */
+/* ⚠ 行高**写死 20px**：左边标签列和右边数字列是两套堆叠，
+   行高不统一的话两行就对不齐（用户 2026-09-19：「不在一个高度上」）。 */
+.attain-num { font-size: 15px; font-weight: 600; line-height: 20px; }
+/* ⚠⚠ 目标数字的**统一宽度盒子**（2026-09-20）：
+   主表的"门店那行"、展开行的静止态、展开行的编辑态 —— **三种状态必须同宽**，
+   否则 `.attain-pair` 一宽一窄，里面的数字（居中的）就会左右挪。
+   ⚠ 宽度**改过两次**：44 → 56（加了原生上下箭头，要给它腾地方）→ **46**
+     （2026-09-20 用户：「百分比数字太靠右了」——56px 的框里数字只占 9px，
+       右边那 18px 空白把百分比推远了）。**三个 `.split-*` / `.num-box` 一起改**，
+     漏一个就会出现"点开编辑时数字挪一下"。 */
+.num-box { display: inline-block; width: 46px; min-width: 0; box-sizing: border-box;
+           text-align: center; }
+/* 单独出来的「达成/目标」那一列：贴左、不跟右侧百分比抢注意力 */
+.attain-pair .hint { font-size: 12.5px; line-height: 20px; }
+/* 标签列那条分割线是**透明的**（只为占位对齐，见 app.js 里那段说明） */
+.attain-sep-ghost { background: transparent; }
+/* ⚠ 2026-09-19（用户）：「**产品名大一点，加粗**吧，现在看着一样」——
+   表头原来跟正文一个字号一个字重（13px/600 的灰），跟数据行分不出来。 */
+.table-scroll th { white-space: normal; font-size: 13.5px; font-weight: 700; color: var(--text); }
+/* ⚠ 2026-09-19（用户）：「**门店整个列上下居中**，在左上角顶着很丑」——
+   表格默认 `vertical-align: top`，而右边那几列是两行/三行高，门店名就孤零零顶在上面。
+   让第一列整列**垂直居中**（表头也跟着，不然表头和数据会错开）。 */
+.table-scroll td:first-child, .table-scroll th:first-child,
+.table-scroll td:last-child, .table-scroll th:last-child { vertical-align: middle; }
+/* ⚠ `last-child` 是**总达成率**那一列：用户 2026-09-19「总达成率那一列也上下居中啊」——
+   它跟门店名一样是"一行字对两行数字"，顶在上面很难看。 */
+/* ⚠⚠ 2026-09-20（用户给了一张截图）：「**这个达成率贴着右边吧**」——
+   最后一列（总达成率）原来数字挤在格子左边，跟**前面那个产品列的达成率**
+   贴在一起，`0.0%` 和 `46.2%` 连起来看着像一个数（截图里就是 `%46.2%`）。
+   ⇒ 整列（含表头）靠右，跟前面那列之间自然留出空白。 */
+.table-scroll td:last-child, .table-scroll th:last-child { text-align: right; }
+/* ⚠ 但展开区最后那行（「保存目标 / 发送给区长」）是 `colspan` 的**一整行**，
+   它同时是 first-child 和 last-child —— 不挡一下的话按钮会被推到最右边。 */
+.table-scroll tr.attain-detail-save > td { text-align: left; }
+
 .empty { color: var(--muted); padding: 22px; text-align: center; font-size: 13px; }
+
+/* ─────────────── 定时器任务表（用户 2026-09-20：各模块自己的唤醒时间点）───────────────
+
+   一行 = 一个功能模块声明的一件事。控件是**下拉 + 时间 + 周几/几号**，
+   所以列宽要留给控件，别用主表那种 `table-layout: fixed`。 */
+/* ⭐ 定时器页顶上那块**大字**（用户 2026-09-20：「最上面大字写着下一次执行的是啥，
+   什么时间」）—— 时间和"跑什么"分两行，时间最大。
+   ⚠ 字号用**设计令牌里没有的那一档**是故意的：这是全站唯一一处"英雄数字"，
+     不该为了它给 `--fs-*` 加一档（那会让人以为别处也能用）。
+   要改成主题可调的话，把它挪进 theme.css 再加令牌。 */
+.timer-hero { margin: 0 0 10px 0; padding: 12px 14px; border-radius: var(--r-md);
+              background: var(--field); border: 1px solid var(--line); }
+.timer-hero-k { font-size: 12.5px; color: var(--muted); }
+.timer-hero-time { font-size: 26px; font-weight: 700; line-height: 1.25;
+                   font-variant-numeric: tabular-nums; }
+.timer-hero-what { font-size: 14px; color: var(--text); margin-top: 2px; }
+.timer-hero-none { font-size: 15px; color: var(--warn); font-weight: 600; }
+.timer-head { margin: 0 0 8px 0; }
+.timer-h3 { margin: 18px 0 4px 0; font-size: 14px; font-weight: 700; color: var(--text); }
+#timer-tasks table { table-layout: auto; width: 100%; }
+/* ⭐ 第一列是那个**开关滑块**（用户 2026-09-20：「左边加个开关滑块」）——
+   窄窄一列、不换行；表头是空的（开关本身不用标题）。 */
+#timer-tasks th.sw-cell, #timer-tasks td.sw-cell { width: 1%; white-space: nowrap; }
+/* 关掉的那一行：时间控件**置灰但还在**（时间点留着，再打开就是它） */
+.timer-off { opacity: .45; }
+/* 必做的那几步：滑块**锁死**（看得见是开着的，但点不动）——
+   ⚠ 只是"看起来不能点"，真正的拦截在后端（`timer.set_enabled` 会拒）。 */
+.switch-locked { cursor: not-allowed; }
+.switch-locked .switch-track { opacity: .65; }
+.switch-locked input:checked + .switch-track { background: var(--ok); }
+#timer-tasks td, #timer-tasks th { vertical-align: middle; }
+/* 频率 / 时间 / 周几那几格：控件之间留一点气，别挤成一坨 */
+#timer-tasks select, #timer-tasks input[type="time"], #timer-tasks input[type="date"] {
+  font: inherit; padding: 2px 6px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--field); color: var(--text);
+}
+#timer-tasks input[type="number"] { width: 64px; }
+/* 周几的多选：横着排，点一下切换（原生的 multi-select 在 Mac/Win 上长得完全不一样） */
+.wd-picks { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.wd-pick {
+  border: 1px solid var(--line); background: var(--field); color: var(--muted);
+  border-radius: 999px; padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.wd-pick.on { border-color: var(--brand); color: var(--text); background: var(--hover);
+              font-weight: 600; }
+/* 「只手动跑」的行：整行压暗一档，一眼能分出"它不在定时表里" */
+#timer-tasks tr.manual td { color: var(--muted); }
+.nowrap-cell { white-space: nowrap; }
+
+/* ─────────────── 历史记录（用户 2026-09-20：过了这一周就锁住存档）───────────────
+
+   左「有哪几周」右「那一周的表」—— 两栏，左边窄。
+   ⚠ 窄屏（门店那台机器可能是 1366 宽）叠起来时**左边先在上**，靠 `flex-wrap`。 */
+.hist-wrap { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+/* ⚠ 160px 也是量出来的：190px 时表格那边不够宽，最右边「总达成率」被切在卡片边上。
+   周数会越攒越多 ⇒ 给个高度上限自己滚，别把卡片撑成一长条。 */
+.hist-list { flex: 0 0 150px; max-height: 300px; overflow-y: auto;
+             display: flex; flex-direction: column; gap: 6px; }
+.hist-item {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  border: 1px solid var(--line); background: var(--field); border-radius: var(--r-md);
+  padding: 8px 10px; cursor: pointer; font: inherit; color: var(--text); }
+.hist-item:hover { border-color: var(--brand); }
+/* ⚠ 当前停在哪一周要看得出 —— 不然点来点去不知道右边这份是哪一周的。
+   ⚠ 左边的强调条用 **border-left 加粗**，不用 `box-shadow: inset …`：
+     项目有条测试盯着"组件里的 box-shadow 必须走 `var(--shadow-*)` 令牌"
+     （阴影是主题会整体换掉的东西），而这就是一条**边**、不是阴影。
+   ⚠ `padding-left: 8px` 是**配平**的：基础态是 1px 边框 + 10px 内边距 = 11px，
+     这儿 3px + 8px = 11px ⇒ 选中时文字**不横移**。 */
+.hist-item.current { border-color: var(--brand); border-left: 3px solid var(--brand);
+                     padding-left: 8px; background: var(--hover); }
+.hist-p { font-weight: 700; font-size: 13.5px; }
+.hist-d, .hist-s { font-size: 12px; }
+.hist-body { flex: 1 1 420px; min-width: 0; }
+/* 存档页那份表跟主表同一套 `table()`，但**不接**展开/编辑那条链 ——
+   门店名是纯文本，所以别用 `.store-link` 的样式（那看着像能点）。 */
+.hist-body .table-scroll td { vertical-align: middle; }
+/* ⚠⚠ 这张表**不能跟着主表用 `table-layout: fixed; width: 100%`**：
+   左边还有一列周列表占着 190px，11 列硬挤进剩下的宽度 ⇒ 每列 ~55px，
+   而表头要么是"X6/X7/Pura x max"这种长名、要么是"畅享90plus/（m plus）"，
+   于是被折成**一行一两个字**（横向看着像竖排，实测第一次渲染就是这样）。
+   ⇒ 这里让它**按内容撑开、撑不下就横向滚**（`.table-scroll` 本来就是干这个的），
+     只给一个最小列宽兜底 —— 换行仍然只发生在**产品名里的斜杠**上（那是设计好的）。 */
+.hist-body .table-scroll table { table-layout: auto; width: auto; min-width: 100%; }
+/* ⚠ 72px 是**量出来的**：88px 时内容 1010px、容身 922px（超出 88px，
+   最右边那列「总达成率」被切在卡片边上）。降到 72px 正好放得下，
+   而产品名照样只在斜杠处换行。 */
+.hist-body .table-scroll th { min-width: 64px; }
+
 
 .subtabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
 .subtab {
-  border: 1px solid var(--line); background: #fff; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--field); border-radius: 999px;
   padding: 4px 12px; font-size: 12.5px; cursor: pointer; color: var(--muted);
 }
-.subtab.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.subtab.active { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 
 /* ───────────────────────── 日志 ───────────────────────── */
 .log {
-  background: #0f172a; color: #cbd5e1; font-family: var(--mono); font-size: 12.5px;
+  background: var(--ink); color: var(--ink-text); font-family: var(--mono); font-size: 12.5px;
   padding: 14px; border-radius: 10px; max-height: 460px; overflow: auto;
   white-space: pre-wrap; word-break: break-all; margin: 0; line-height: 1.55;
 }
-.log .ok { color: #4ade80; }
-.log .bad { color: #fca5a5; }
-.log .dim { color: #64748b; }
+.log .ok { color: var(--log-ok); }
+.log .bad { color: var(--log-bad); }
+.log .dim { color: var(--log-dim); }
+
+/* 人员设置：一人一行，整行可点（复选框 + 姓名 + 账号 + 手机）。 */
+/* ⚠ 全局那条 `input, select, textarea { min-width: 160px; padding: 7px 10px }`
+   是给**文本框**写的，复选框也吃到了 —— 渲染成一个**拉长的空框子**（截图抓到）。
+   ⚠ 这条修在**全局**，不是只修人员设置那一处：凡是用到复选框的地方都吃这个亏，
+     逐个选择器打补丁迟早漏（这个项目为"全局规则泄漏到新元素"栽过，
+     比如 `[hidden]` 被 `.btn { display: inline-block }` 压过那次）。 */
+input[type="checkbox"], input[type="radio"] {
+  min-width: 0; width: auto; padding: 0; flex: 0 0 auto;
+}
+
+.staff-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 10px; border-radius: var(--r-sm); cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.staff-row:hover { background: var(--hover); }
+.staff-row:last-child { border-bottom: 0; }
+.staff-name { flex: 0 0 120px; font-size: 13.5px; }
+/* 去掉勾的人**视觉上也淡化** —— 一眼看得出哪些被剔了，不用逐个看勾 */
+.staff-row input:not(:checked) ~ .staff-name { color: var(--muted); text-decoration: line-through; }
+
+/* ═══════════════ 登录门禁（M9）—— 第一次安装 / 用不了的时候 ═══════════════
+
+   用户 2026-09-18：「第一次安装会进入登录页面……不登录或者登录失败不给用」。
+
+   ⚠ `z-index` 要**高过弹窗（200）**：门禁没做完的时候，更新日志弹窗、
+     老任务提示这些都不该冒出来压在上面 —— 那些是"进主界面之后"的事。
+   ⚠ 铺满整屏、且**可以滚动**：登录那一步里有验证码图、抓取日志、手抄 curl，
+     小屏上放不下，`overflow: auto` 必须有。 */
+.setup-mask {
+  position: fixed; inset: 0; z-index: 300; overflow: auto;
+  background: var(--bg); padding: 36px 20px 48px;
+  display: flex; align-items: flex-start; justify-content: center;
+}
+.setup-card {
+  width: min(680px, 100%); background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal); padding: 22px 26px 24px;
+}
+.setup-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.setup-head h2 { margin: 0; font-size: 17px; }
+.setup-step { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
+.setup-step-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.setup-step-head b { font-size: 14.5px; }
+.setup-num {
+  flex: 0 0 22px; height: 22px; border-radius: 50%;
+  background: var(--brand); color: var(--on-brand); font-size: 12.5px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+/* 这一步好了 —— 打勾（编号换成 ✓，颜色转绿），一眼看得出还差哪一步 */
+.setup-step.done .setup-num { background: var(--ok); }
+.setup-step.done .setup-num::after { content: '✓'; }
+.setup-step.done .setup-num { font-size: 0; }        /* 藏掉数字，只留勾 */
+.setup-step.done .setup-num::after { font-size: 12.5px; }
+.setup-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px;
+}
+/* 门禁没做完时，别让底下的主界面还能被 Tab 聚焦到 */
+body.setup-locked .shell { visibility: hidden; }
 
 /* ───────────────────────── 提示 ───────────────────────── */
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: #111827; color: #fff; padding: 10px 18px; border-radius: 10px;
-  font-size: 13.5px; box-shadow: 0 8px 28px rgba(0,0,0,.22); z-index: 99; max-width: 80vw;
+  background: var(--ink-2); color: var(--on-brand); padding: 10px 18px; border-radius: 10px;
+  font-size: 13.5px; box-shadow: var(--shadow-toast); z-index: 99; max-width: 80vw;
 }
 .toast.bad { background: var(--bad); }
 .toast.ok { background: var(--ok); }
 
-.banner { padding: 11px 14px; border-radius: 9px; font-size: 13px; margin-bottom: 12px; }
-.banner.bad { background: var(--bad-bg); color: #7f1d1d; }
-.banner.ok { background: var(--ok-bg); color: #14532d; }
-.banner.warn { background: var(--warn-bg); color: #78350f; }
-.banner.info { background: #f1f5f9; color: #334155; }
+/* 横幅右边那个「收起来」—— 别让它跟着文字换行跑到下一行去 */
+.banner-x { margin-left: auto; flex: 0 0 auto; }
+/* ⚠ 横幅是一条 flex 行：右边那个「收起来」要 `margin-left:auto` 顶到最右，
+   不然它会紧跟在文字后面、换个长度就跳行。 */
+.banner { padding: 11px 14px; border-radius: 9px; font-size: 13px; margin-bottom: 12px;
+          display: flex; align-items: center; gap: 8px; }
+.banner.bad { background: var(--bad-bg); color: var(--on-bad); }
+.banner.ok { background: var(--ok-bg); color: var(--on-ok); }
+.banner.warn { background: var(--warn-bg); color: var(--on-warn); }
+.banner.info { background: var(--info-bg); color: var(--on-info); }
 
-.runlog { background: #0f172a; color: #cbd5e1; padding: 12px 14px; border-radius: 9px;
+.runlog { background: var(--ink); color: var(--ink-text); padding: 12px 14px; border-radius: 9px;
   font-family: var(--mono); font-size: 12px; line-height: 1.55; max-height: 320px;
   overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0 0 12px 0; }
 
@@ -244,19 +957,19 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
    门店不看改动没关系，漏做那几步会真的出问题（比如旧定时任务没删 =
    一天跑两遍）。所以用 warn 配色 + 编号，别做成一样的列表。 */
 .modal-mask {
-  position: fixed; inset: 0; background: rgba(15,23,42,.45);
+  position: fixed; inset: 0; background: var(--overlay);
   display: flex; align-items: center; justify-content: center;
   z-index: 200; padding: 20px;
 }
 .modal-mask[hidden] { display: none; }
 .modal {
-  background: var(--card); border-radius: 14px; width: min(680px, 100%);
-  max-height: 86vh; overflow: auto; box-shadow: 0 18px 48px rgba(0,0,0,.28);
+  background: var(--card); border-radius: var(--r-lg); width: min(680px, 100%);
+  max-height: 86vh; overflow: auto; box-shadow: var(--shadow-modal);
 }
 .modal-head {
   padding: 16px 22px; border-bottom: 1px solid var(--line);
   display: flex; align-items: baseline; gap: 10px; position: sticky; top: 0;
-  background: var(--card); border-radius: 14px 14px 0 0;
+  background: var(--card); border-radius: var(--r-lg) var(--r-lg) 0 0;
 }
 .modal-head h2 { margin: 0; font-size: 16px; }
 .modal-body { padding: 16px 22px 6px 22px; }
@@ -271,25 +984,54 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
 .modal ul { margin: 0; padding-left: 20px; font-size: 13.5px; line-height: 1.85; }
 .modal ul li { margin-bottom: 2px; }
 .todo-box {
-  background: var(--warn-bg); border: 1px solid #fcd34d; border-radius: 10px;
+  background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px;
   padding: 12px 14px;
 }
-.todo-box > h3 { color: #78350f; margin: 0 0 10px 0; font-size: 13.5px; }
+.todo-box > h3 { color: var(--on-warn); margin: 0 0 10px 0; font-size: 13.5px; }
 .todo-item { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
 .todo-item:last-child { margin-bottom: 0; }
 .todo-num {
   flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--warn);
-  color: #fff; font-size: 12.5px; font-weight: 700;
+  color: var(--on-brand); font-size: 12.5px; font-weight: 700;
   display: flex; align-items: center; justify-content: center; margin-top: 1px;
 }
-.todo-text { flex: 1; font-size: 13.5px; line-height: 1.75; color: #78350f; }
-.todo-text b { color: #7c2d12; }
+.todo-text { flex: 1; font-size: 13.5px; line-height: 1.75; color: var(--on-warn); }
+.todo-text b { color: var(--on-warn-strong); }
 .todo-go { flex: 0 0 auto; }
+
+/* ────────────── 一级标签的**介绍页**（点一级标签落这儿）──────────────
+
+   用户 2026-09-18：「每个一级标签做一个默认的介绍页面，如果点击的是一级标签的话，
+   进入的是一级标签的介绍页面，而不是像现在这样进入第一个二级标签页面」。
+
+   卡片是**按钮**不是链接 —— 它们切的是页内的子面板（不产生 URL 变化），
+   用 `<a href>` 会让浏览器记一堆假历史，返回键就乱了。 */
+.intro-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.intro-card {
+  display: flex; flex-direction: column; gap: 6px; text-align: left;
+  padding: 16px 18px; cursor: pointer;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  transition: border-color var(--motion-fast) var(--ease-out),
+              box-shadow var(--motion-fast) var(--ease-out),
+              transform var(--motion-fast) var(--ease-out);
+}
+.intro-card b { font-size: 14px; font-weight: 650; }
+.intro-card:hover {
+  border-color: var(--brand);
+  box-shadow: var(--shadow-menu);
+  transform: translateY(-1px);
+}
+.intro-card:active { transform: none; }
+.intro-card .hint { line-height: 1.7; }
 
 /* ─────────────────── 二级标签（业务页内部）───────────────────
    2026-09-18 前端融合改版：一级页签按**业务**分家
    （销售 / 合规 / 会话 / 通用设置），业务页内部再用二级标签切「功能 / 设置」。
-   ⚠ `.subtabs` / `.subtab` 这两个类**早就有了** —— 四池明细的 sheet 分页在用，
+   ⚠ `.subtabs` / `.subtab` 这两个类**早就有了** —— 报量查询明细的 sheet 分页在用，
    这里只补子面板的显隐，**别再定义一遍那两个类**（会连带改到那边）。 */
 .subpanel { display: none; }
 .subpanel.active { display: block; }
@@ -302,15 +1044,20 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
    ⚠ 圆形是 SVG 自己画的，这里只管摆放和阴影 —— 别再加 `background`，
       会跟图标里的渐变打架（多出一圈方底）。 */
 .drawer-fab {
-  position: fixed; right: 18px; bottom: 18px; z-index: 40;
-  width: 46px; height: 46px; padding: 0; border: 0; border-radius: 50%;
+  /* ⚠ z-index 要比 `.drawer`（50）**高** —— 用户 2026-09-18：
+     「状态图标显示在上层」。窗子的右下角顶点就在它圆心上，
+     压不到上面的话半个图标会被窗子盖住。仍低于 toast（99）和弹窗（200）。 */
+  position: fixed; right: var(--fab-gap); bottom: var(--fab-gap); z-index: 60;
+  width: var(--fab-size); height: var(--fab-size);
+  padding: 0; border: 0; border-radius: 50%;
   background: none; cursor: pointer; line-height: 0;
-  filter: drop-shadow(0 5px 14px rgba(10, 111, 219, .38));
-  transition: transform .14s ease, filter .14s ease;
+  filter: var(--glow-fab);
+  transition: transform var(--motion-fast) var(--ease-out),
+              filter var(--motion-fast) var(--ease-out);
 }
 .drawer-fab svg { width: 100%; height: 100%; display: block; }
 .drawer-fab:hover { transform: translateY(-1px) scale(1.04);
-                    filter: drop-shadow(0 7px 18px rgba(10, 111, 219, .48)); }
+                    filter: var(--glow-fab-hover); }
 .drawer-fab:active { transform: scale(.97); }
 .drawer-fab[hidden] { display: none; }
 
@@ -324,12 +1071,42 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
 .kv-v.warn { color: var(--warn); font-weight: 600; }
 .kv-v.bad { color: var(--bad); font-weight: 600; }
 
+/* 状态**悬浮窗**（2026-09-18 用户：「能不能做成悬浮窗。悬浮窗打开的话，这个图标还有，
+   再点一下图标就关掉了。点旁边非悬浮窗的空白区域也可以关掉」）。
+
+   ⚠ 三件事一起改，少一件都不对：
+   ① 从"贴右边的整屏抽屉"改成**右下角的浮层** —— `bottom` 要留出把手的高度
+      （`--fab-size` + 间距），不然窗子会压在把手上、把手点不着；
+   ② 打开时**把手不藏**（原来是 `fab.hidden = open`）—— 它现在兼任"关闭按钮"；
+   ③ 点窗外空白处关闭（JS 那边）。 */
+
+
 .drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(600px, 94vw); z-index: 50;
-  background: var(--card); border-left: 1px solid var(--line);
-  box-shadow: -10px 0 30px rgba(0, 0, 0, .13);
-  display: flex; flex-direction: column;
+  position: fixed; z-index: 50;
+  right: var(--fab-center);
+  bottom: var(--fab-center);        /* 右下角顶点 = 把手圆心 */
+  width: min(430px, calc(100vw - var(--fab-center) - 12px));
+  max-height: min(74vh, 680px);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-float);
+  display: flex; flex-direction: column; overflow: hidden;
+
+  /* 从图标里冒出来 —— 原点放在**右下角**，而那儿正是把手圆心，
+     所以气泡看着是从图标里长出来的，不是从屏幕外飞进来。
+     ⚠ 过渡必须靠 `.open` 类、**不能靠 `[hidden]`** —— `display: none` 过渡不了。
+       `hidden` 仍然管"显示/隐藏"（JS 的状态以它为准），这里只补动画。 */
+  transform-origin: 100% 100%;
+  opacity: 0;
+  transform: translateY(10px) scale(.88);
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out),
+              transform var(--motion-normal) var(--ease-pop);
 }
+.drawer.open { opacity: 1; transform: none; pointer-events: auto; }
+
+/* 关掉动画偏好的处理**不在这里** —— 见 `theme.css` 的「动效总开关」，
+   那边把 `--motion-*` 归零，全站一处生效（逐个选择器写必然漏）。 */
+
 .drawer[hidden] { display: none; }
 .drawer-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -356,40 +1133,597 @@ td.num, td.right { text-align: right; font-variant-numeric: tabular-nums; }
   .tabs { flex-direction: row; flex-wrap: wrap; }
   .tab { width: auto; }
   .side-foot { margin-top: 0; }
-  .nav-menu { left: 0; top: calc(100% + 6px); }   /* 横排时回到往下弹 */
+  /* ⚠ 窄屏（侧栏横过来）时不用管了：二级项**就地撑开**，没有定位和位移 ——
+     2026-09-19 之前这里有两条浮层时代的规则（往下弹 / 位移方向），一并删掉。 */
+  /* ⚠ 不再有设置浮层了（2026-09-19 改成左下角那几行就地变形）——
+     这个断点里那几条 `.side-menu` 规则一并删掉，别留着误导人。 */
 }
 
 /* 更窄：抽屉铺满，别只露一条 */
 @media (max-width: 720px) {
-  .drawer { width: 100vw; }
+  /* 悬浮窗窄屏就占满（仍留边距）—— 原来的 `width: 100vw` 是"整屏抽屉"时代的，
+     贴到屏幕边会把圆角和阴影一起切掉。 */
+  .drawer { width: calc(100vw - var(--fab-center) - 12px); }
 }
 
 /* ─────────── 顶部导航的悬停二级菜单（苹果官网那种）───────────
    用户 2026-09-18：「参考苹果这个，最上面几个，鼠标移动过去自动显示对应的二级标签」。
    ⚠ **悬停只展开菜单，点击才跳** —— 不是"悬停即切换"（扫过去就切页，误触率太高）。
    ⚠ 二级标签**只有这一份**（页内那行去掉了）—— 两处各一份迟早不同步。 */
-.nav-item { position: relative; display: flex; }
+/* ⚠ 2026-09-19（用户）：「**上面一级标签的结构也改成左下角的结构和动画效果**」——
+   所以这一块**不再是浮层**，跟 `.side-foot` 一个路子：二级项**在本行下面就地撑开**
+   （`height: 0 → 固定值`），没有绝对定位、没有"桥"、没有位移。
+
+   为什么用 `height` 不用 `max-height`：后者要猜个够大的数，猜大了动画会"提前结束"、
+   看着发顿（这条是左下角那边踩出来的，照抄）。
+   为什么高度写死：两行 / 三行是**已知的**（见下面按 `data-tab` 写的两条），
+   写死才能和行高对上，动画也不会中途跳。 */
+.nav-item { display: flex; flex-direction: column; }
+/* 二级项那一叠：平时 0 高，鼠标进来（或键盘聚焦 / 触摸点开 `.open`）撑到自己那么高 */
 .nav-menu {
-  position: absolute; top: 0; left: calc(100% + 8px); z-index: 30;
-  min-width: 200px; padding: 6px;
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
+  height: 0; overflow: hidden;
   display: flex; flex-direction: column; gap: 2px;
+  transition: height var(--motion-normal) var(--ease-out);
 }
-.nav-menu[hidden] { display: none; }
-/* ⚠ 用户 2026-09-18：「鼠标移到二级菜单时，慢一点就点不上」。
-   根因就是**菜单和导航之间那 8px 缝**：指针跨缝的一瞬间两边都不沾，
-   `mouseleave` 立刻触发、菜单当场收掉。
-   这里用一块**透明的"桥"**把缝补住（视觉上还是分开的，但指针一直没离开）——
-   比"把缝去掉"好看，也比只靠 JS 宽限期稳（少一次竞态）。 */
-.nav-menu::before {
-  content: ''; position: absolute; top: 0; bottom: 0; left: -10px; width: 10px;
-}
-/* 菜单里的项是**整行**的（不是页内那种胶囊）—— 挨着点更好点 */
+/* 每个一级标签的二级项数不一样 ⇒ 撑开高度也不一样：
+     1 项 = 35px；3 项 = 3×35 + 2×2 = 109px。
+   ⚠ 2026-09-20：「历史记录」加进「周度重点产品」（当时还叫「销售数据」）之后**这边也变成 3 项** ——
+     默认那条（= `sales`）跟着改成 109px，不然展开会被截掉一截。
+   ⚠ 2026-09-21（用户：「月度生意计划的二级标签空白的有点多」）：`plan` / `inventory`
+     各只有 1 个二级项，却跟着默认那条撑到 109px —— 底下空一大截。
+     按项数各写一条；加了二级项就要改这个数 —— 有测试对着 HTML 数项数（`test_theme` 那条）。
+   ⚠ 写成具体规则、**不用自定义属性**：这个项目有一条测试
+     「用了的 `var(--x)` 必须在 theme.css 里定义」（那是设计令牌表），
+     而 `.nav-menu` 的高度是**布局**、不是主题令牌，塞进去会红。 */
+.nav-item:hover .nav-menu, .nav-item.open .nav-menu { height: 109px; }
+.nav-item[data-tab="compliance"]:hover .nav-menu,
+.nav-item[data-tab="compliance"].open .nav-menu { height: 109px; }
+.nav-item[data-tab="plan"]:hover .nav-menu,
+.nav-item[data-tab="plan"].open .nav-menu { height: 72px; }
+.nav-item[data-tab="inventory"]:hover .nav-menu,
+.nav-item[data-tab="inventory"].open .nav-menu { height: 72px; }
+.nav-item[data-tab="valueadd"]:hover .nav-menu,
+.nav-item[data-tab="valueadd"].open .nav-menu { height: 109px; }
+.nav-item[data-tab="tools"]:hover .nav-menu,
+.nav-item[data-tab="tools"].open .nav-menu { height: 109px; }
 .nav-menu .subtab {
   width: 100%; text-align: left; border: 0; background: none;
-  border-radius: 8px; padding: 10px 14px; font-size: 13.5px; color: var(--text);
+  border-radius: 8px;
+  /* ⚠ 2026-09-19（用户）：「**二级标签看不出来次级啊**」——
+     层次靠**缩进 + 小一号字号 + 常规字重**（一级是 14px/550，这儿 12.5px/450），
+     不靠颜色（颜色是主题的东西，而且一二级本来就同一套灰）。 */
+  padding: 0 14px 0 26px; font-size: 12.5px; font-weight: 450;
+  color: var(--muted);
+  /* ⚠ 行高**写死**：撑开高度是按"N 行 × 35 + 间隙"算出来的（见上面那两条），
+     行高跟着内容变的话那个数就对不上 —— 撑不到位会截掉半行、撑多了空一截。
+     有测试盯着这个等式（`test_每个一级标签的展开高度跟它的二级项数对上`）。 */
+  height: 35px;
 }
-.nav-menu .subtab:hover { background: #f1f5f9; }
-/* 当前正停在这一页 —— 展开菜单时能对上是哪个 */
-.nav-menu .subtab.current { color: var(--brand); font-weight: 650; background: #eff6ff; }
+.nav-menu .subtab:hover { background: var(--hover); color: var(--text); }
+/* 当前正停在这一页 —— **只加粗变深，不铺底色**（用户同上那条）。 */
+.nav-menu .subtab.current { color: var(--text); font-weight: 700; }
+
+/* ─────────────────── 库存盘点（M16）：已拆 iframe ───────────────────
+   2026-09-22 用户选「真拆掉 iframe」：markup 在 `#subpanel-inventory` 里，
+   高度跟普通子面板一起走 `main` 滚动；`.inv-frame` / `main.inv-open`
+   是 iframe 时代的遗留，选择器留着无害但不再挂节点。 */
+.inv-frame {
+  display: block; width: 100%;
+  height: calc(100vh - 22px); min-height: 460px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent;
+}
+
+/* ───────────────── 每店一张卡（M20，2026-09-21）─────────────────
+
+   ⚠ 卡里的数字复用现成的 `.kpi`（`display:grid` 那一套），这里只管
+     "一屏摆几张卡 + 卡怎么点开"。
+   ⚠ 视觉值一律走令牌（`theme.css`）—— 组件里写死颜色/阴影会有测试拦
+     （`test_theme.py`），而且换主题时那些值不跟着变。 */
+.store-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.store-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.store-card:hover { border-color: var(--brand); }
+/* 好几天没上报 —— 只是**描边**变一下，不遮数据（用户要"收信失败时保持原样"） */
+.store-card.stale { border-color: var(--warn); }
+.store-card .store-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+}
+.store-card .store-name { font-weight: 600; }
+.store-card .store-code { font-family: var(--mono, monospace); font-size: 12px; color: var(--muted); }
+.store-card .store-src { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.store-card .store-nums {
+  display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px;
+  font-size: 12px; color: var(--muted);
+}
+.store-card .store-nums b { display: block; font-size: 17px; color: var(--text); }
+
+/* 区长/平台看到的人员状态表（每店一张，只读）—— 2026-09-21 */
+.staff-store { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.staff-store:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+.staff-store-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.staff-list-inner { margin-top: 6px; }
+
+/* ── 定时器那张表的「调顺序」箭头（用户 2026-09-21）─────────────────────────
+   鼠标移到那一行才显形（平时不占视线）；用 opacity 而不是 display，
+   这样**行高不跳**、鼠标扫过去时表格不会抖。
+   ⚠ `:focus-within` 也要算进去 —— 键盘 Tab 到箭头时同样得看得见。 */
+.mover-cell { width: 46px; white-space: nowrap; }
+.row-mover { opacity: 0; transition: opacity var(--motion-fast); display: inline-flex; gap: 2px; }
+tr:hover .row-mover, .row-mover:focus-within { opacity: 1; }
+.row-mover .btn { padding: 1px 6px; line-height: 1.2; }
+.row-mover .btn[disabled] { opacity: .35; }
+
+/* ── 行里那句确认（「✅ 已保存：每天 21:00」）────────────────────────────
+   ⚠ 2026-09-21：反馈从 toast 挪到**行里**之后，这里可能要放一整句
+   （「「抓取玲珑数据」是必做的，关不掉（…）」那种）⇒ 允许换行、给个最大宽度，
+   不然它会把「保存」那一列撑得很宽、整张表跟着变形。 */
+[data-timer-msg] { display: inline-block; max-width: 22em; white-space: normal;
+                   vertical-align: middle; margin-left: 6px; }
+
+/* ───────────────────── 月度生意计划（M22）─────────────────────
+
+   一张**列可展开**的表：行永远是"门店"，点列名就地展开成产品线（块 → 系列 → 机型）。
+   ⚠ 颜色只走 `theme.css` 的令牌（涨绿跌红用 `--ok` / `--bad`）——
+     视觉值只有那一份，别在这儿写死色号。 */
+
+/* 指标切换（销量 / 销售额 / 利润）—— 一次看一个，表才不至于宽到没法读 */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-sm);
+       overflow: hidden; vertical-align: middle; }
+.seg-btn { border: 0; background: var(--card); color: var(--muted);
+           font-size: 12.5px; padding: 5px 12px; cursor: pointer; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--line); }
+.seg-btn:hover { background: var(--hover); }
+.seg-btn.active { background: var(--brand); color: var(--on-brand); font-weight: 600; }
+
+/* 横向滚动 + 上限高度：展开到机型之后列会很多（FD 一家就 14 个机型） */
+.plan-wrap { overflow: auto; max-height: 74vh; }
+/* ⚠ 2026-09-21 用户：「**每一列的宽度固定吧**，展开和收起来的时候**有往右移动的动画**」——
+   ⇒ `table-layout: fixed` + 每个格自带固定宽度（见 `.plan-col`）：
+      列一多就整体变宽、横向滚动，**已有那几列不会跟着挤**。
+   ⚠ 别再用 `min-width: 100%`：那会让列宽按容器比例缩放，"固定"就没了
+      （表比容器窄时留白在右边，比把列拉宽好）。
+   ⚠ `border-collapse: separate` 是吸顶/吸左那两条要的，别改。 */
+.plan-table { border-collapse: separate; border-spacing: 0; table-layout: fixed;
+              /* ⚠ **必须 `max-content`**：`width: auto` 时浏览器取「容器宽」和「列宽之和」里**大**的那个，
+                 列不满一行时它会把每列按比例拉宽 —— 展开一下列宽就跟着变，那就不叫固定了。
+                 实测：9 列时 auto 给 1288px（表头每格 140px），改 max-content 后正好 132 / 108。 */
+              width: max-content;
+              /* ⚠ **表自己也必须跟着过渡**：展开/收起时表宽被钉成"当前列宽之和"
+                 （见 `app.js` 的 `planPinTable`），第二帧再钉到"最终列宽之和" ——
+                 两张过渡**同一条曲线、同一个时长**，表宽与列宽之和才是同步的，
+                 中间不会多出/少掉一截（多了会被按比例摊回列上，"固定"就破了）。 */
+              transition: width var(--motion-slow) var(--ease-out); }
+.plan-table th, .plan-table td { overflow: hidden; text-overflow: ellipsis; }
+/* 一列的宽度只有这一处 —— 展开/收起靠**宽度过渡**做出"往右推"的动效。
+   ⚠ 时长/缓动走 `var(--motion-*)`（**别写死 .18s**）：主题那两个令牌归零 =
+     "关动画"一键生效，写死的话这个动效就是**关不掉的那一个**（`test_theme.py` 钉着）。
+   ⚠⚠ 过渡**只给表头那一行**（下面那条 `thead th.plan-col`）：
+     列宽本来就是第一行定的（`table-layout: fixed`），表体几千个格子跟着列宽走就够了。
+     2026-09-21 用户：「电脑稍微配置不好的看着卡」—— 原来每个格都挂 transition，
+     一万多个属性一起动，弱机器上就是掉帧。见 `tests/test_plan_web.py` 那条钉子。 */
+.plan-col { width: 108px; }
+.plan-table thead th.plan-col {
+  transition: width var(--motion-slow) var(--ease-out),
+              padding var(--motion-slow) var(--ease-out);
+}
+.plan-col-store { width: 132px; }
+.plan-col-total { width: 108px; }
+/* 动画用：新展开的那几列先 0 宽（下一帧放开 ⇒ 从 0 长出来、把右边的推走）；
+   要收起的那几列反过来（先原宽、下一帧收到 0 ⇒ 右边的滑回来）。
+   ⚠ 宽度是 `app.js` 的 `planFreeze` 用**内联像素**写上去的（只在动画那两帧），
+     这里只负责"0 宽"和"收尾干净"这半件事。
+   ⚠⚠ `padding-left/right: 0` **不能省**：单元格有 `padding: 8px 10px`（全局 `th, td` 那条），
+     而 `box-sizing: border-box` 下 `width: 0` 只是"内容宽 0"，那 20px 内边距**压不掉** ——
+     实测：只写 `width: 0` 时列宽停在 **20px**，"0 → 108"的起点其实是 20。 */
+.plan-col-hide { width: 0; padding-left: 0; padding-right: 0; }
+/* 冻结那一帧（`planFreeze` 量自然宽度 + 写起点宽度时挂着）——**过渡必须归零**：
+   量自然宽度要先读一次 `getBoundingClientRect()`，这一读就让格子有了计算样式，
+   接着写 0 宽**自己就会走一遍过渡**，第二帧改终点时起点已经走掉一半了
+   （实测：展开时新列一上来就是 ~110 宽，等于没动画；收起那侧正常 —— 它起点终点都是自然宽度）。
+   ⚠ 用 `transition-duration: 0s`，**不许写 `transition: none`**：全站关动画靠的是
+     "令牌归零、属性留着"（`theme.css` 与 `test_theme.py` 都钉着这条）。 */
+.plan-frozen, .plan-frozen * { transition-duration: 0s !important; }
+/* ── 门店 → 人 那几行的**上下动画**（用户 2026-09-21：「上下的动画加上」）──
+   ⚠⚠ `tr` 的 `height` **过渡不了**：实测给它写 `height: 0`，行高照样 53px
+     —— 表格行高是**内容顶出来的**，`height` 只是个下限。
+   ⇒ 高度压在每个格子里那层 `.plan-in`（它的高度才是"内容高度"），
+     格子自己的上下内边距（8+8）也要一起压，不然那 16px 还在（跟列宽那条同理）。
+   ⚠ 过渡只挂在**正在动画的那一行**上（`.plan-anim-row`）：给所有行都挂，
+     列宽动画时几千个格子的 padding 也跟着动 —— 那就是"卡"的来源。 */
+.plan-in { overflow: hidden; }
+.plan-anim-row .plan-in { transition: height var(--motion-slow) var(--ease-out); }
+.plan-anim-row td { transition: padding var(--motion-slow) var(--ease-out); }
+.plan-row-hide { padding-top: 0; padding-bottom: 0; border-bottom-width: 0; }
+/* 表头**吸顶**：往下翻的时候还得能点列名（那正是这一页的主要操作）。
+   ⚠ 表头**只有一行**（2026-09-21 用户：「二级分类和三级分类和一级分类**同一行**」）——
+     一级/二级/三级都摊在同一行里，组名后面挂 ▸ 点开、子列接在它**右边**。
+     ⇒ 原来那两条 `thead tr:nth-child(2|3) th { top: … }`（多层表头各自的吸顶偏移）
+       **删掉了**：表头不再有第二、三行，留着只会让人以为还能变回多行。 */
+/* ⚠ 背景走 `var(--hover)`（跟增值 film 表同一档），别再写死 #fafbfc。 */
+.plan-table thead th { position: sticky; top: 0; z-index: 2; background: var(--hover);
+                       border-bottom: 1px solid var(--line); color: var(--text);
+                       font-weight: 650; }
+.plan-th { text-align: center; white-space: nowrap; }
+/* 一级块那一列：它是**这一组的小计**，加粗、字号大一点，跟右边的明细分开。
+   ⚠ 三级要**一眼分得出层级**（用户 2026-09-21：「一级标签字大一点，二级保持现状，
+     三级再小一点。然后二级浅灰，三级更深一点，做个区分」）——
+     字号：一级 14 / 二级 13（现状）/ 三级 12；颜色：一级正常、二级浅灰、三级更深一档。 */
+.plan-th.plan-grp, .plan-cell.plan-grp { font-weight: 600; }
+/* ⚠ 全局那条 `th { color: var(--muted) }` 会把三级**都**染成同一个灰，
+   所以一级要**自己写回正文色** —— 不然"字大一点"之外跟二级没区别。 */
+.plan-th.plan-lv1 { font-size: 14px; color: var(--text); }
+.plan-th.plan-lv2 { font-size: 13px; color: var(--muted); font-weight: 500; }
+.plan-th.plan-lv3 { font-size: 12px; color: var(--muted-2); font-weight: 500; }
+/* 首尾两格（门店 / 合计）保持原来的小字灰 —— 它们不是"一级分类" */
+.plan-th.plan-lead { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+/* 层级底色：跟 film 的浅灰一档（#f7f8fa），别再各写 #fcfcfd */
+.plan-cell.plan-lv2, .plan-cell.plan-lv3 { background: var(--row-alt); }
+.plan-th-open { cursor: pointer; }
+.plan-th-open:hover { color: var(--brand); background: var(--hover); }
+.plan-caret { margin-left: 4px; font-size: 10px; color: var(--muted); }
+.plan-th-open:hover .plan-caret { color: var(--brand); }
+/* 第一列（门店）也吸左，横着滚的时候不至于忘了这是哪家店 */
+.plan-store { position: sticky; left: 0; z-index: 1; background: var(--card);
+              white-space: nowrap; font-weight: 600;
+              /* 跟周度达成表同一条（用户 2026-09-22：「门店名那一列也是垂直居中」）——
+                 右边产品格两行（台量+环比），店名一行顶在上面很空。 */
+              vertical-align: middle; }
+/* 表头「门店」跟数据一起居中；`.plan-lead` 那条 bottom 是给区域/合计的，
+   这里特异性更高，只覆盖门店那一格。 */
+.plan-th.plan-col-store { vertical-align: middle; }
+/* ⭐ 门店名可点（拆到人）—— 用户 2026-09-21：「门店名点开可以拆分到人」。
+   ⚠ 只有**真的有人**的店才挂这个类（没有人的店点了没反应最坑）。 */
+.plan-store-open { cursor: pointer; }
+.plan-store-open:hover { color: var(--brand); background: var(--hover); }
+.plan-store-open:hover .plan-caret { color: var(--brand); }
+/* 人那一行：缩进一档、字浅一点、底色压暗 —— 一眼看出是"门店下面的明细" */
+.plan-person .plan-store { font-weight: 500; color: var(--muted); }
+.plan-person .plan-store { padding-left: 22px; }
+.plan-who::before { content: "· "; color: var(--line); }
+.plan-table thead th:first-child { z-index: 3; }
+
+.plan-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 展开出来的系列 / 机型：**底色压暗一档**，一眼分得出哪是合计、哪是明细。
+   ⚠ 底色那半挪到上面 `.plan-cell.plan-lv2/3` 了（按**层级**给，不再按"展开没展开"）——
+     因为现在一级那一列**展开了也还在**（它是块的小计），
+     "浅色 = 明细" 这条规则得看列在哪一层，不能看它是不是叶子。 */
+.plan-sub { color: var(--muted); }
+.plan-v { font-size: 13px; }
+.plan-g { display: block; font-size: 11px; line-height: 1.35; }
+.plan-up { color: var(--ok); }
+.plan-down { color: var(--bad); }
+.plan-flat { color: var(--muted); }
+.plan-new { color: var(--brand); }
+/* 负值（退货多于销售）—— 整格标红，别让人以为是打错了 */
+.plan-neg .plan-v { color: var(--bad); }
+.plan-total { font-weight: 600; }
+.plan-total .plan-v { font-size: 13.5px; }
+/* 表头首尾两格（区域 / 门店 / 合计）—— 跟数据行对齐，且**整列垂直居中**
+   （用户 2026-09-22：「和前面的区域对不上」—— 门店是 middle、区域还是 bottom）。 */
+.plan-lead { vertical-align: middle; }
+.plan-table td.plan-lead { vertical-align: middle; }
+/* 层级/人行底色收口在上面；这里只钉人行（避免和 .plan-cell 那条重复写两遍） */
+.plan-person td { background: var(--row-alt); }
+
+/* 增值 · 防护膜达成情况：分区 + 小计（照源表版式） */
+.film-loading { display: flex; align-items: center; gap: 10px;
+                padding: 28px 12px; color: var(--muted); font-size: 13px; }
+.film-spin { width: 16px; height: 16px; border-radius: 50%;
+             border: 2px solid var(--line); border-top-color: var(--brand);
+             animation: film-spin .7s linear infinite; }
+@keyframes film-spin { to { transform: rotate(360deg); } }
+.film-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.film-table th, .film-table td { white-space: nowrap; padding: 6px 8px;
+                                 border-bottom: 1px solid var(--line); }
+.film-table th { text-align: center; font-weight: 650; color: var(--text);
+                 background: var(--hover); position: sticky; top: 0; z-index: 1;
+                 white-space: normal; line-height: 1.25; padding: 8px 6px;
+                 min-width: 4.5em; }
+.film-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.film-table td.region { text-align: center; font-weight: 600;
+                        vertical-align: middle; width: 4.5em; max-width: 4.5em; }
+.film-region,
+#attain-table th:first-child, #attain-table td:first-child,
+.plan-table th:first-child, .plan-table td:first-child {
+  font-weight: 600; color: var(--muted); text-align: center; white-space: nowrap;
+  width: 4.5em; max-width: 4.5em; min-width: 4.5em;
+  padding-left: 4px; padding-right: 4px; overflow: hidden; text-overflow: ellipsis;
+}
+/* 区域名按钮（点一下合并成区域汇总 / 再点展开）—— 默认去掉 button 底 */
+.region-toggle {
+  background: none; border: none; margin: 0; padding: 0;
+  font: inherit; font-weight: 600; color: inherit; cursor: pointer;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.region-toggle:hover { color: var(--brand); text-decoration: underline; }
+/* 收起后的红底汇总行上：按钮跟着白字，hover 别跳回 brand */
+#attain-table tr.film-sum .region-toggle,
+.plan-table tr.film-sum .region-toggle {
+  color: var(--on-film-sum); background: transparent;
+}
+#attain-table tr.film-sum .region-toggle:hover,
+.plan-table tr.film-sum .region-toggle:hover {
+  color: var(--on-film-sum); opacity: 0.9;
+}
+/* 每区「共计」—— 红底白字（底色走 `--film-sum`，**不写死**；浅色默认已从纯正红调柔）。
+   ⚠ 不只 `.film-table`：周度达成 / 月度计划也各有一条分区汇总行（同一个 class）。 */
+.film-table tr.film-sum td,
+#attain-table tr.film-sum td,
+.plan-table tr.film-sum td {
+  font-weight: 700; color: var(--on-film-sum); background: var(--film-sum); border-bottom-color: var(--film-sum);
+}
+/* 汇总行上的门店格（plan-table 有 sticky 底色）和首列 muted 色要让位给红底白字 */
+.plan-table tr.film-sum td.plan-store,
+#attain-table tr.film-sum td:first-child,
+.plan-table tr.film-sum td:first-child,
+.plan-table tr.film-sum td.plan-lead {
+  background: var(--film-sum); color: var(--on-film-sum);
+}
+/* 率类标色在汇总行上也要压回红底（照 film 的两条） */
+#attain-table tr.film-sum td.film-lo,
+#attain-table tr.film-sum td.film-hi,
+.plan-table tr.film-sum td.film-lo,
+.plan-table tr.film-sum td.film-hi,
+#attain-table tr.film-sum .rate,
+.plan-table tr.film-sum .plan-v,
+.plan-table tr.film-sum .plan-g {
+  background: var(--film-sum); color: var(--on-film-sum);
+}
+/* 底部「合计」—— **白底加粗**（2026-09-22 用户：红底会跟区域小计划不开） */
+.film-table tr.film-total td {
+  font-weight: 700; color: var(--text); background: var(--card);
+  border-top: 2px solid var(--text); border-bottom: none;
+}
+/* 率类标色（照源表：偏低粉、偏高蓝） */
+.film-lo { background: var(--film-lo); }
+.film-hi { background: var(--film-hi); }
+.film-sum.film-lo td, .film-sum td.film-lo { background: var(--film-sum); }
+.film-sum.film-hi td, .film-sum td.film-hi { background: var(--film-sum); }
+.film-total td.film-lo, .film-total td.film-hi { background: var(--card); }
+.film-table tr.film-sum td.region { writing-mode: horizontal-tb; }
+
+/* 点门店拆到人：店名可点 + 人行缩进（跟 plan / attain 同一套视觉） */
+.film-store-open { cursor: pointer; }
+.film-store-open:hover { color: var(--brand); background: var(--hover); }
+.film-table tr.film-person td { background: var(--row-alt); color: var(--muted); font-weight: 500; }
+.film-table tr.film-person td:first-child { padding-left: 22px; }
+/* 率类标色必须盖过人行灰底 —— 否则个人行没有粉/蓝（用户 2026-09-23） */
+.film-table tr.film-person td.film-lo { background: var(--film-lo); color: var(--text); }
+.film-table tr.film-person td.film-hi { background: var(--film-hi); color: var(--text); }
+
+/* 盘点页激活时：把 `main` 的底部 padding 让给 iframe（理由见上面 `.inv-frame`）。
+   ⚠ 类由 `web/app.js` 的 `switchTab` 加/去 —— **切走要还回去**，
+     不然别的页（自己会滚的那种）会贴着窗口底、看着很憋。 */
+main.inv-open { padding-bottom: 0; }
+/* 小工具**仅 iframe 子页**（价签/工牌）满高：`tools-frame-mode` 由 switchTab 按
+   subtab 加上。⚠ **权益领取**是普通卡片页 —— 再套 100vh 满高会在卡片下面
+   撑出一大截空白（2026-09-23 用户报的「下面留空有点多」）。
+   ⚠ 别用 `height: calc(100vh - Npx)` + `min-height: 480px` —— 窗口一矮
+   min-height 会把 iframe 顶出视口，底部按钮被挡（2026-09-22 实测）。 */
+main.tools-open {
+  /* 非 iframe（权益领取）：跟周度达成同一套文档流，不另开满高 */
+  height: auto;
+  overflow: visible;
+  padding-bottom: 20px;
+}
+main.tools-frame-mode {
+  padding-bottom: 0;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+main.tools-frame-mode > .panel.active {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+main.tools-frame-mode .subpanel.active {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 小工具 iframe（价签 / 工牌）—— **各自在 subpanel 里**（拆开；用户 2026-09-22）。
+   ⚠ 别把 iframe 挪到 panel 上、用空 subpanel 占位 —— 刷新/切页时会「一闪即逝」。 */
+.tools-frame {
+  width: 100%;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  background: var(--card);
+  border-radius: var(--r-md);
+  display: block;
+  vertical-align: top;
+}
+
+
+/* ── 待领清单：价值收窄 / 状态胶囊 / 操作两行（2026-09-23） ── */
+/* 店员 / 支付时间：上下垂直居中（商品名可能多行，这两列短） */
+/* 待领表：**每一列都垂直居中**；店员加宽、商品收窄（2026-09-23） */
+#claim-pending-table table th,
+#claim-pending-table table td {
+  vertical-align: middle;
+}
+#claim-pending-table table .claim-col-store,
+#claim-pending-table table th:nth-child(1) {
+  width: 110px;
+  min-width: 96px;
+  white-space: nowrap;
+}
+#claim-pending-table table .claim-col-who,
+#claim-pending-table table th:nth-child(2) {
+  /* 三个字店名（如 郭芮志）+ 一点余量 */
+  width: 72px;
+  min-width: 68px;
+  white-space: nowrap;
+  text-align: center;
+}
+#claim-pending-table table .claim-col-name,
+#claim-pending-table table th:nth-child(3) {
+  /* 商品名收窄，长名换行/省略 */
+  width: 28%;
+  min-width: 160px;
+  max-width: 340px;
+}
+#claim-pending-table table .claim-col-name {
+  word-break: break-all;
+  line-height: 1.35;
+}
+#claim-pending-table table .claim-col-ts,
+#claim-pending-table table th:nth-child(4) {
+  width: 110px;
+  min-width: 100px;
+  white-space: nowrap;
+}
+#claim-pending-table table .claim-col-act,
+#claim-pending-table table th:nth-child(5) {
+  width: 14%;
+  min-width: 100px;
+}
+#claim-pending-table table .claim-col-benefit,
+#claim-pending-table table th:nth-child(6) {
+  width: 10%;
+  min-width: 72px;
+}
+#claim-pending-table table .claim-col-value,
+#claim-pending-table table th:nth-child(7) {
+  width: 72px;
+  max-width: 88px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#claim-pending-table table .claim-col-status,
+#claim-pending-table table th:nth-child(8) {
+  width: 72px;
+  white-space: nowrap;
+}
+#claim-pending-table table .claim-col-acts,
+#claim-pending-table table th:nth-child(9) {
+  min-width: 168px;
+  width: 176px;
+}
+.claim-st {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid transparent;
+}
+.claim-st-pending {
+  background: rgba(240, 180, 41, .14);
+  color: var(--warn, #c90);
+  border-color: rgba(240, 180, 41, .45);
+}
+.claim-st-claimed {
+  background: rgba(47, 191, 113, .14);
+  color: var(--ok, #2a2);
+  border-color: rgba(47, 191, 113, .4);
+}
+.claim-st-na {
+  background: rgba(128, 128, 128, .12);
+  color: var(--muted, #888);
+  border-color: rgba(128, 128, 128, .35);
+}
+.claim-acts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  width: 100%;
+}
+/* 已领取 · 撤销：贴操作列最右 */
+.claim-acts.claim-acts-end {
+  align-items: flex-end;
+}
+.claim-acts.claim-acts-end .claim-acts-row {
+  justify-content: flex-end;
+  width: 100%;
+}
+.claim-acts-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.claim-acts-row .btn {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+
+/* 权益领取：每页 50 + 上下翻页 + 列表区可滚 */
+#claim-status-seg .seg-btn { padding: 4px 12px; font-size: 13px; }
+#claim-pager { align-items: center; }
+#claim-page-info { font-variant-numeric: tabular-nums; }
+/* 与周度达成一致：**不设表区 max-height**，50 条自然撑高、整页滚动。
+   （原先 62vh 只露约 7 行，下面像「留白」—— 2026-09-23） */
+#claim-pending-table .table-scroll {
+  overflow-x: auto;
+  overflow-y: visible;
+}
+#claim-pending-table .table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--card, #fff);
+}
+
+
+/* 权益领取：卡片贴内容高，避免 subpanel 拉高后卡片下面空一大块 */
+/* 与达成页一致：卡片自带 margin-bottom:16px */
+
+
+
+/* 活动一览：每列垂直居中；最右列**不要**跟全局 last-child 右对齐贴边 */
+#claim-act-table table th,
+#claim-act-table table td {
+  vertical-align: middle;
+}
+#claim-act-table table th:last-child,
+#claim-act-table table td:last-child {
+  text-align: left;
+  padding-right: 14px;
+}
+#claim-act-table .table-scroll {
+  overflow-x: auto;
+}
+/* 赠送时间 / 领取链接：各收窄约一半（用户 2026-09-23） */
+#claim-act-table .claim-act-url,
+#claim-act-table table th:nth-child(8) {
+  min-width: 56px;
+  width: 56px;
+  white-space: nowrap;
+}
+#claim-act-table .claim-act-title { min-width: 160px; }
+#claim-act-table .claim-act-match { min-width: 120px; }
+#claim-act-table .claim-act-time,
+#claim-act-table table th:nth-child(4) {
+  min-width: 100px;
+  width: 100px;
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.3;
+}
+#claim-act-table tr.is-expired td {
+  text-decoration: line-through;
+  opacity: 0.65;
+}

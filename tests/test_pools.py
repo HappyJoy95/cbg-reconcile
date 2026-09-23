@@ -1,4 +1,4 @@
-"""四池存储层（`src/pools.py`）的回归。
+"""双平台存储层（`src/pools.py`）的回归。
 
 盯的都是**会静默出错的语义** —— 不报错、只是悄悄少给或多给东西：
 
@@ -131,13 +131,16 @@ class TestSales(unittest.TestCase):
         w, sns, nosn = pools.save_sales(conn, "erp-sales",
                                         [{"单号": "D1", "串号": ""},
                                          {"单号": "D2", "串号": "A1234567"}])
-        self.assertEqual((w, sns, nosn), (1, 1, 1))
+        # ⚠ 2026-09-22：无串号行**也落库**（`nosn:<单号>` 当 sn）——
+        #   所以 written = 1 真串号 + 1 条无串号 = 2；nosn 仍计 1。
+        self.assertEqual((w, sns, nosn), (2, 1, 1))
 
     def test_short_sn_ignored(self):
-        """串号太短的当脏值丢掉（玲珑的 sn 里混着 `***` 这种）。"""
+        """串号太短的当脏值丢掉（玲珑的 sn 里混着 `***` 这种）——
+        走无串号那条路：**计入 nosn 并落库**（同 2026-09-22 口径）。"""
         conn = mem()
         w, _, nosn = pools.save_sales(conn, "erp-sales", [{"单号": "D1", "串号": "***"}])
-        self.assertEqual((w, nosn), (0, 1))
+        self.assertEqual((w, nosn), (1, 1))
 
     def test_rerun_replaces_same_doc(self):
         """同一单重拉 = 覆盖（`INSERT OR REPLACE`），不是又加一行。"""
@@ -152,9 +155,55 @@ class TestSales(unittest.TestCase):
         with self.assertRaises(pools.PoolError):
             pools.save_sales(conn, "lg-stock", [{"单号": "D1", "串号": "A1234567"}])
 
+    def test_three_serial_cols_kept(self):
+        """导出带串号2/3 时必须整列落库 —— 待领要靠它们挑真 SN。
+
+        销售报表 `SALES_COLUMNS` 已请求 `Imei2/Imei3`；`pool_row_from`
+        不丢中文键，`ensure_columns` 动态补列。缺了的话 86 码那台
+        只能干等库存反查，销售侧的副串号白抓了。
+        """
+        conn = mem()
+        pools.save_sales(conn, "erp-sales", [{
+            "单号": "D1",
+            "串号": "864468081285466",
+            "串号2": "",
+            "串号3": "7ED9K26611031362",
+            "商品名称": "nova 16 Pro",
+        }])
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(erp_sales)")}
+        self.assertIn("串号", cols)
+        self.assertIn("串号2", cols)
+        self.assertIn("串号3", cols)
+        row = conn.execute(
+            "SELECT sn, 串号, 串号2, 串号3 FROM erp_sales"
+        ).fetchone()
+        self.assertEqual(row[0], "864468081285466")
+        self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "7ED9K26611031362")
+
+    def test_ensure_补齐老库三串号列(self):
+        """老库（加列之前建的）走 `ensure()` 必须补出 串号2/3 ——
+        空值行也要有列，待领 SQL 才扫得到。"""
+        conn = sqlite3.connect(":memory:")
+        # 模拟老表：只有主串号、没有副列
+        conn.execute(
+            "CREATE TABLE erp_sales (sn TEXT NOT NULL,"
+            " document_no TEXT NOT NULL, 串号 TEXT,"
+            " PRIMARY KEY (sn, document_no))")
+        from src.features.compliance.comparison import store as P
+        P.clear_col_cache()
+        P.ensure(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(erp_sales)")}
+        self.assertIn("串号", cols)
+        self.assertIn("串号2", cols)
+        self.assertIn("串号3", cols)
+        # 再 ensure 一次不炸（幂等）
+        P.ensure(conn)
+        conn.close()
+
 
 class TestQuadrants(unittest.TestCase):
-    """四象限 —— 四池的全部对账逻辑。
+    """四象限 —— 双平台的全部对账逻辑。
 
     构造：池A 有效单 A1、关闭单 A2（不该算）；池B {B1,B2}；
     池C {C1, B2, R1(退货单)}；池D {A1, B1}。
@@ -266,6 +315,38 @@ class TestStatus(unittest.TestCase):
         pools.ensure(conn)
         rows = dict((r[0], r[1]) for r in pools.status(conn))
         self.assertIn("还没建", rows["池A 玲珑销售单"])
+
+
+class Test导出Excel真的能跑(unittest.TestCase):
+    """⚠ 这条是**补的**：`export_xlsx` 一直没人真跑过，于是它里面
+    `details()` **漏了 import** 也没人发现 —— 直到 2026-09-20 走
+    `daily --steps pools` 才炸出 `NameError: name 'details' is not defined`。
+
+    教训：**"导出的入口"这种只在真跑时才走到的地方，必须有一条真跑一遍的测试**
+    （不用测排版好不好看，测"它能不能把文件写出来"）。
+    """
+
+    def test_空库也能导出两个_sheet(self):
+        import tempfile
+        from src.features.compliance.comparison import export as _export
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "双平台数据对比.xlsx"
+            path, counts = _export.export_xlsx(mem(), out)
+            self.assertTrue(Path(path).is_file(), "文件没写出来")
+            self.assertGreater(Path(path).stat().st_size, 0)
+        self.assertEqual(sorted(counts), ["AD", "BC"])
+
+    def test_两个_sheet_的表头是明细列(self):
+        import tempfile
+        from src.features.compliance.comparison import export as _export
+        from src.features.compliance.comparison.rules import DETAIL_COLS
+        with tempfile.TemporaryDirectory() as d:
+            path, _ = _export.export_xlsx(mem(), Path(d) / "x.xlsx")
+            import openpyxl
+            wb = openpyxl.load_workbook(str(path))
+            self.assertEqual(len(wb.sheetnames), 2)
+            head = [c.value for c in next(wb[wb.sheetnames[0]].iter_rows())]
+        self.assertEqual(head, [label for _, label in DETAIL_COLS])
 
 
 if __name__ == "__main__":

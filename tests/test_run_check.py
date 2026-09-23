@@ -11,11 +11,15 @@
 "代码看着对、真跑起来什么都没有"。
 """
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from src import run_daily
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "run_check.py"
@@ -27,26 +31,32 @@ def _run(args, **kw):
                           errors="replace", timeout=90, cwd=str(ROOT), **kw)
 
 
-class TestLauncherAlwaysLeavesEvidence(unittest.TestCase):
-    def setUp(self):
-        self.log = ROOT / "out" / "run.log"
-        self.before = self.log.read_text(encoding="utf-8") if self.log.exists() else None
+class _TempLogCase(unittest.TestCase):
+    """把启动器的日志挪进临时目录的公共脚手架（两个类共用）。
 
-    def tearDown(self):
-        # 别把开发机上的日志搞乱
-        if self.before is None:
-            try:
-                self.log.unlink()
-            except OSError:
-                pass
-        else:
-            self.log.write_text(self.before, encoding="utf-8")
+    ⚠ 别再用"跑之前快照、跑完还原 `out/run.log`"那套 ——
+    后果是**两套全量测试不能并行跑**（另一个进程往同一个文件追加的行
+    会被当成"本次新增"，实际假红过两次），项目根只读时也会失败。
+    启动器认 `CBG_RUN_LOG`，子进程继承环境变量，所以这样最干净。
+
+    ⚠ 这个类里**一个 test_ 方法都不要有**：pytest 会收集所有 `TestCase` 子类，
+    子类会把它们**再跑一遍**（哪怕类名是下划线开头）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.log = Path(tmp.name) / "run.log"
+        p = mock.patch.dict(os.environ, {"CBG_RUN_LOG": str(self.log)})
+        p.start()
+        self.addCleanup(p.stop)
 
     def _new_lines(self) -> str:
-        now = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
-        if self.before is None:
-            return now
-        return now[len(self.before):]
+        return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+
+
+class TestLauncherAlwaysLeavesEvidence(_TempLogCase):
+    """⚠ 日志写进**临时目录**，绝不再碰项目根的 `out/run.log`（见 `_TempLogCase`）。"""
 
     def test_import_failure_is_written_to_the_log(self):
         """**这就是这个文件存在的理由。**
@@ -134,7 +144,7 @@ class TestDiagnoseBat(unittest.TestCase):
                 self.assertIn(needle, src, f"诊断脚本没查：{why}")
 
 
-class TestSystemExitLosesNothing(unittest.TestCase):
+class TestSystemExitLosesNothing(_TempLogCase):
     """⚠ **预先存在的 bug，2026-09-16 才查出来。**
 
     `raise SystemExit("消息")` 的 `code` 是**字符串**，老写法
@@ -145,23 +155,6 @@ class TestSystemExitLosesNothing(unittest.TestCase):
     实测（配置路径写错）：**看着像跑成功了，其实什么都没干** ——
     这正是这个启动器要防的那类事故。
     """
-
-    def setUp(self):
-        self.log = ROOT / "out" / "run.log"
-        self.before = self.log.read_text(encoding="utf-8") if self.log.exists() else None
-
-    def tearDown(self):
-        if self.before is None:
-            try:
-                self.log.unlink()
-            except OSError:
-                pass
-        else:
-            self.log.write_text(self.before, encoding="utf-8")
-
-    def _new_lines(self) -> str:
-        now = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
-        return now if self.before is None else now[len(self.before):]
 
     def test_配置找不到时_消息要进日志且退出码非零(self):
         r = _run(["-c", "config/no-such-store.yaml", "check", "--days-ago", "1"])
@@ -204,30 +197,34 @@ class TestRewriteLegacyCheck(unittest.TestCase):
     def rw(self, argv):
         return self.mod.rewrite_legacy_check(list(argv), self.ap)
 
+    #: ⚠ 2026-09-21 晚起，改写出来的命令**必须点名**（`--steps`）——
+    #: `daily` 不给 `--steps` 会直接报错，垫片不补的话那台老机器**从此不再对账**。
+    _STEPS = ["--steps", ",".join(run_daily.MANUAL_STEPS)]
+
     def test_run_bat_里那条原样的命令会被改写(self):
         """这是门店 bat 里**逐字节**的样子（`schedule.write_runner_script` 生成的）。"""
         argv, changed = self.rw(["-c", "config/store-SCN231409.yaml",
                                  "check", "--days-ago", "1"])
         self.assertTrue(changed)
         self.assertEqual(argv, ["-c", "config/store-SCN231409.yaml",
-                                "daily", "--days-ago", "1"])
+                                "daily"] + self._STEPS + ["--days-ago", "1"])
 
     def test_不带任何选项也要能改(self):
         argv, changed = self.rw(["check"])
         self.assertTrue(changed)
-        self.assertEqual(argv, ["daily"])
+        self.assertEqual(argv, ["daily"] + self._STEPS)
 
     def test_配置文件路径不能被当成子命令(self):
         """⚠ 扫描要**跳过 `-c` 的值** —— 否则会把路径当子命令，
         于是"什么都不改"，静默回到"每天失败"的老样子。"""
         argv, changed = self.rw(["-c", "check", "check"])
         self.assertTrue(changed)
-        self.assertEqual(argv, ["-c", "check", "daily"])
+        self.assertEqual(argv, ["-c", "check", "daily"] + self._STEPS)
 
     def test_等于号写法也要能跳过(self):
         argv, changed = self.rw(["--config=config/check.yaml", "check"])
         self.assertTrue(changed)
-        self.assertEqual(argv, ["--config=config/check.yaml", "daily"])
+        self.assertEqual(argv, ["--config=config/check.yaml", "daily"] + self._STEPS)
 
     def test_已经是daily就不动(self):
         argv, changed = self.rw(["-c", "c.yaml", "daily", "--days-ago", "1"])
@@ -262,8 +259,41 @@ class TestRewriteLegacyCheck(unittest.TestCase):
         """`-v` 这种不吃值的开关也得跳过，别把它后面的东西当子命令。"""
         argv, changed = self.rw(["-v", "-c", "c.yaml", "check", "--days-ago", "2"])
         self.assertTrue(changed)
-        self.assertEqual(argv, ["-v", "-c", "c.yaml", "daily", "--days-ago", "2"])
+        self.assertEqual(argv, ["-v", "-c", "c.yaml", "daily"] + self._STEPS
+                         + ["--days-ago", "2"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLogPathIsOverridable(unittest.TestCase):
+    """`CBG_RUN_LOG` 只是**测试旁路**：不设它的时候，门店那份还是 `out/run.log`。
+
+    ⚠ 这条必须单独验：旁路一旦变成默认（比如写错了 `or` 的顺序），
+    门店的日志会散到别处去，而"排查时去哪儿找日志"是运维手册里写死的一句话。
+    """
+
+    _CODE = ("import importlib.util as u, sys;"
+             "s = u.spec_from_file_location('rc', sys.argv[1]);"
+             "m = u.module_from_spec(s); s.loader.exec_module(m);"
+             "print(m.LOG)")
+
+    def _log_path(self, env_value):
+        env = {k: v for k, v in os.environ.items() if k != "CBG_RUN_LOG"}
+        if env_value is not None:
+            env["CBG_RUN_LOG"] = env_value
+        r = subprocess.run([sys.executable, "-c", self._CODE, str(LAUNCHER)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=90, cwd=str(ROOT), env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_不设环境变量时还是out下面的run_log(self):
+        self.assertEqual(self._log_path(None), str(ROOT / "out" / "run.log"))
+
+    def test_设了就按它走(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, ignore_errors=True)
+        self.assertEqual(self._log_path(os.path.join(d, "x.log")),
+                         os.path.join(d, "x.log"))

@@ -28,6 +28,9 @@ import sys
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
+
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -361,6 +364,89 @@ class TestXlDate(unittest.TestCase):
         self.assertEqual(tdoc.xl_date(46279), datetime.date(2026, 9, 14))
         self.assertEqual(tdoc.xl_date(46285), datetime.date(2026, 9, 20))
         self.assertEqual(tdoc.xl_date(1), datetime.date(1899, 12, 31))
+
+
+class _Resp:
+    def __init__(self, text="", status_code=200):
+        self.text = text
+        self.status_code = status_code
+
+
+class TestNetRetry(unittest.TestCase):
+    """HTTP 层的**瞬时网络错误重试** —— 形状照 `erp._with_net_retry`。
+
+    钉三件事：
+
+    1. `SSLError` / `ConnectionError` / `Timeout` **会重试**，不是一次就炸；
+    2. 重试耗尽后抛的是 **`TdocError`** —— 不是 `requests.SSLError`
+       （否则 attain / daily 接不住，整步变成顶层「程序 bug」+ 退出码 9）；
+    3. **HTTP 非 200 / 解析错不重试**（在外层判，只试一次）。
+    """
+
+    def test_ssl_then_success(self):
+        """第一次 TLS 被掐、第二次成功 —— 要重试，不能直接抛。"""
+        sess = mock.MagicMock()
+        sess.get.side_effect = [
+            requests.exceptions.SSLError(
+                "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"),
+            _Resp(text="ok"),
+        ]
+        with mock.patch.object(tdoc.time, "sleep", lambda s: None), \
+                mock.patch.object(sys, "stderr", mock.MagicMock()):
+            body = tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertEqual(body, "ok")
+        self.assertEqual(sess.get.call_count, 2, "第一次 SSL 失败后没有重试")
+
+    def test_connection_error_retries(self):
+        sess = mock.MagicMock()
+        sess.get.side_effect = [
+            requests.exceptions.ConnectionError("reset by peer"),
+            _Resp(text="ok"),
+        ]
+        with mock.patch.object(tdoc.time, "sleep", lambda s: None), \
+                mock.patch.object(sys, "stderr", mock.MagicMock()):
+            tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertEqual(sess.get.call_count, 2)
+
+    def test_timeout_retries(self):
+        sess = mock.MagicMock()
+        sess.get.side_effect = [
+            requests.exceptions.Timeout("read timed out"),
+            _Resp(text="ok"),
+        ]
+        with mock.patch.object(tdoc.time, "sleep", lambda s: None), \
+                mock.patch.object(sys, "stderr", mock.MagicMock()):
+            tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertEqual(sess.get.call_count, 2)
+
+    def test_exhausted_raises_tdoc_error_not_ssl(self):
+        """耗尽后必须是 `TdocError` —— 否则 daily 当「程序 bug」退出码 9。"""
+        sess = mock.MagicMock()
+        sess.get.side_effect = requests.exceptions.SSLError("EOF")
+        with mock.patch.object(tdoc.time, "sleep", lambda s: None), \
+                mock.patch.object(sys, "stderr", mock.MagicMock()):
+            with self.assertRaises(tdoc.TdocError) as ctx:
+                tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertNotIsInstance(ctx.exception, requests.exceptions.SSLError)
+        self.assertIn("网络", str(ctx.exception))
+        self.assertEqual(sess.get.call_count, tdoc.NET_TRIES)
+
+    def test_http_error_status_not_retried(self):
+        """非 200 不在网络重试名单里 —— 只试一次，原样抛 `TdocError`。"""
+        sess = mock.MagicMock()
+        sess.get.return_value = _Resp(text="denied", status_code=403)
+        with self.assertRaises(tdoc.TdocError) as ctx:
+            tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertIn("403", str(ctx.exception))
+        self.assertEqual(sess.get.call_count, 1, "HTTP 错被当成网络错重试了")
+
+    def test_non_transient_request_exception_not_retried(self):
+        """非瞬时的 `RequestException`（如 TooManyRedirects）原样抛、不重试。"""
+        sess = mock.MagicMock()
+        sess.get.side_effect = requests.exceptions.TooManyRedirects("loop")
+        with self.assertRaises(requests.exceptions.TooManyRedirects):
+            tdoc._get("https://docs.qq.com/sheet/X", session=sess)
+        self.assertEqual(sess.get.call_count, 1)
 
 
 if __name__ == "__main__":
