@@ -8,8 +8,10 @@
 "不删旧定时任务就一天跑两遍"）。**看不到 = 没做 = 出事。**
 
 判据（都在 `upgrade.should_push` 一处，别散到调用点）：
-* 大版本变了（1.x → 2.x）→ 一定推；
-* 小版本但带着还没看过的待办 → 也推（待办不推等于没有）；
+* 大版本变了 → 一定推。⚠ 「大版本」由 `upgrade.MAJOR_ABOVE` **手工声明**
+  （用户 2026-09-23：「大版本靠我定义吧，不靠版本号」）——
+  版本号现在是时间戳 `yy.mmdd.hhmmss`，拆第 1 段会把年份当年份大版本、年年误推；
+* 小版本但带着还没看过的待办 → 不推（待办靠控制台弹窗，2026-09-17 定的）；
 * 同一版只推一次。
 """
 
@@ -37,23 +39,56 @@ def _root(**state):
 
 
 class TestUpgradeDetection(unittest.TestCase):
-    def test_版本号取大版本(self):
-        self.assertEqual(upgrade.major("2.0.1"), "2")
-        self.assertEqual(upgrade.major("10.3"), "10")
+    """大版本 = **跨过 `MAJOR_ABOVE` 里手工声明的边界**，不看版本号形状
+    （用户 2026-09-23：「大版本靠我定义吧，不靠版本号」）。
+    判据函数一律在 patch 过的清单上测 —— 生产清单会随发版追加，别钉死它。"""
 
-    def test_拿不到的大版本不算数(self):
-        """⚠ 状态文件坏了（`"?"`、`"beta"`）时，返回 `"?"` 会让判据成立，
-        于是给门店推一条"你从 ? 升到了 2.0.0"。宁可当作"不知道"。"""
-        for bad in ("", None, "?", "beta", "v2"):
-            with self.subTest(bad=bad):
-                self.assertEqual(upgrade.major(bad), "")
-                self.assertFalse(upgrade.is_major_jump(bad, "2.0.0"))
+    def test_跨过声明的边界才算大版本(self):
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("2.1.1", "3.0.0")]):
+            # 线上 2.1.1 升到时间戳号 / 老机器 1.6.1 直接跳 —— 都跨线
+            self.assertTrue(upgrade.is_major_jump("2.1.1", "26.0923.153045"))
+            self.assertTrue(upgrade.is_major_jump("1.6.1", "26.0923.153045"))
+            # 线内的普通升级、时间戳号之间往前走 —— 谁也没跨线
+            self.assertFalse(upgrade.is_major_jump("2.0.0", "2.1.0"))
+            self.assertFalse(upgrade.is_major_jump("26.0923.153045",
+                                                   "26.0924.090000"))
 
-    def test_只有大版本变了才算大版本升级(self):
-        self.assertTrue(upgrade.is_major_jump("1.6.1", "2.0.0"))
-        self.assertTrue(upgrade.is_major_jump("1.4.11", "2.0.0"))
-        self.assertFalse(upgrade.is_major_jump("2.0.0", "2.0.1"))
-        self.assertFalse(upgrade.is_major_jump("2.0.0", "2.9.9"))
+    def test_年份跳动不算大版本(self):
+        """⚠ 时间戳号第 1 段是**年份** —— 按老办法拆第 1 段比，
+        2027 年第一个包（26→27）会被判成大版本、年年白推一条。"""
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("2.1.1", "3.0.0")]):
+            self.assertFalse(upgrade.is_major_jump("26.1231.235959",
+                                                   "27.0101.090000"))
+
+    def test_代号跟出来(self):
+        """推送文案要带代号 —— 时间戳号 `26.0923.x` 对门店没意义，`3.0.0` 才看得懂。"""
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("2.1.1", "3.0.0")]):
+            self.assertEqual(upgrade.major_label("2.1.1", "26.0923.153045"), "3.0.0")
+            self.assertEqual(upgrade.major_label("26.0923.153045",
+                                                 "26.0924.090000"), "")
+
+    def test_拿不到的版本号不算数(self):
+        """⚠ 状态文件坏了（`""`、`"?"`、`"beta"`）时 `parse_version` 一律给
+        `(0,0,0)`，会排到所有边界**之前**判成"跨了大版本" ——
+        于是给门店推一条"你从 ? 升到了 …"。宁可当作"不知道"。"""
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("2.1.1", "3.0.0")]):
+            for bad in ("", None, "?", "beta", "v2"):
+                with self.subTest(bad=bad):
+                    self.assertEqual(upgrade.major_label(bad, "26.0923.153045"), "")
+                    self.assertFalse(upgrade.is_major_jump(bad, "26.0923.153045"))
+                    self.assertFalse(upgrade.is_major_jump("2.1.1", bad))
+
+    def test_生产清单成形(self):
+        """手写清单没人拦得住，测试兜个底：每条得是 `(能比的边界, 非空代号)`。"""
+        self.assertTrue(upgrade.MAJOR_ABOVE, "清单不能是空的 —— 空了大版本永远不推")
+        for bound, name in upgrade.MAJOR_ABOVE:
+            with self.subTest(bound=bound):
+                self.assertRegex(str(bound), r"^\d", "边界得是能比大小的版本号")
+                self.assertTrue(str(name).strip(), "代号不能为空")
+
+    def test_首条边界是_2_1_1(self):
+        """钉住用户 2026-09-23 定的首条边界：线上 2.1.1 升到时间戳号 = 大版本 3.0.0。"""
+        self.assertTrue(upgrade.is_major_jump("2.1.1", "26.0923.153045"))
 
     def test_第一次记录不算升级(self):
         """⚠ 刚装上的机器没有 `from` —— 不该推"你从 ? 升到了 2.0.0"。
@@ -76,9 +111,13 @@ class TestUpgradeDetection(unittest.TestCase):
     def test_真升级会记一条(self):
         tmp, root = _root(running="1.6.1")
         self.addCleanup(tmp.cleanup)
-        got = upgrade.record(root, "2.0.0")
+        # 1.6.1 → 2.0.0 要被记成"大版本"，得先把边界声明到这条线上
+        # （生产清单首条是 2.1.1，这条升级在它之下、不算大版本 —— 判据是手工声明的）
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("1.9.9", "2.0.0")]):
+            got = upgrade.record(root, "2.0.0")
         self.assertEqual(got["from"], "1.6.1")
         self.assertTrue(got["major"])
+        self.assertEqual(got["major_label"], "2.0.0")
         self.assertFalse(got["first"])
         self.assertEqual(upgrade.load(root)["running"], "2.0.0")
 
@@ -100,6 +139,16 @@ class TestShouldPush(unittest.TestCase):
                                   {"from": "1.6.1", "to": "2.0.0", "major": True})
         self.assertTrue(why, "大版本升级必须推")
         self.assertIn("大版本", why)
+
+    def test_推送理由带代号(self):
+        """理由里带上手工声明的代号 —— `26.0923.153045` 对门店没意义，`3.0.0` 才看得懂。"""
+        tmp, root = _root(running="2.1.1")
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(upgrade, "MAJOR_ABOVE", [("2.1.1", "3.0.0")]):
+            change = upgrade.record(root, "26.0923.153045")
+        why = upgrade.should_push(root, "26.0923.153045", change)
+        self.assertIn("大版本", why)
+        self.assertIn("3.0.0", why)
 
     def test_小版本没待办就不推(self):
         tmp, root = _root(running="2.0.1")
@@ -176,6 +225,13 @@ class TestMessageContents(unittest.TestCase):
 
 class TestCheckNeverBreaksTheDailyFlow(unittest.TestCase):
     """⚠ 升级提醒是**锦上添花** —— 为了它把每天的对账搞失败是本末倒置。"""
+
+    def setUp(self):
+        # 这些用例统一走 1.6.1 → 2.0.0，且都要走到"该推送"那一步才测得到东西 ——
+        # 把边界声明到这条线上（生产清单首条是 2.1.1，1.6.1→2.0.0 在它之下不算大版本）
+        p = mock.patch.object(upgrade, "MAJOR_ABOVE", [("1.9.9", "2.0.0")])
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_推送炸了也不抛(self):
         tmp, root = _root(running="1.6.1")

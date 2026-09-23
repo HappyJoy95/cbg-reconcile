@@ -3,16 +3,19 @@
 ## 为什么光有控制台弹窗不够（用户 2026-09-16 提的）
 
 弹窗只有**有人打开控制台**才看得到。而门店的日常是"它自己跑，我不看" ——
-大版本升级（1.x → 2.x）恰恰带着**必须做的事**：2.0.0 那次就是
+大版本升级恰恰带着**必须做的事**：2.0.0 那次就是
 "删掉改名前的旧定时任务，不删就一天跑两遍"。**看不到 = 没做 = 出事。**
 
 所以大版本升级要**推**出去（邮件 / 企微）——推到门店的人真的会看的地方。
 
 ## 判据（`should_push`）
 
-* **大版本变了**（`1.x → 2.x`）→ **一定推**；
-* 只是小版本，但这一版有**还没看过的「要做的事」** → **也推**
-  （待办不推出去等于没有）；
+* **大版本变了** → **一定推**。⚠「大版本」**由用户在 `MAJOR_ABOVE` 里手工声明**，
+  不看版本号形状（用户 2026-09-23：「大版本靠我定义吧，不靠版本号」）——
+  版本号现在是时间戳 `yy.mmdd.hhmmss`，按老办法拆第 1 段会把
+  **年份**当年份大版本（26→27），2027 年第一个包就年年误推一条。
+* 小版本**不推**（2026-09-17 用户实测定的：「升级提醒不用推送吧」）——
+  「要做的事」靠**控制台弹窗**讲，那是每次更新都弹的，不用再占一次推送；
 * 同一版只推一次（状态里记 `pushed`）。
 
 ## 「升级记录」
@@ -32,11 +35,14 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import time
 from pathlib import Path
 
 from . import version as vmod
 from . import whatsnew
+# 比大小只认这一份实现（selfupdate 顶上只有标准库，import 它没有失败面）
+from .selfupdate import parse_version
 
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -46,6 +52,21 @@ STATE_REL = ".secrets/upgrade.json"
 
 #: 升级记录留几条。够回答"这台机器什么时候升的级"就行，不用留一輩子。
 KEEP_HISTORY = 20
+
+#: **大版本边界清单 —— 只认这里写的，不看版本号形状**（用户 2026-09-23：
+#: 「大版本靠我定义吧，不靠版本号」）。
+#:
+#: 每条 `(边界, 代号)`：`升级前 ≤ 边界 < 升级后` 就算大版本 → 推送，
+#: 推送文案带上**代号**（时间戳号对门店没意义，`3.0.0` 才看得懂）。
+#:
+#: * 边界用能比大小的版本号（走 `selfupdate.parse_version`，老号/时间戳号都能比）；
+#: * 首条画在 `2.1.1` 之后：线上还在 `≤2.1.1` 的门店升到时间戳号就触发 ——
+#:   3.0.0 是大改版，按原规则（1.x → 2.x）本来也该推；
+#: * 加新边界 = 改这一行 + 发一版（大版本本来就要发版，跟代码走一份、
+#:   自更新同步到每台店，不会像配置文件那样每台漂移）。
+MAJOR_ABOVE = [
+    ("2.1.1", "3.0.0"),
+]
 
 
 def _path(root) -> Path:
@@ -85,25 +106,45 @@ def history(root) -> list:
     return out
 
 
-def major(v) -> str:
-    """`"2.0.1"` → `"2"`。**取不出来给空串。**
+def _looks_like_version(v) -> bool:
+    """能当版本号比的才收。**取不出来就当"不知道"，宁可不推也不误推。**
 
-    ⚠ 必须是**纯数字**才算数 —— 状态文件坏了（`"?"`、`"beta"`）时，
-    返回 `"?"` 会让 `is_major_jump` 判成"大版本变了"，于是给门店推一条
-    "你从 ? 升到了 2.0.0"。宁可当作"不知道"，也就不会误推。
+    状态文件坏了（`""`、`"?"`、`"beta"`、`"v2"`）时不能进比较 ——
+    `parse_version` 对这些一律给 `(0, 0, 0)`，会把"垃圾"排到所有边界之前、
+    判成"跨了大版本"，于是给门店推一条"你从 ? 升到了 …"。
+    （老版 `major()` 被删掉就是干这个活的，判据搬家了、这道闸得跟着搬。）
     """
-    head = str(v or "").strip().split(".")[0]
-    return head if head.isdigit() else ""
+    return bool(re.match(r"^\d", str(v or "").strip()))
+
+
+def major_label(frm, to) -> str:
+    """这次升级跨过的 `MAJOR_ABOVE` 边界代号；没跨返回 `""`。
+
+    判据：存在边界 B 使 `frm ≤ B < to`（`parse_version` 比大小，
+    老号 `2.1.1` 和时间戳号 `26.0923.x` 混着比也没问题）。
+
+    ⚠ 跨一次只命中一次 —— 一台从 1.6.1 直接跳到时间戳号的机器同样会命中
+    （`1.6.1 ≤ 2.1.1 < 26.x`），中间隔了几个边界都只算一次"大版本"。
+    """
+    if not (_looks_like_version(frm) and _looks_like_version(to)):
+        return ""
+    f, t = parse_version(frm), parse_version(to)
+    for bound, name in MAJOR_ABOVE:
+        if not _looks_like_version(bound):
+            continue                      # 清单手写错了条，跳过别把判据搞崩
+        b = parse_version(bound)
+        if f <= b < t:
+            return str(name or "")
+    return ""
 
 
 def is_major_jump(frm, to) -> bool:
-    """是不是**大版本**变了（1.x → 2.x）。
+    """是不是**大版本**变了 —— 即 `major_label` 有没有跨过声明的边界。
 
     ⚠ 只在**两边都拿得到**的时候才算 —— 全新安装（没有 `from`）不是升级，
-    更不该推"你从 ? 升到了 2.0.0"。同理，`from` 是坏的也不推。
+    更不该推"你从 ? 升到了 …"。同理，`from` 是坏的也不推。
     """
-    a, b = major(frm), major(to)
-    return bool(a and b and a != b)
+    return bool(major_label(frm, to))
 
 
 def record(root, current: str) -> "dict | None":
@@ -127,8 +168,9 @@ def record(root, current: str) -> "dict | None":
     d["history"] = hist[-KEEP_HISTORY:]
     d["running"] = str(current)
     _save(root, d)
+    label = major_label(last, current)
     return {"from": last, "to": str(current), "first": first,
-            "major": is_major_jump(last, current), "at": info["at"]}
+            "major": bool(label), "major_label": label, "at": info["at"]}
 
 
 def should_push(root, current: str, change: dict) -> "str | None":
@@ -144,9 +186,13 @@ def should_push(root, current: str, change: dict) -> "str | None":
     if str(d.get("pushed") or "") == str(current):
         return None                     # 这一版推过了
     if change.get("major"):
-        return "大版本升级（%s → %s）" % (change["from"], change["to"])
+        # 代号（如「3.0.0」）跟出来 —— 时间戳号 `26.0923.x` 对门店没意义
+        label = str(change.get("major_label") or "")
+        return "大版本升级（%s → %s%s）" % (
+            change["from"], change["to"], "，%s" % label if label else "")
     # ⚠ **小版本不推。** 用户 2026-09-17 实测后定的：
-    #   「升级提醒不用推送吧」—— 他当初的要求就是**只在大版本（1.x → 2.x）推**。
+    #   「升级提醒不用推送吧」—— 他当初的要求就是**只在大版本推**
+    #   （大版本 = 跨过 `MAJOR_ABOVE` 里他声明的边界，2026-09-23 起）。
     #   之前这里还有一条"小版本只要这次带了『要做的事』也推"，
     #   结果 2.0.1 → 2.1.0 这种普通升级也会发一封邮件出来。
     #   要做的事**控制台弹窗照旧会讲**（那是每次更新都弹的），不用再占一次推送。
@@ -257,9 +303,11 @@ def check(root, cfg, current: str, *, push: bool = True) -> dict:
         if change is None:
             return out
         if not change.get("first"):
+            _tag = ""
+            if change.get("major"):
+                _tag = "（大版本 · %s）" % (change.get("major_label") or "?")
             print("[升级] 检测到 v%s → v%s%s"
-                  % (change["from"], change["to"],
-                     "（大版本）" if change["major"] else ""))
+                  % (change["from"], change["to"], _tag))
             if change.get("major"):
                 # 大版本升级：只往上一次记录里补一条"以前是什么版本"就够了，
                 # 别的地方不用动 —— 具体迁移都在各自的代码里
