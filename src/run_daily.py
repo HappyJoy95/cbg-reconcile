@@ -35,19 +35,27 @@ from pathlib import Path
 
 from . import cli, config_io, version
 from .paths import ROOT
-# ⚠ POS 走**执行模块**（不再经过 CLI）—— 见下面第 3 步那段注释
-from .app.pos import run as pos_run
-from .app.report import run as report_run
-from .app.report_inbox import run as inbox_run
-# ⚠ 模块级 import（**不是**函数里）—— 测试要能 `mock.patch.object(run_daily, "attain_run")`，
-#   藏在函数里的话打不着桩，测试就会**真去读腾讯文档**（实测：全量测试从 59 秒涨到 165 秒）。
-from .features.sales.attain.attain import run as attain_run
-# ⚠ 月度计划走**同一个模式**（2026-09-23 搬过来的）：它原来是 `_step_plan` 函数体里
-#   `from ... import plan` 再调 —— 测试**打不着桩** ⇒ 每次全量测试都真写**项目根**
-#   `out/plan-2026.json`（4.5MB 真落盘每次被覆盖），且固定名 `plan-2026.json.tmp`
-#   被三个头的 pytest 同时抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError` ——
-#   就是 2026-09-23 抓到的那个并行偶发红。别改回函数内 import。
-from .features.plan.monthly.plan import run as plan_run
+from . import edition as _edition
+if _edition.is_lifehall():
+    # 生活馆包里这些执行件被裁（edition.PRUNE）；对应步骤也不在注册表里，
+    # 下面 _RUNNERS 永远不会派发到它们。⚠ 属性必须存在 ——
+    # full 模式的测试靠 mock.patch.object(run_daily, "attain_run") 打桩
+    # （打桩打的是**这个名字**，名字不在当场 AttributeError，测试直接红）。
+    pos_run = report_run = inbox_run = attain_run = plan_run = None
+else:
+    # ⚠ POS 走**执行模块**（不再经过 CLI）—— 见下面第 3 步那段注释
+    from .app.pos import run as pos_run
+    from .app.report import run as report_run
+    from .app.report_inbox import run as inbox_run
+    # ⚠ 模块级 import（**不是**函数里）—— 测试要能 `mock.patch.object(run_daily, "attain_run")`，
+    #   藏在函数里的话打不着桩，测试就会**真去读腾讯文档**（实测：全量测试从 59 秒涨到 165 秒）。
+    from .features.sales.attain.attain import run as attain_run
+    # ⚠ 月度计划走**同一个模式**（2026-09-23 搬过来的）：它原来是 `_step_plan` 函数体里
+    #   `from ... import plan` 再调 —— 测试**打不着桩** ⇒ 每次全量测试都真写**项目根**
+    #   `out/plan-2026.json`（4.5MB 真落盘每次被覆盖），且固定名 `plan-2026.json.tmp`
+    #   被三个头的 pytest 同时抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError` ——
+    #   就是 2026-09-23 抓到的那个并行偶发红。别改回函数内 import。
+    from .features.plan.monthly.plan import run as plan_run
 
 #: 一次日常流程有哪些步骤 —— ⚠ **从功能注册表派生**（用户 2026-09-19 的"安装注册机制"）。
 #:

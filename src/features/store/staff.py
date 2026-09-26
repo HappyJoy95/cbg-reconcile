@@ -14,9 +14,14 @@ import json
 import time
 from pathlib import Path
 
-from ... import config_io, erp
-from ...erp import DEFAULT_ENV_FILE, ErpClient, load_credentials
+from ... import config_io
+from ... import edition as _edition
 from ...paths import ROOT
+if not _edition.is_lifehall():
+    # 生活馆包里 `erp.py` 不存在（edition.PRUNE）—— 人员名单整个来自云商，
+    # 所以下面会碰 ErpClient 的函数在生活馆直接走"没有人员设置"分支。
+    from ... import erp
+    from ...erp import DEFAULT_ENV_FILE, ErpClient, load_credentials
 
 #: 门店手动打过的勾（**存"被剔除的"**，不是存"在职的"）
 STAFF_REL = ".secrets/staff.json"
@@ -65,6 +70,13 @@ def staff_state(root=None, config_path=None, env_file=None) -> dict:
     branch_id = v.get("erp_branch_id")
 
     excluded = load_excluded(root)
+
+    if _edition.is_lifehall():
+        # 生活馆版没有云商（人是从云商组织架构读的）—— 形状照 ok=False 分支抄，
+        # 外加 count/active_count（有消费方直接读这两个数）。
+        return {"ok": False, "error": "生活馆版没有人员设置（人员来自云商）",
+                "people": [], "branch_id": None, "excluded": sorted(excluded),
+                "count": 0, "active_count": 0}
 
     if not name and branch_id is None:
         return {"ok": False, "error": "还没认出这家店 —— 先在「门店」里登录一次云商",
@@ -130,6 +142,10 @@ def rosters_by_store(root=None, config_path=None, env_file=None, *,
     ⚠ 剔除表（`load_excluded`）是**本店**的（「人员设置」里去掉的离职账号）——
       只对本店生效，别的店没这份信息。
     """
+    if _edition.is_lifehall():
+        # 同 staff_state：云商不在包里。这个函数只喂达成页（生活馆裁掉了），
+        # 但守一道 —— 免得哪天多出个调用方，`from ... import erp` 当场炸。
+        return {}
     from ... import config_io, erp
     from ...paths import ROOT
     root = Path(root or ROOT)

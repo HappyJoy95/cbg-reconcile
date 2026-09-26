@@ -25,48 +25,91 @@ from .app import data_state as app_data
 from .features.store import staff as app_staff
 from .modules import auth, health, theme, timer
 from .storage import runlog
-from . import (autostart, browser, config_io, elevate, erp, mailer, pools_history,
-               pools_notify,
-               run_daily, schedule,
-               selfupdate, service, startup, upgrade, version, wecom, whatsnew)
+from . import edition as _edition
+if _edition.is_lifehall():
+    # 生活馆包：erp/report/pools_* 被物理裁掉（见 edition.PRUNE）——
+    # 走到这里的功能在 LIFEHALL_GONE 里已经 404，这里的替身只兜
+    # "每请求都路过"的调用点（role_scope/status_brief/boot）。
+    from . import (autostart, browser, config_io, elevate, mailer, run_daily,
+                   schedule, selfupdate, service, startup, upgrade, version,
+                   wecom, whatsnew)
+    # ⚠ 计划里这行原写 `from . import erp` —— 那是笔误：生活馆包里
+    #   `erp.py` 物理不存在，真那么写 import 当场 ModuleNotFoundError。
+    #   绑住 `erp` 这个名字只为 `inventory_ready()` 那种运行期引用
+    #   （`erp.describe_credentials(env)`）—— 它是哨兵，返回 {} / 用到即抛。
+    from . import erp_stub as erp
+    from .erp_stub import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired,
+                           ErpClient, ErpError, describe_credentials,
+                           describe_store_credentials, load_credentials,
+                           load_store_credentials, save_credentials,
+                           save_store_credentials)
+    pools_history = None
+    pools_notify = None
+
+    def list_reports(*a, **k):
+        return []
+
+    def load_report(*a, **k):
+        return {}
+
+    def delete_report(*a, **k):
+        return False, "生活馆版没有对账报告"
+else:
+    from . import (autostart, browser, config_io, elevate, erp, mailer,
+                   pools_history, pools_notify, run_daily, schedule,
+                   selfupdate, service, startup, upgrade, version, wecom,
+                   whatsnew)
+    from .erp import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired,
+                      ErpClient, ErpError, describe_credentials,
+                      describe_store_credentials, load_credentials,
+                      load_store_credentials, save_credentials,
+                      save_store_credentials)
+    from .report import delete_report, list_reports, load_report
 from .cbg import CbgClient, CbgError
-from .erp import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired, ErpClient,
-                  ErpError, describe_credentials, describe_store_credentials,
-                  load_credentials, load_store_credentials, save_credentials,
-                  save_store_credentials)
 from .paths import ROOT
-from .report import delete_report, list_reports, load_report
 from . import runner
 from .runner import manager
 from .session import CbgAuthError, CbgSession
 
 WEB_DIR = ROOT / "web"
 
-#: 「**刷新**」按钮点下去**先抓哪几步新数据**（用户 2026-09-20：
-#: 「周度重点的刷新按钮，还有 pos 合规和报量查询的刷新按钮**需要单独调用一次抓取新数据**」）。
-#:
-#: ⚠ 三个页面**各要各的**，一个都不能少、也一个都不能多：
-#:   * 达成读的是**云商销售明细**（`erp_sales`）⇒ 抓云商 + 算达成；
-#:   * POS 读的是**玲珑侧**的单据（orders/payments/returns）⇒ 抓玲珑 + 算 POS；
-#:   * 双平台对比**两边都要** ⇒ 两份都抓 + 算对比。
-#: ⚠ 顺序由 `daily --steps` 里的 `Step.order` 兜底（抓在前、算在后）——
-#:   这里写的顺序只是给人看的。
-REFRESH_STEPS = {
-    "attain": ("erp-dump", "attain"),
-    # 月度生意计划读的**也是**云商销售明细（`erp_sales`）⇒ 跟达成同一条链。
-    "monthly": ("erp-dump", "plan"),
-    "pos": ("dump", "pos"),
-    "pools": ("dump", "erp-dump", "pools"),
-    # ⚠ 防护膜：**只手动**（`whens=()`），点「刷新」= 先抓云商销售导出再落快照。
-    "film": ("erp-dump", "film"),
-    # 无忧会员权益：同防护膜 —— 读 erp_sales，点刷新先抓再算。
-    "benefit": ("erp-dump", "benefit"),
-    # 权益领取 · 待领：**没有自己的 Step**（状态/匹配读接口现算），
-    # 刷新只保证 erp_sales 是新的 —— 所以只点名 `erp-dump`。
-    "claim-pending": ("erp-dump",),
-    # 串号追踪：读 erp_stock + erp_sales —— 刷新同样先抓云商。
-    "sn-trace": ("erp-dump",),
-}
+def _refresh_steps() -> dict:
+    """「**刷新**」按钮点下去**先抓哪几步新数据**（用户 2026-09-20：
+    「周度重点的刷新按钮，还有 pos 合规和报量查询的刷新按钮**需要单独调用一次抓取新数据**」）。
+
+    ⚠ 三个页面**各要各的**，一个都不能少、也一个都不能多：
+      * 达成读的是**云商销售明细**（`erp_sales`）⇒ 抓云商 + 算达成；
+      * POS 读的是**玲珑侧**的单据（orders/payments/returns）⇒ 抓玲珑 + 算 POS；
+      * 双平台对比**两边都要** ⇒ 两份都抓 + 算对比。
+    ⚠ 顺序由 `daily --steps` 里的 `Step.order` 兜底（抓在前、算在后）——
+      这里写的顺序只是给人看的。
+    ⚠ **按版收窄的口子**（生活馆版 2026-09-26）：生活馆只有「待领」那一页还在，
+      而它的数据源是**玲珑销售单** ⇒ 刷 `dump`（云商那步整个不存在）。
+    """
+    from . import edition as _edition
+    if _edition.is_lifehall():
+        return {"claim-pending": ("dump",)}
+    return {
+        "attain": ("erp-dump", "attain"),
+        # 月度生意计划读的**也是**云商销售明细（`erp_sales`）⇒ 跟达成同一条链。
+        "monthly": ("erp-dump", "plan"),
+        "pos": ("dump", "pos"),
+        "pools": ("dump", "erp-dump", "pools"),
+        # ⚠ 防护膜：**只手动**（`whens=()`），点「刷新」= 先抓云商销售导出再落快照。
+        "film": ("erp-dump", "film"),
+        # 无忧会员权益：同防护膜 —— 读 erp_sales，点刷新先抓再算。
+        "benefit": ("erp-dump", "benefit"),
+        # 权益领取 · 待领：**没有自己的 Step**（状态/匹配读接口现算），
+        # 刷新只保证 erp_sales 是新的 —— 所以只点名 `erp-dump`。
+        "claim-pending": ("erp-dump",),
+        # 串号追踪：读 erp_stock + erp_sales —— 刷新同样先抓云商。
+        "sn-trace": ("erp-dump",),
+    }
+
+
+#: ⚠ 模块导入时按**当时的版**定格一次（生产机器的版不会变）。
+#:   测试切 env 验生活馆时要调 `_refresh_steps()` 本身，别拿这个常量断言。
+REFRESH_STEPS = _refresh_steps()
 
 #: 手动「刷新」时，这两步**半小时内成功抓过就跳过**（2026-09-22 用户）。
 #: ⚠ **只挡手动刷新**（`/api/refresh`）—— 定时器那趟**不过这道闸**。
@@ -384,6 +427,35 @@ SETUP_ALLOW = (
     "/api/setup/preview",
 )
 
+#: 生活馆版**没有的功能**的接口前缀 —— 菜单藏了不等于接口拦了（M17），
+#: 这里给"写个 curl 也进不来"的一道。
+#: ⚠ 前缀匹配用 `path == p or path.startswith(p + "/")`，
+#:   别让 `/api/report-bug` 被 `/api/report` 误伤。
+#: ⚠ 不含 `/api/timer/order`：定时器页面在 lifehall 已不显示，
+#:   拦截清单从简，别拦自己要用的（计划 Task 4 明确删掉这条）。
+LIFEHALL_GONE = (
+    "/api/erp", "/api/store-account",       # 云商（logout 除外，见下）
+    "/api/report",                          # 对账报告（report-bug 除外，见下）
+    "/api/pools", "/api/pools-notify",
+    "/api/attain", "/api/plan", "/api/pos", "/api/film", "/api/benefit",
+    "/api/inventory", "/api/sn-trace", "/api/staff",
+)
+
+#: 白名单例外（前缀在上面但**不许拦**的）。
+LIFEHALL_GONE_KEEP = (
+    "/api/store-account/logout",   # 退出登录要能清身份
+    "/api/report-bug",             # 上报 bug 是支持工具，与对账无关
+)
+
+
+def lifehall_gone(path: str) -> bool:
+    """这个接口在生活馆版里是不是"没有"。full 版恒 False。"""
+    if not _edition.is_lifehall():
+        return False
+    if any(path == k or path.startswith(k + "/") for k in LIFEHALL_GONE_KEEP):
+        return False
+    return any(path == p or path.startswith(p + "/") for p in LIFEHALL_GONE)
+
 
 #: 「预览模式」标记 —— `.secrets/preview.json`（**这台机器自己的**，自更新不碰）。
 #:
@@ -438,6 +510,9 @@ def setup_state(app) -> dict:
     ⚠ 判据**不发网络请求**：这个函数每个 API 请求都会调一次，
        每次都去 ping 一下华为的话，控制台会被自己拖死。
     """
+    if _edition.is_lifehall():
+        # 生活馆只认玲珑一步（云商那步整个不存在）—— 见下面那个函数。
+        return _setup_state_lifehall(app)
     v = config_io.pick(config_io.load_raw(app.config_path))
     store = describe_store_credentials(store_path(app))
     prof = config_io.store_profile(v, app.root)
@@ -492,6 +567,31 @@ def setup_state(app) -> dict:
         # 缺哪一步 —— 前端据此决定登录页停在第几步
         "need": ("" if (erp_ok and (ling_ok or prev))
                  else ("erp" if not erp_ok else "linglong")),
+    }
+
+
+def _setup_state_lifehall(app) -> dict:
+    """生活馆登录门禁：**只有玲珑一步，有会话文件就放行**（用户 2026-09-26 定）。
+
+    ⚠ 不卡自检（`check_ok`）—— 用户原话"抓到真实登录数据后就给登录"，
+      抓取流程本身已经验过会话真假（`_capture_worker` 的 verify），这里再卡
+      一道只会把"存好了但没点自检"的人挡在门外。
+    """
+    v = config_io.pick(config_io.load_raw(app.config_path))
+    prof = config_io.store_profile(v, app.root)
+    s = app.session_info()
+    ling_ok = bool(s.get("exists"))
+    ling_why = "已抓到玲珑会话" if ling_ok else "还没抓到玲珑会话"
+    return {
+        "ready": bool(ling_ok),
+        "lifehall": True,
+        "preview": False,
+        "preview_available": False,      # 生活馆没有"跳过看界面"这回事
+        "erp": {"ok": True, "why": "生活馆版没有云商这一步", "username": "",
+                "has_token": False},
+        "linglong": {"ok": bool(ling_ok), "why": ling_why},
+        "profile": prof,
+        "need": ("" if ling_ok else "linglong"),
     }
 
 
@@ -630,6 +730,9 @@ def role_scope(app) -> dict:
     except Exception:                                          # noqa: BLE001
         prof = {}
     try:
+        # 生活馆：这里拿到的是 `erp_stub.describe_store_credentials`（恒回 `{}`）
+        # ⇒ acc="" ⇒ 下面条按账号认区长的判定自然跳过（生活馆没有
+        #   managers.yaml，PRUNE 里裁了）—— 所以**不用再加 edition 分支**。
         acc = str(describe_store_credentials(store_path(app)).get("username") or "").strip()
     except OSError:
         acc = ""
@@ -759,12 +862,17 @@ def _build_page_rules() -> dict:
     ⚠ 左下角那几项不是功能模块 ⇒ 手写在 `FOOT_PAGES`。
     """
     from .features import registry
+    from . import edition as _edition
     out = {}
     for f in registry.all_features():
         out[f.key] = f.types or ""
         for s in f.children:
             out[s.key] = s.types or f.types or ""
     out.update(FOOT_PAGES)
+    if _edition.is_lifehall():
+        # 生活馆只有一种身份（门店）：保留名单内的页面全放行，
+        # 其余页面连键都不给 —— 前端 applyProfile 照 pages 渲染，零 if(edition)。
+        return {k: "" for k in out if k in _edition.LIFEHALL_PAGES}
     return out
 
 
@@ -997,6 +1105,13 @@ def _capture_worker(app: "App", headless: bool):
             老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
             实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
             """
+            if _edition.is_lifehall():
+                # 生活馆：身份从会话认（不带 storeCode 查一次订单 → 店码）。
+                # 假会话死在这儿（探测的 authfail 态必须拦），0 行的新店放行
+                # 但说清 —— 三态判据只有 store_identity 一份，别在这儿另写。
+                from . import store_identity
+                return store_identity.verify_with_identity(
+                    sess, app.root, app.config_path, emit=job.say)
             try:
                 ok, why = CbgClient(sess, store_code=store, timeout=25).ping()
                 return ok, why
@@ -1028,6 +1143,15 @@ def _capture_worker(app: "App", headless: bool):
                                        state_root=app.root,
                                        on_need=lambda what: setattr(job, "need", what))
         p = sess.save(app.session_path(cfg))              # 只有自检过了才走到这里
+        if _edition.is_lifehall():
+            # 生活馆：认店 —— verify 里可能已经写过店码（而 cfg 是开跑时读的
+            # 旧的，会话落在 cbg-default.json），这里补写 + 挪会话文件名 + 播报。
+            # 认不出来也不拦：登录判据是"有会话文件"，下面照常自检。
+            from . import store_identity
+            info = store_identity.identify(app.root, app.config_path, sess)
+            store = info.get("store_code") or store       # 下面那次自检按店码打
+            job.say(("认店：%s" % info.get("store_name")) if info.get("store_name")
+                    else info.get("why") or ("店码 %s" % info.get("store_code", "")))
         ok, msg = CbgClient(sess, store_code=store).ping()
         app.record_check(sess, ok, msg)                   # 记下这次自检，界面要显示时间
         job.say(f"已保存 → {p.name}")
@@ -1248,14 +1372,19 @@ class App:
         #     而 `describe_credentials` 按设计**只读指定的那个文件**，
         #     所以"这个文件里没有" ≠ "没账号"（真账号在回落链下一站）。
         #     现在四种来源**一律显示「已配置」**，靠 `kind` 上色区分好坏就够了。
-        d = describe_credentials(self.erp_env_file())
-        if d.get("builtin") or d.get("has_password") or d.get("used_from"):
-            add("公司云商账号", "已配置", "ok")
-        elif d.get("has_token"):
-            # 只有 token 没密码：现在能用，但 token 一过期就续不上
-            add("公司云商账号", "只有 token，没存密码 —— 过期后续不上", "warn")
-        else:
-            add("公司云商账号", "没配置", "bad")
+        #
+        #   生活馆版：这一组**整段不画** —— 包里没有 `erp.py`（走的是
+        #   `erp_stub`，`describe_credentials` 恒回 `{}`），照原逻辑会画成
+        #   「公司云商账号：没配置 bad」，而生活馆压根没有云商这一步。
+        if not _edition.is_lifehall():
+            d = describe_credentials(self.erp_env_file())
+            if d.get("builtin") or d.get("has_password") or d.get("used_from"):
+                add("公司云商账号", "已配置", "ok")
+            elif d.get("has_token"):
+                # 只有 token 没密码：现在能用，但 token 一过期就续不上
+                add("公司云商账号", "只有 token，没存密码 —— 过期后续不上", "warn")
+            else:
+                add("公司云商账号", "没配置", "bad")
 
         # ---- 玲珑（华为）会话
         s = self.session_info()
@@ -2808,6 +2937,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/boot" and method == "GET":
             return self._json(app.boot_state())
 
+        # ---- 生活馆版：被裁功能的接口一律 404（M17 教训：菜单藏了不等于接口拦了）
+        #
+        # ⚠ 放在 `SETUP_ALLOW` 门禁**之前**：404 要先于"还没登录好"的 403，
+        #   否则未登录时 curl 一个云商接口会得到误导性的 403。
+        #   （登录页调的 /api/setup、/api/session 都不在 LIFEHALL_GONE，顺序无影响。）
+        if lifehall_gone(path):
+            return self._json({"error": "生活馆版没有这个功能"}, 404)
+
         # 这个身份的权限（**每个接口共用一份判据** —— 见 `role_scope`）。
         # ⚠ 放在探活 / 启动自检那两条 early-return **之后**：那两条登录页也要调，
         #   没必要为它们读一遍配置和凭据（实测这一算 ~11ms，概览页 30 秒轮一次）。
@@ -3311,6 +3448,13 @@ class Handler(BaseHTTPRequestHandler):
             sess = CbgSession.from_curl(text)              # 解析失败 → 409
             p = sess.save(app.session_path())
             result = {"saved": str(p), "cookies": sess.describe()}
+            if _edition.is_lifehall():
+                # 认店放在自检**之前**：写完 store_code、挪完会话文件，下面
+                # _ping_result 才按得到店码（它每次现读配置）。认不出店也照回
+                # saved —— 登录判据是"有会话文件"，identify 自己也不往外抛。
+                from . import store_identity
+                result["identify"] = store_identity.identify(
+                    app.root, app.config_path, sess)
             try:
                 result.update(self._ping_result(app))
             except (CbgAuthError, CbgError) as e:

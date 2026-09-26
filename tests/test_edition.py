@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -97,6 +99,61 @@ class Test清单(unittest.TestCase):
         self.assertTrue(edition.pruned("src\\features\\compliance\\__init__.py"))
         self.assertFalse(edition.pruned("src/features/tools/claim/pending.py"))
         self.assertFalse(edition.pruned("src/erp_helpers.py"))  # 前缀不能误伤
+
+
+# ✅ 2026-09-26：T2 已落地（`build_all()` / `_children()` / `builtin_steps()` 的
+#   edition 分支），blocked-on-T2 的 skip 已摘 —— 下面两条现在就该绿。
+class Test裁剪树能启动(unittest.TestCase):
+    """把 src/ 按 PRUNE 裁一刀扔进临时目录，import 四个入口 ——
+    这就是"包里缺文件但启动不崩"的铁证（比逐条断言守卫可靠）。"""
+
+    # ⚠ 计划里这行原写成 `... registry, import src.run_daily, ...` —— 两个 import
+    #   关键字是笔误，`python -c` 会直接 SyntaxError（红得莫名其妙）。合成一条。
+    _ENTRY = ("import src.edition, src.features, src.features.registry, "
+              "src.run_daily, src.cli, src.web, src.startup; print('OK')")
+
+    def _stage(self, tmp: str) -> str:
+        dst = Path(tmp) / "pkg"
+        shutil.copytree(ROOT / "src", dst / "src",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        from src.edition import PRUNE
+        for rel in PRUNE:
+            if not rel.startswith("src/"):
+                continue
+            p = dst / rel
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink()
+        (dst / "EDITION").write_text("lifehall\n", encoding="utf-8")
+        return str(dst)
+
+    def test_裁剪后四个入口都能import(self):
+        env = {k: v for k, v in os.environ.items() if k != "CBG_EDITION"}
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = self._stage(tmp)
+            r = subprocess.run([sys.executable, "-c", self._ENTRY],
+                               cwd=cwd, env=env,
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0,
+                             "裁剪树 import 失败：\n%s\n%s"
+                             % (r.stdout, r.stderr))
+            self.assertIn("OK", r.stdout)
+
+    def test_裁剪树注册表自检也干净(self):
+        env = {k: v for k, v in os.environ.items() if k != "CBG_EDITION"}
+        code = ("from src.features import registry; "
+                "print('|'.join(s.cmd for s in registry.all_steps()));"
+                "print(registry.validate())")
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = self._stage(tmp)
+            r = subprocess.run([sys.executable, "-c", code],
+                               cwd=cwd, env=env,
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("dump", r.stdout)
+            self.assertNotIn("erp-dump", r.stdout)
+            self.assertIn("[]", r.stdout)      # validate() 干净
 
 
 if __name__ == "__main__":

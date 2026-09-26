@@ -72,37 +72,47 @@ def accounts(cfg: dict, root=None) -> dict:
     ⚠ **一个密码都不回**（`describe_*` 那几个函数本来就只回 `has_*`）。
     """
     from ...paths import ROOT
-    from ... import browser, erp
+    from ... import browser
+    from ... import edition as _edition
+    erp = None
+    if not _edition.is_lifehall():
+        # 生活馆包里 `erp.py` 不存在（edition.PRUNE）—— erp 留 None，
+        # 下面两段云商凭据整段跳过（回"没有云商"的空档）。
+        from ... import erp
     root = Path(root) if root else ROOT
     cfg = cfg or {}
 
     out = {"store": {"code": cfg.get("store_code") or "",
                      "name": cfg.get("erp_store_name") or ""}}
-    try:
-        d = erp.describe_credentials()
-        src = "env" if d.get("used_from") else ("builtin" if d.get("builtin") else "file")
-        out["erp"] = {"user": d.get("username") or ("（内置公司账号）" if d.get("builtin") else ""),
-                      "company": d.get("company") or "",
-                      "source": src,
-                      "env_file": d.get("env_file") or "",
-                      "used_from": d.get("used_from") or "",
-                      "has_password": bool(d.get("has_password")),
-                      "has_token": bool(d.get("has_token")),
-                      "builtin": bool(d.get("builtin"))}
-    except Exception as e:                                     # noqa: BLE001
-        out["erp"] = {"user": "", "why": "%s: %s" % (type(e).__name__, e)}
-    try:
-        # ⚠ 云商有**两套**账号：主账号（`.secrets/erp.env`）和**门店账号**
-        #   （`.secrets/erp-store.env`）。销售明细那一路走的是门店账号 ——
-        #   只报主账号的话，门店明明配好了，自检却说"没有云商凭据"（实测踩过）。
-        s = erp.describe_store_credentials()
-        out["erp_store"] = {"user": s.get("username") or "", "who": s.get("who") or "",
-                            "company": s.get("company") or "",
-                            "env_file": s.get("env_file") or "",
-                            "has_password": bool(s.get("has_password")),
-                            "has_token": bool(s.get("has_token"))}
-    except Exception as e:                                     # noqa: BLE001
-        out["erp_store"] = {"user": "", "why": "%s: %s" % (type(e).__name__, e)}
+    if erp is None:
+        out["erp"] = {"user": "", "why": "生活馆版没有云商"}
+        out["erp_store"] = {"user": "", "why": "生活馆版没有云商"}
+    else:
+        try:
+            d = erp.describe_credentials()
+            src = "env" if d.get("used_from") else ("builtin" if d.get("builtin") else "file")
+            out["erp"] = {"user": d.get("username") or ("（内置公司账号）" if d.get("builtin") else ""),
+                          "company": d.get("company") or "",
+                          "source": src,
+                          "env_file": d.get("env_file") or "",
+                          "used_from": d.get("used_from") or "",
+                          "has_password": bool(d.get("has_password")),
+                          "has_token": bool(d.get("has_token")),
+                          "builtin": bool(d.get("builtin"))}
+        except Exception as e:                                     # noqa: BLE001
+            out["erp"] = {"user": "", "why": "%s: %s" % (type(e).__name__, e)}
+        try:
+            # ⚠ 云商有**两套**账号：主账号（`.secrets/erp.env`）和**门店账号**
+            #   （`.secrets/erp-store.env`）。销售明细那一路走的是门店账号 ——
+            #   只报主账号的话，门店明明配好了，自检却说"没有云商凭据"（实测踩过）。
+            s = erp.describe_store_credentials()
+            out["erp_store"] = {"user": s.get("username") or "", "who": s.get("who") or "",
+                                "company": s.get("company") or "",
+                                "env_file": s.get("env_file") or "",
+                                "has_password": bool(s.get("has_password")),
+                                "has_token": bool(s.get("has_token"))}
+        except Exception as e:                                     # noqa: BLE001
+            out["erp_store"] = {"user": "", "why": "%s: %s" % (type(e).__name__, e)}
     try:
         out["cbg"] = browser.describe_login(cfg, root)
     except Exception as e:                                     # noqa: BLE001
