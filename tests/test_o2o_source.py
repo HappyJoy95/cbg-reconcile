@@ -271,8 +271,12 @@ class TestSettings(unittest.TestCase):
         o2o_settings.save_mapping(self.root, "tmall", rows)
         got = o2o_settings.load_mapping(self.root, "tmall")
         self.assertEqual(got, rows)
-        self.assertEqual(o2o_settings.load_mapping(self.root, "jd" if "jd"
-                        in o2o_settings.PLATFORMS else "tmall"), rows)  # 平台白名单存在
+        # 平台白名单逐个都要读写通（2026-09-26 京东接入后 PLATFORMS 不止 tmall ——
+        # 旧写法只存 tmall 却去读 jd，加平台当天就把这条踩红了）
+        for plat in o2o_settings.PLATFORMS:
+            o2o_settings.save_mapping(self.root, plat, rows)
+            self.assertEqual(o2o_settings.load_mapping(self.root, plat), rows,
+                             "平台 %s 读写不通" % plat)
 
     def test_未知平台_显式报错(self):
         with self.assertRaises(o2o_settings.O2oSettingsError):

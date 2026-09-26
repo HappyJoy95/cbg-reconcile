@@ -32,7 +32,9 @@ MAPPING_FIELDS = ("itemid", "sku_id", "title", "cloud_name", "spec", "pro_id", "
 #: 覆盖表列
 OVERRIDE_FIELDS = ("sku_id", "source", "value")
 #: 支持的平台（mapping-<平台>.csv 白名单；4.1 接入新平台时加一行）
-PLATFORMS = ("tmall",)
+#: 2026-09-26 京东按核对表 v1 接入（用户：「京东先按照这版进来」——
+#: 直连 513 带 pro_id，待核/缺映射行 pro_id 为空 → 页面按缺映射闸住，核完回填重导）
+PLATFORMS = ("tmall", "jd")
 
 SUBDIR = "o2o"
 

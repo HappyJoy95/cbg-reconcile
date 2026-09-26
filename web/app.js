@@ -7577,7 +7577,7 @@ function renderO2o(d) {
       ">" + o2oEsc(s) + (s === sug && !cur ? "（按门店名建议）" : "") + "</option>").join("");
   $("#o2o-platform").innerHTML = (d.platforms || []).map((p) =>
     '<option value="' + o2oEsc(p) + '"' + (p === d.platform ? " selected" : "") +
-    ">" + o2oEsc(p === "tmall" ? "天猫" : p) + "</option>").join("");
+    ">" + o2oEsc(p === "tmall" ? "天猫" : p === "jd" ? "京东" : p) + "</option>").join("");
   $("#o2o-snap").innerHTML = snap.ok
     ? "快照 " + o2oEsc(snap.day) + (snap.fresh ? "" : "（非今日，云商数可能过时）") +
       " · 本店分仓「" + o2oEsc(snap.store_name) + "」 " + snap.rows_in_store + " 行"
@@ -7600,20 +7600,30 @@ function renderO2oRows() {
     !f || (f === "manual" && r.state === "manual") ||
     (f === "cloud" && r.state === "cloud") ||
     (f === "problem" && r.state !== "cloud" && r.state !== "manual"));
-  const head = "<tr><th>skuId</th><th>商品</th><th>规格</th><th>云商编号</th><th>云商名称</th>" +
-    "<th>云商数</th><th>库存源</th><th>手动值</th><th>最终值</th><th>说明</th></tr>";
+  // ⚠ 用户 2026-09-26：「改成云商到各个平台的映射，平台比云商多的，放在最下面」
+  //   → 有云商映射的按 pro_id 排前（同一云商货的多个平台 SKU 相邻）；
+  //     平台侧多出来的（没有云商映射）一律沉底。列序也改成云商在前（映射读法：云商 → 平台）。
+  rows.sort((a, b) => {
+    const ap = a.pro_id || "", bp = b.pro_id || "";
+    if (!!ap !== !!bp) return ap ? -1 : 1;
+    if (ap && ap !== bp) return ap < bp ? -1 : 1;
+    return String(a.sku_id) < String(b.sku_id) ? -1 : 1;
+  });
+  const head = "<tr><th>云商编号</th><th>云商名称</th><th>云商数</th>" +
+    "<th>skuId</th><th>商品</th><th>规格</th>" +
+    "<th>库存源</th><th>手动值</th><th>最终值</th><th>说明</th></tr>";
   const body = rows.map((r) => {
     const manual = r.state === "manual";
     const qty = r.cloud_qty == null ? "" : String(r.cloud_qty);
     return '<tr data-sku="' + o2oEsc(r.sku_id) + '" data-cloud="' + qty +
       '" data-state="' + o2oEsc(r.state) + '">' +
-      "<td>" + o2oEsc(r.sku_id) + "</td>" +
-      '<td title="' + o2oEsc(r.title) + '">' + o2oEsc(r.title || "") + "</td>" +
-      "<td>" + (r.spec ? o2oEsc(r.spec) : "—") + "</td>" +
       "<td>" + (r.pro_id ? o2oEsc(r.pro_id) : "—") + "</td>" +
       '<td title="' + o2oEsc(r.cloud_name) + '">' +
         o2oEsc(r.cloud_name || "—") + "</td>" +
       "<td>" + (qty || "—") + "</td>" +
+      "<td>" + o2oEsc(r.sku_id) + "</td>" +
+      '<td title="' + o2oEsc(r.title) + '">' + o2oEsc(r.title || "") + "</td>" +
+      "<td>" + (r.spec ? o2oEsc(r.spec) : "—") + "</td>" +
       '<td>云商 <input type="radio" name="src-' + o2oEsc(r.sku_id) +
         '" value="cloud"' + (manual ? "" : " checked") + ">" +
         ' 手动 <input type="radio" name="src-' + o2oEsc(r.sku_id) +
