@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .paths import ROOT   # ⚠ 项目根全项目只许从 paths.py 取（tests/test_paths.py 钉着）
+
 #: 合法值 —— 其它一律回落 `full`（宁可当主包跑，也别半疯）。
 VALID = ("full", "lifehall")
 
@@ -72,7 +74,7 @@ _cache = {"value": None}
 
 def read_edition_file(root=None) -> str:
     """读 `EDITION` 文件 → 合法值；读不到 / 垃圾内容 → `""`。"""
-    base = Path(root) if root is not None else Path(__file__).resolve().parent.parent
+    base = Path(root) if root is not None else ROOT
     try:
         raw = (base / "EDITION").read_text(encoding="utf-8").strip().lower()
     except OSError:
