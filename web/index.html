@@ -203,6 +203,18 @@
       <button class="subtab" data-subtab="inventory-settings">设置</button>
     </div>
   </div>
+  <!-- ⚠ 即时零售 O2O（4.0.0，2026-09-24 用户：「一共是五个平台…设置页面需要
+       可以选择映射表里哪个根据云商库存来，哪个手动填写」）——
+       本轮只有「库存源设置」一页（开发目标「十一」：核心+设置页，
+       五平台的模板转换/上传/定时留 4.1 平台接入期）。
+       ⚠ 逐行粒度（sku 级）：手动=常驻固定值，未设置默认跟随云商；
+       数据全在本机（config/o2o + 本地池D快照），这一页**不联网**。 -->
+  <div class="nav-item" data-tab="oto">
+    <button class="tab" data-tab="oto" aria-haspopup="true" aria-expanded="false">即时零售</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="oto-source">库存源设置</button>
+    </div>
+  </div>
   <!-- ⚠ 增值 · 防护膜达成情况（2026-09-22）：口径见 metric.py。
        新机=(零售净+美团分销净)×0.9，京东分销不算。 -->
   <div class="nav-item" data-tab="valueadd">
@@ -655,6 +667,50 @@
       </div>
       <div id="notify-pref-list-valueadd">加载中…</div>
       <p class="hint">邮件/企微通道在左下角「推送设置」里配。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 即时零售 O2O（4.0.0 M-A4）：库存源设置 —— 逐行 云商/手动 + 本店分仓选择 -->
+<section class="panel" id="panel-oto">
+  <div class="subpanel" id="subpanel-oto-source">
+    <div class="card">
+      <div class="card-head">
+        <h2>库存源设置 <span class="sub">映射表逐行选：跟随云商库存 / 手动填写（常驻）</span></h2>
+        <button class="btn" id="btn-o2o-reload">刷新</button>
+      </div>
+      <div class="row" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end">
+        <div class="field">
+          <label>本店分仓（云商快照按它过滤；门店名对不上下拉手选）</label>
+          <select id="o2o-store" style="min-width:220px"><option value="">（加载中…）</option></select>
+        </div>
+        <div class="field">
+          <label>平台</label>
+          <select id="o2o-platform" style="min-width:120px"></select>
+        </div>
+        <div class="field">
+          <label>筛选</label>
+          <select id="o2o-filter">
+            <option value="">全部</option>
+            <option value="manual">仅手动</option>
+            <option value="cloud">仅跟随云商</option>
+            <option value="problem">仅问题行（缺映射/缺快照/非法）</option>
+          </select>
+        </div>
+      </div>
+      <p id="o2o-snap" class="hint">快照：加载中…</p>
+      <p id="o2o-stats" class="hint">—</p>
+      <div id="o2o-body">加载中…</div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="btn-o2o-save">保存设置</button>
+        <span id="o2o-save-msg" class="hint"></span>
+      </div>
+      <p class="hint">
+        ① <b>跟随云商</b>：上传时用云商快照的在库数（本店分仓、只算在库、剔样机/演示机）；
+        ② <b>手动填写</b>：这个 sku 永远用你填的数，不吃快照（改了才变）；
+        ③ 没设置过的行默认跟随云商；<b>缺映射/缺快照行会标出来</b>，不会悄悄跳过；
+        ④ 快照来自每天的 erp-dump（本地池D），这一页不访问云商接口。
+      </p>
     </div>
   </div>
 </section>

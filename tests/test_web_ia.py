@@ -109,8 +109,14 @@ class Test一级页签(unittest.TestCase):
         #   用户：「设计一个新模块，叫做月度生意计划」。它排在「周度重点产品」**后面**
         #   （注册表里 `order=15`：这两个是同一族，都是"看门店卖得怎么样"）。
         # ⭐ 2026-09-22：**小工具**（价签 / 工牌）—— 用户：「左边栏下面做个小标签叫小工具」。
+        # ⭐ 2026-09-24：**即时零售**（4.0.0 O2O）—— 用户：「一共是五个平台…
+        #   设置页面需要可以选择映射表里哪个根据云商库存来，哪个手动填写」。
+        #   本轮（开发目标「十一」）只有「库存源设置」一页，排在库存盘点后面；
+        #   ⚠ key 用 `oto` 不用 `o2o` —— 可见性/SUBTABS 两份对照的 key 正则是
+        #   `[a-z-]+`（不含数字），`o2o` 会让两边都解析不到（2026-09-24 实测红过）。
         self.assertEqual(NAV_IDS,
-                         ["sales", "plan", "compliance", "inventory", "valueadd", "tools"])
+                         ["sales", "plan", "compliance", "inventory", "oto",
+                          "valueadd", "tools"])
 
     def test_每个都有对应的_panel(self):
         for tab in NAV_IDS:

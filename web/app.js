@@ -138,6 +138,9 @@ const SUBTABS = {
   //   列在这儿只是因为 `switchTab` 要认得这个 key（兜底卡片那条路要用）；
   //   正常入口是导航里那个二级项 —— 它带 `data-page`，点击直接开新标签页。
   inventory: ['inventory', 'inventory-settings'],
+  // ⚠ 即时零售 O2O（4.0.0，2026-09-24）：本轮只有「库存源设置」一页；
+  //   模板转换/上传/定时留 4.1（开发目标「十一」）。
+  oto: ['oto-source'],
   // ⚠ 增值：防护膜 + 无忧会员权益（2026-09-22）—— 本地 erp_sales 现算，无定时步骤。
   valueadd: ['film', 'benefit', 'valueadd-settings'],
   // ⚠ 小工具（2026-09-22）：价签 / 工牌 —— 各一格 iframe，无定时步骤。
@@ -176,6 +179,8 @@ const SUBTAB_LOADERS = {
   // 库存盘点：**同文档**（已拆 iframe）—— 切过来懒注入 inventory/*.js + 聚焦扫码框
   // 切过来才注入脚本 + 把焦点交给扫码框（扫码枪要焦点），见下面的 `mountInventory`。
   inventory: () => mountInventory(),
+  // 即时零售 O2O（4.0.0）：库存源设置 —— 逐行 云商/手动（本机数据，不联网）
+  'oto-source': () => loadO2oSource(),
   film: () => loadFilm(),
   benefit: () => loadBenefit(),
   'valueadd-settings': () => loadNotifyPrefs('#notify-pref-list-valueadd', ['film', 'benefit']),
@@ -7512,3 +7517,167 @@ setInterval(() => {
   //   意思没变："正在盯一趟的时候别去打扰它"。
   if (!state.jobId) loadOverview();
 }, 30000);
+
+
+/* ─────────────── 即时零售 O2O · 库存源设置（4.0.0 M-A4，2026-09-24） ───────────────
+   逐行（sku 级）：跟随云商 / 手动填写（常驻固定值）；没设置过的默认跟随云商。
+   缺映射 / 缺快照 / 手动值非法 —— **一律显式列出来**，不静默跳过。
+   数据全在本机（/api/oto/source 只读 config/o2o + 本地池D快照），**不联网**。 */
+function o2oEsc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+let O2O_DATA = null;    // 最近一次返回（筛选重渲染 / 保存合并用）
+let O2O_WIRED = false;  // 页面控件只绑一次（loadO2oSource 每次切页都会来）
+let O2O_STORE_TOUCHED = false;  // 分仓下拉动过没有：动过就带 store 参数（本次会话生效，不落盘）
+
+function wireO2oPage() {
+  if (O2O_WIRED || !$("#btn-o2o-save")) return;
+  O2O_WIRED = true;
+  $("#btn-o2o-save").onclick = saveO2oSource;
+  $("#btn-o2o-reload").onclick = loadO2oSource;
+  $("#o2o-filter").onchange = renderO2oRows;
+  // ⚠ 选分仓**当场重拉**（用户 2026-09-26：「不保存，我选择门店，加载云商的库存数」）
+  $("#o2o-store").onchange = () => { O2O_STORE_TOUCHED = true; loadO2oSource(); };
+  $("#o2o-platform").onchange = loadO2oSource;   // 换平台重拉
+}
+
+async function loadO2oSource() {
+  wireO2oPage();
+  const sel = $("#o2o-platform");
+  const platform = (sel && sel.value) || "tmall";
+  let url = "/api/oto/source?platform=" + encodeURIComponent(platform);
+  if (O2O_STORE_TOUCHED) {
+    // 清空选择（（未选择）项）传哨兵：parse_qs 默认丢空值，不传会静默回落已存设置
+    const sv = ($("#o2o-store") || {}).value || "";
+    url += "&store=" + encodeURIComponent(sv || "__none__");
+  }
+  try {
+    const d = await api(url);
+    if (!d.ok) {
+      $("#o2o-snap").textContent = "读取失败：" + (d.error || d.why || "未知错误");
+      toast("读取库存源设置失败：" + (d.error || "未知错误"), "bad");
+      return;
+    }
+    O2O_DATA = d;
+    renderO2o(d);
+    $("#o2o-save-msg").textContent = "";
+  } catch (e) {
+    toast("读取库存源设置失败：" + e.message, "bad");
+  }
+}
+
+function renderO2o(d) {
+  const snap = d.snapshot || {};
+  const cur = snap.store_name || "";
+  const sug = snap.suggested || "";
+  const stores = snap.stores || [];
+  $("#o2o-store").innerHTML = '<option value="">（未选择）</option>' +
+    stores.map((s) => '<option value="' + o2oEsc(s) + '"' + (s === cur ? " selected" : "") +
+      ">" + o2oEsc(s) + (s === sug && !cur ? "（按门店名建议）" : "") + "</option>").join("");
+  $("#o2o-platform").innerHTML = (d.platforms || []).map((p) =>
+    '<option value="' + o2oEsc(p) + '"' + (p === d.platform ? " selected" : "") +
+    ">" + o2oEsc(p === "tmall" ? "天猫" : p) + "</option>").join("");
+  $("#o2o-snap").innerHTML = snap.ok
+    ? "快照 " + o2oEsc(snap.day) + (snap.fresh ? "" : "（非今日，云商数可能过时）") +
+      " · 本店分仓「" + o2oEsc(snap.store_name) + "」 " + snap.rows_in_store + " 行"
+    : "⚠ 快照不可用：" + o2oEsc(snap.why || "");
+  const st = d.stats || {};
+  $("#o2o-stats").innerHTML =
+    "共 " + (st.total || 0) + " 行 · 跟随云商 " + (st.cloud || 0) +
+    " · 手动 " + (st.manual || 0) +
+    " · 缺映射 " + (st.missing_mapping || 0) +
+    " · 缺快照 " + (st.missing_snapshot || 0) +
+    (st.invalid_manual ? " · <b>手动值非法 " + st.invalid_manual + "</b>" : "");
+  renderO2oRows();
+}
+
+function renderO2oRows() {
+  const d = O2O_DATA;
+  if (!d) return;
+  const f = ($("#o2o-filter") || {}).value || "";
+  const rows = (d.rows || []).filter((r) =>
+    !f || (f === "manual" && r.state === "manual") ||
+    (f === "cloud" && r.state === "cloud") ||
+    (f === "problem" && r.state !== "cloud" && r.state !== "manual"));
+  const head = "<tr><th>skuId</th><th>商品</th><th>规格</th><th>云商编号</th><th>云商名称</th>" +
+    "<th>云商数</th><th>库存源</th><th>手动值</th><th>最终值</th><th>说明</th></tr>";
+  const body = rows.map((r) => {
+    const manual = r.state === "manual";
+    const qty = r.cloud_qty == null ? "" : String(r.cloud_qty);
+    return '<tr data-sku="' + o2oEsc(r.sku_id) + '" data-cloud="' + qty +
+      '" data-state="' + o2oEsc(r.state) + '">' +
+      "<td>" + o2oEsc(r.sku_id) + "</td>" +
+      '<td title="' + o2oEsc(r.title) + '">' + o2oEsc(r.title || "") + "</td>" +
+      "<td>" + (r.spec ? o2oEsc(r.spec) : "—") + "</td>" +
+      "<td>" + (r.pro_id ? o2oEsc(r.pro_id) : "—") + "</td>" +
+      '<td title="' + o2oEsc(r.cloud_name) + '">' +
+        o2oEsc(r.cloud_name || "—") + "</td>" +
+      "<td>" + (qty || "—") + "</td>" +
+      '<td>云商 <input type="radio" name="src-' + o2oEsc(r.sku_id) +
+        '" value="cloud"' + (manual ? "" : " checked") + ">" +
+        ' 手动 <input type="radio" name="src-' + o2oEsc(r.sku_id) +
+        '" value="manual"' + (manual ? " checked" : "") + "></td>" +
+      '<td><input type="number" min="0" class="o2o-val" style="width:54px;min-width:0" value="' +
+        (manual && r.value != null ? o2oEsc(r.value) : "") + '"' +
+        (manual ? "" : " disabled") + "></td>" +
+      '<td class="o2o-final">' +
+        (manual ? o2oEsc(r.value == null ? "" : r.value)
+                : (r.state === "cloud" ? o2oEsc(r.value) : "—")) + "</td>" +
+      "<td>" + o2oEsc(r.why || "") + "</td></tr>";
+  }).join("");
+  $("#o2o-body").innerHTML = '<table class="table">' + head + body + "</table>";
+  wireO2oRowEvents();
+}
+
+function wireO2oRowEvents() {
+  $$("#o2o-body tr[data-sku]").forEach((tr) => {
+    const inp = tr.querySelector(".o2o-val");
+    tr.querySelectorAll("input[type=radio]").forEach((rd) =>
+      rd.addEventListener("change", () => {
+        const manual = rd.value === "manual";
+        inp.disabled = !manual;
+        if (manual) { inp.focus(); tr.querySelector(".o2o-final").textContent = inp.value; }
+        else tr.querySelector(".o2o-final").textContent =
+          tr.dataset.state === "cloud" ? (tr.dataset.cloud || "0") : "—";
+      }));
+    inp.addEventListener("input", () => {
+      const rd = tr.querySelector('input[value="manual"]');
+      if (rd && rd.checked) tr.querySelector(".o2o-final").textContent = inp.value;
+    });
+  });
+}
+
+async function saveO2oSource() {
+  const platform = $("#o2o-platform").value;
+  const store_name = $("#o2o-store").value;
+  const overrides = {};
+  const seen = {};
+  $$("#o2o-body tr[data-sku]").forEach((tr) => {
+    const rd = tr.querySelector('input[value="manual"]');
+    if (rd && rd.checked) {
+      overrides[tr.dataset.sku] = { source: "manual",
+                                    value: tr.querySelector(".o2o-val").value };
+    }
+    seen[tr.dataset.sku] = true;
+  });
+  // ⚠ 筛选态下保存：DOM 里只有筛出来的行 —— **看不见的已存手动行必须合并回来**，
+  //   否则筛"仅手动"再改一条保存，其他手动行会被静默删掉。
+  const known = (O2O_DATA && O2O_DATA.overrides) || {};
+  Object.keys(known).forEach((sku) => {
+    if (!seen[sku]) overrides[sku] = known[sku];
+  });
+  try {
+    const res = await api("/api/oto/source", { method: "POST",
+      body: { platform, store_name, overrides } });
+    if (!res.ok) {
+      toast("保存失败：" + (res.error || res.why || "未知错误"), "bad");
+      return;
+    }
+    $("#o2o-save-msg").textContent = "已保存 ✓";
+    await loadO2oSource();   // 重拉：分仓改动要重算快照
+    $("#o2o-save-msg").textContent = "已保存 ✓";
+  } catch (e) {
+    toast("保存失败：" + e.message, "bad");
+  }
+}

@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from . import compliance, inventory, plan, sales, tools, valueadd
+from . import compliance, inventory, oto, plan, sales, tools, valueadd
 
 #: 全部一级功能模块。**顺序无所谓**（`Feature.order` 说了算）。
 ALL = [
@@ -30,6 +30,9 @@ ALL = [
     # 库存盘点（M16）：**没有定时步骤** —— 人拿扫码枪站在货架前干的活，
     # 定时器叫不醒它（见 `features/inventory/__init__.py` 顶部）。
     inventory.FEATURE,
+    # 即时零售 O2O（4.0.0，2026-09-24）：本轮只有「库存源设置」页；
+    # 模板转换/上传/定时留 4.1 平台接入期（开发目标「十一」）。
+    oto.FEATURE,
     # 增值 · 防护膜达成情况（2026-09-22）：本地库现算，**没有定时步骤**。
     valueadd.FEATURE,
     # 小工具（2026-09-22）：价签 / 工牌 / **权益领取** / **串号追踪** —— 无定时步骤。

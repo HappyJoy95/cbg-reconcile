@@ -19,6 +19,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .app import data_state as app_data
@@ -1061,6 +1062,24 @@ def _capture_worker(app: "App", headless: bool):
         job.running = False
 
 
+def _o2o_store_query(query: dict) -> Optional[str]:
+    """GET `/api/oto/source` 的 `store` 参数 → 本次页面选的分仓。
+
+    返回 `None` = 没带这个参数 = **用已存设置**（`config/o2o/settings.yaml`）；
+    字符串 = 页面这次选的分仓（**只管本次请求，不落盘** ——
+    用户 2026-09-26：「不保存，我选择门店，加载云商的库存数。应该这样」）。
+
+    ⚠ 清空选择（下拉选回「（未选择）」）要传哨兵 `__none__`：
+      `urllib.parse.parse_qs` 默认 `keep_blank_values=False`，空值参数会**整个消失**
+      （实测 `parse_qs("store=") == {}`）—— 不用哨兵的话"清空"会静默变回已存设置。
+    """
+    qs = query.get("store")
+    if qs is None:
+        return None
+    v = str(qs[0]) if qs else ""
+    return "" if v == "__none__" else v
+
+
 class App:
     """把根目录和配置路径绑在一起，省得每个 handler 都去猜。"""
 
@@ -1098,6 +1117,87 @@ class App:
         """
         cfg = cfg if cfg is not None else config_io.load_raw(self.config_path)
         return auth.session_path(cfg, self.root)
+
+    # ------------------------------------------------ 即时零售 O2O（4.0.0 M-A4）
+    def o2o_source(self, platform: str = "tmall",
+                   store: Optional[str] = None) -> dict:
+        """库存源设置页数据：设置 + 映射 + 覆盖 + **本地**池D快照 → 逐行决策。
+
+        `store`：页面本次选的分仓 —— **给了就直接用、不落盘**（选完当场出数，
+        保存只管手动值和"记住上次选择"）；`None` = 没带参数 = 用已存设置。
+
+        ⚠ 全程只读本机（`config/o2o/` + `out/cbg-<年>.db`）—— **不联网**。
+          2026-09-24 实测连打云商接口会把账号挤下线：快照就该读本地池D。
+        ⚠ 失败一律 `ok=False + error`（前端 `api()` 认 error），不抛。
+        """
+        from .app.o2o import settings as o2o_set
+        from .app.o2o import snapshot as o2o_snap
+        from .app.o2o import source as o2o_src
+
+        def fail(err):
+            return {"ok": False, "error": err, "platform": platform,
+                    "platforms": [], "snapshot": {}, "stats": {},
+                    "rows": [], "overrides": {}}
+
+        try:
+            plat = o2o_set._check_platform(platform)        # 未知平台 → 显式错
+            st = o2o_set.load_settings(self.root)
+            store_name = (str(st.get("store_name") or "")
+                          if store is None else str(store or ""))
+            cfg = config_io.load_raw(self.config_path)
+            snap = o2o_snap.load(
+                self.root, store_name,
+                erp_store_name=str(cfg.get("erp_store_name") or ""))
+            mapping = o2o_set.load_mapping(self.root, plat)
+            overrides = o2o_set.load_overrides(self.root, plat)
+            rows = o2o_src.decide(mapping, overrides, snap.get("stock"))
+            stock = snap.get("stock") or {}
+            for r in rows:                    # 云商数给人看（手动行也显示，供对照）
+                pro = r.get("pro_id")
+                r["cloud_qty"] = int(stock[pro]) if pro in stock else None
+            tally = {}
+            for r in rows:
+                tally[r["state"]] = tally.get(r["state"], 0) + 1
+            return {"ok": True, "error": "", "platform": plat,
+                    "platforms": list(o2o_set.PLATFORMS),
+                    "snapshot": {k: snap.get(k) for k in
+                                 ("ok", "why", "day", "fresh", "stores",
+                                  "store_name", "suggested", "rows_in_store")},
+                    "stats": {"total": len(rows),
+                              "cloud": tally.get("cloud", 0),
+                              "manual": tally.get("manual", 0),
+                              "missing_mapping": tally.get("missing_mapping", 0),
+                              "missing_snapshot": tally.get("missing_snapshot", 0),
+                              "invalid_manual": tally.get("invalid_manual", 0)},
+                    "overrides": overrides, "rows": rows}
+        except o2o_set.O2oSettingsError as e:
+            return fail(str(e))
+        except Exception as e:                                  # noqa: BLE001
+            return fail("%s: %s" % (type(e).__name__, e))
+
+    def o2o_source_save(self, body: dict) -> dict:
+        """保存：本店分仓 + 稀疏覆盖（**只存手动行**，切回云商=删行）。
+
+        改的是本机配置 —— 调用方按矩阵要求 `audit` 留痕（谁改的）。
+        """
+        from .app.o2o import settings as o2o_set
+        body = body or {}
+        try:
+            plat = o2o_set._check_platform(str(body.get("platform") or ""))
+            o2o_set.save_settings(self.root, str(body.get("store_name") or ""))
+            raw = body.get("overrides")
+            over = {}
+            if isinstance(raw, dict):
+                for sku, ov in raw.items():
+                    if isinstance(ov, dict):
+                        over[str(sku)] = {"source": str(ov.get("source") or ""),
+                                          "value": ov.get("value")}
+            o2o_set.save_overrides(self.root, plat, over)
+            return {"ok": True, "error": ""}
+        except o2o_set.O2oSettingsError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:                                  # noqa: BLE001
+            return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     # ------------------------------------------------------- 启动自检（健康）
     def boot_state(self, force: bool = False) -> dict:
@@ -2988,6 +3088,26 @@ class Handler(BaseHTTPRequestHandler):
                 (query.get("name") or [""])[0], data,
                 store=(query.get("store") or [""])[0],
                 date=(query.get("date") or [""])[0]))
+
+        # ---- 即时零售 O2O（4.0.0 M-A4）：库存源设置 —— 本机配置，不联网。
+        #      GET 只读（config/o2o + 本地池D快照）；POST 改机器属性 ⇒ audit 留痕。
+        if path == "/api/oto/source" and method == "GET":
+            return self._json(app.o2o_source(
+                (query.get("platform") or ["tmall"])[0],
+                store=_o2o_store_query(query)))
+        if path == "/api/oto/source" and method == "POST":
+            body = self._read_json()
+            res = app.o2o_source_save(body)
+            if res.get("ok"):
+                scope = role_scope(app)
+                over = body.get("overrides")
+                audit(app, "库存源设置", scope,
+                      platform=str(body.get("platform") or ""),
+                      store=str(body.get("store_name") or ""),
+                      manual=sum(1 for v in (over or {}).values()
+                                 if isinstance(v, dict)
+                                 and v.get("source") == "manual"))
+            return self._json(res)
 
         # ---- 壁纸（用户 2026-09-22）：**只管文件**，不提供 /api/theme。
         #      选中哪张只在浏览器 localStorage（`cbg-wallpaper`）；主题切换仍是
