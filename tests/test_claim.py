@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src.features import registry
 from src.features.tools.claim.activities import catalog
@@ -464,6 +466,104 @@ class Test注册挂到小工具(unittest.TestCase):
 
     def test_validate空(self):
         self.assertEqual(registry.validate(), [])
+
+
+class Test玲珑数据源(unittest.TestCase):
+    """生活馆版待领清单读 orders × order_lines（池A 玲珑销售单）。"""
+
+    def setUp(self):
+        import os
+        from src import edition
+        prev = os.environ.get("CBG_EDITION")
+
+        def _restore():
+            # ⚠ 必须**恢复原值**而不是 pop：本分支根下有 `EDITION` 文件
+            #   写着 `lifehall`，pop 掉 conftest 钉的 full 之后，
+            #   后面所有测试都会读到文件版 lifehall（实测污染 test_web 定时器）。
+            if prev is None:
+                os.environ.pop("CBG_EDITION", None)
+            else:
+                os.environ["CBG_EDITION"] = prev
+            edition.reload()
+
+        os.environ["CBG_EDITION"] = "lifehall"
+        edition.reload()
+        self.addCleanup(_restore)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Path(self._tmp.name) / "cbg-2026.db"
+        conn = sqlite3.connect(str(self.db))
+        conn.executescript("""
+            CREATE TABLE orders (
+                document_no TEXT PRIMARY KEY, store_code TEXT, store_name TEXT,
+                status_name TEXT, pay_status INTEGER, return_status INTEGER,
+                consumer_guide_name TEXT, doc_create_time TEXT, remark TEXT);
+            CREATE TABLE order_lines (
+                document_no TEXT NOT NULL, line_no INTEGER NOT NULL,
+                sn TEXT, item_name TEXT, quantity REAL,
+                PRIMARY KEY (document_no, line_no));
+            CREATE TABLE returns (document_no TEXT, related_doc_no TEXT);
+        """)
+        rows = [
+            # (doc, store, item, sn, qty, time, return_status) —— 窗口 2026-09
+            ("D1", "店A", "手机/华为Pura 70", "1234567890ABCDEF", 1,
+             "2026-09-10 12:00:00", 0),                    # ✓ 命中
+            ("D2", "店A", "手机/华为Pura 70 保护壳", "", 1,
+             "2026-09-11 12:00:00", 0),                    # ✗ 无 SN（配件）
+            ("D3", "店A", "手提袋", "", 2,
+             "2026-09-12 12:00:00", 0),                    # ✗ 无 SN + 名字不匹配
+            ("D4", "店A", "手机/华为Pura 70", "FFEDCBA098765432", 1,
+             "2026-08-01 12:00:00", 0),                    # ✗ 窗口外
+            ("D5", "店A", "手机/华为Pura 70", "0123456789ABCDEF", 1,
+             "2026-09-13 12:00:00", 1),                    # ✗ 已退货
+        ]
+        for doc, store, item, sn, qty, ts, ret in rows:
+            conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?)",
+                         (doc, "SCN1", store, "已完成", 2, ret, "张三", ts, ""))
+            conn.execute("INSERT INTO order_lines VALUES (?,?,?,?,?)",
+                         (doc, 1, sn, item, qty))
+        conn.commit()
+        conn.close()
+
+    def test_按机型窗口退货过滤(self):
+        from src.features.tools.claim.pending import compute
+        out = compute.load_sales_linglong(
+            self.db, "2026-09-01", "2026-09-30")
+        names = [(r["doc"], r["sn"]) for r in out]
+        self.assertEqual(names, [("D1", "1234567890ABCDEF")])
+
+    def test_load走玲珑分支(self):
+        from src.features.tools.claim.pending import compute
+        with mock.patch.object(compute, "find_db", return_value=self.db), \
+             mock.patch.object(compute, "load_sales_linglong",
+                               return_value=[{
+                                   "store": "店A", "who": "张三", "typ": "销售",
+                                   "name": "手机/华为Pura 70", "qty": 1,
+                                   "ts": "2026-09-10 12:00:00", "doc": "D1",
+                                   "sn": "1234567890ABCDEF",
+                                   "claim_sn": "1234567890ABCDEF",
+                                   "sn_kind": "sn", "c1": "", "c2": "",
+                                   "note": ""}]) as ld, \
+             mock.patch("src.features.tools.claim.activities."
+                        "catalog.load_activities", return_value=[]):
+            d = compute.load(root=Path(self._tmp.name))
+        ld.assert_called_once()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["src"], "orders")
+
+    def test_full版仍读erp_sales(self):
+        import os
+        from src import edition
+        os.environ["CBG_EDITION"] = "full"
+        edition.reload()
+        from src.features.tools.claim.pending import compute
+        with mock.patch.object(compute, "find_db", return_value=self.db), \
+             mock.patch.object(compute, "load_sales") as ld, \
+             mock.patch.object(compute, "load_stock_sn_map", return_value={}), \
+             mock.patch("src.features.tools.claim.activities."
+                        "catalog.load_activities", return_value=[]):
+            compute.load(root=Path(self._tmp.name))
+        ld.assert_called_once()
 
 
 if __name__ == "__main__":
