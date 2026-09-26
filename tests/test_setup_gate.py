@@ -677,6 +677,28 @@ class Test前端接线(unittest.TestCase):
                 self.assertNotIn(bad, blk, "又在前端自己判断可见性了")
         self.assertNotIn("querySelectorAll('.nav-item", blk, "又按标签名逐个判断了")
 
+    def test_applyProfile只扫侧栏_不误伤页面里的同名data_tab(self):
+        """⚠ `applyProfile` 的作用域**只有侧栏菜单**（可见性表管的是"菜单别露"）。
+
+        2026-09-26（2.2.1 bug #1）真踩：库存盘点结果区那排标签按钮也叫
+        `data-tab="missing"/"extra"/…`（`inventory/ui.js::renderResults` 动态拼的），
+        但那是**另一套键空间** —— `role.pages` 里没有它们 ⇒ 盘点从 iframe 拆进
+        同文档后，每 30 秒那趟 `loadOverview` 跑一次 `applyProfile` 就把整排标签
+        打成 `hidden=true`，而盘点页下次重绘又把它们造回来 ⇒ 用户看到
+        「表外码那排标签有时会消失」。
+        真浏览器复现：`python .dsh/tasks/repro-inv-tabs-hidden.py`（修前 exit 1）。
+
+        ⇒ 选择器必须限定在 `#sidebar` 内；全文档扫的写法这里当场红。
+        """
+        i = self.js.index("function applyProfile(")
+        blk = self.js[i:self.js.index("\n}\n", i)]
+        self.assertIn("#sidebar", blk,
+                      "applyProfile 必须只扫侧栏（#sidebar）——全文档扫会把"
+                      "盘点页那些同名 data-tab 一起藏掉")
+        self.assertNotIn("$$('[data-tab], [data-subtab], [data-foot]')", blk,
+                         "全文档选择器回归了：页面内容区（盘点标签等）的"
+                         "data-tab 不归可见性表管")
+
     def test_第二步按画像决定显不显示(self):
         """⚠ 合作店**连这一步都不显示** —— 显示成"可选的一步"会让人以为还得登。"""
         i = self.js.index("function showSetup(")
@@ -684,6 +706,74 @@ class Test前端接线(unittest.TestCase):
         # ⚠ 按**身份**判，不看 needs_linglong（平台岗也不走玲珑）
         self.assertIn("'experience'", blk)
         self.assertIn("$('#setup-step-linglong').hidden = !needLL", blk)
+
+    def test_已领取确认按钮防连点(self):
+        """⚠ 权益领取弹窗「已领取 → 确认」分支**必须防连点**（2.2.1 bug #3）。
+
+        用户 2026-09-26：「领取权益如果已领取，点击确认太快会有一直弹出移动到已领」。
+        根因：正常提交分支进门就 `ok.disabled = true`，而 already 分支
+        （`dataset.mode === 'already'`）**既不 disabled 也没 in-flight 守卫** ——
+        连点 N 下 = N 个并发 `POST /api/claim/status` + N 次 toast + N 次
+        `loadClaimPending()` 表格重画，toast 同一元素被反复重置 3 秒计时器，
+        看起来就是「一直弹」。真浏览器复现：
+        `python .dsh/tasks/repro-claim-confirm-spam.py`（修前 3 POST/3 toast）。
+
+        ⇒ 分支里必须在**发请求之前**就把按钮 disabled（先判 in-flight 也行，
+          二选一都要有）；失败/异常回路里要恢复可点，否则用户被卡死。
+        """
+        i = self.js.index("dataset.mode === 'already'")
+        # 取整个 already 分支（到这个 handler 的收尾 `return;` 为止）
+        blk = self.js[i:i + 2000]
+        guard = ("okBtn.disabled = true" in blk
+                 or "_claimConfirmBusy" in blk)
+        self.assertTrue(guard,
+                        "already 分支没有防连点：连点会重复 POST + 重复弹 toast "
+                        "（bug #3）。进门先 `okBtn.disabled = true`，"
+                        "或加 in-flight 标志。")
+        # 失败路径必须把按钮还回来 —— 否则点一次失败就永远点不动
+        self.assertIn("okBtn.disabled = false", blk,
+                      "失败/异常时要恢复按钮，不然卡死")
+
+    def test_正常提交分支_也有防连点(self):
+        """顺带钉住：在线领取的提交分支本来就该有（别被谁"顺手简化"掉）。"""
+        i = self.js.index("const r = await api('/api/claim/submit'")
+        pre = self.js[max(0, i - 600):i]
+        self.assertIn("disabled = true", pre,
+                      "提交前必须先 disable（防连点 = 重复提交华为接口）")
+
+    def test_无忧权益台量与新机只显示整数部分(self):
+        """⚠ 无忧会员权益页：**台量目标 / 台量进度 / 新机** 三列只显示整数部分。
+
+        用户 2026-09-26：「台量目标、台量进度和新机都只显示整数部分吧」。
+        这三列原走 `benefitNum` —— 非整数给 `toFixed(2)`（如台量进度
+        55×25/30 = 45.83、台量目标 224.4）⇒ 列表全是小数，门店看着乱。
+
+        ⇒「整数部分」= **截断**（`Math.trunc`），**不是四舍五入** ——
+          取整是显示口径，四舍五入会把 45.83 报成 46、跟"整数部分"不是一个意思。
+        ⇒ 区域表 / 人表的新机（同一批台量）也要一致，否则同数字两页两个样。
+        """
+        i = self.js.index("function benefitInt(")
+        blk = self.js[i:self.js.index("\n}\n", i)]
+        self.assertIn("Math.trunc", blk,
+                      "benefitInt 必须是截断（整数部分），不能四舍五入")
+        # 门店表：三列点名的都要走 int
+        j = self.js.index("function renderBenefitStores(")
+        stores = self.js[j:self.js.index("\n}\n", j)]
+        for call in ("benefitCell(r.day_target, 'int')",
+                     "benefitCell(r.slot_progress, 'int')",
+                     "benefitCell(r.new, 'int')"):
+            with self.subTest(call=call):
+                self.assertIn(call, stores,
+                              "台量目标/台量进度/新机 要走整数格式：%s" % call)
+        # 区域表 / 人表的新机同源 —— 显示要一致
+        jr = self.js.index("function renderBenefitRegions(")
+        regions = self.js[jr:self.js.index("\n}\n", jr)]
+        self.assertIn("benefitCell(r.new, 'int')", regions,
+                      "区域表新机也要整数（同一批台量，两页不一样会挨问）")
+        jp = self.js.index("function renderBenefitPeople(")
+        people = self.js[jp:self.js.index("\n}\n", jp)]
+        self.assertIn("benefitCell(r.new, 'int')", people,
+                      "人表主机也要整数")
 
 
 if __name__ == "__main__":

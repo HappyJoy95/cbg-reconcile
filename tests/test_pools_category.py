@@ -72,15 +72,67 @@ class Test判据(unittest.TestCase):
         self.assertEqual(CAT.head_of("智能手机/华为/Mate 80"), "智能手机")
         self.assertEqual(CAT.head_of(""), "")
 
-    def test_merge_云商优先(self):
-        """同一台机器，云商侧说得更准 —— 玲珑说的不算。"""
-        got = CAT.merge({"erp_sales": {"SN1": "手机"}, "lg_sales": {"SN1": CAT.OTHER}})
-        self.assertEqual(got["SN1"], "手机")
+    def test_classify_sales_商品名前缀优先于一级分类(self):
+        """⭐ 2026-09-23 报障：表带被 `一级分类=智能穿戴` 判成「穿戴」混进 BC。
 
-    def test_merge_六类比其它优先(self):
-        """一侧说「配件」、一侧说「手机」时选手机：多带一台只是噪音，少算一台会造假差异。"""
-        got = CAT.merge({"erp_sales": {"SN1": CAT.OTHER}, "erp_stock": {"SN1": "手机"}})
+        池C 改成**商品名前缀优先**（跟池D 同一张词表），一级分类只兜底。
+        """
+        # 表带：一级分类说穿戴、商品名前缀说配件 → 取配件
+        cat, w = CAT.classify_sales("智能穿戴", "表带/华为/银河紫素皮氟橡胶复合表带EFT-LF(22mm)-银河紫")
+        self.assertEqual(cat, CAT.OTHER, "表带不该算穿戴")
+        self.assertIsNone(w, "前缀认得出就不收 unknown")
+        # 眼镜同理
+        self.assertEqual(CAT.classify_sales("智能穿戴", "眼镜/华为/华为AI眼镜 AIL-G01")[0], CAT.OTHER)
+        # 前缀认不出（手机贴膜）→ 回落一级分类
+        self.assertEqual(CAT.classify_sales("手机平板周边", "手机贴膜/某品牌钢化膜")[0], CAT.OTHER)
+        self.assertEqual(CAT.classify_sales("手机", "某认不出的前缀/xx")[0], "手机")
+        # 两边都认不出 → 收进 unknown（红线：不许静默）
+        cat, w = CAT.classify_sales("没见过的分类", "没见过的前缀/xx")
+        self.assertEqual(cat, CAT.UNKNOWN)
+        self.assertEqual(w, "没见过的分类")
+
+    def test_表带这类被玲珑归成华为手表也要剔(self):
+        """⭐ 池间「其它赢」才抓得到的表带 —— 玲珑在库把表带归成「华为手表」(穿戴)。
+
+        实测 `4SCBB25408118002`：云商商品名=表带(其它)、玲珑 category_name=华为手表(穿戴)。
+        只靠 `classify_sales` 抓不到（玲珑说六类），必须池间「其它赢」。
+        """
+        conn = _db()
+        _sold(conn, "SN_STRAP", "智能穿戴")
+        conn.execute("UPDATE erp_sales SET 商品名称=? WHERE sn=?",
+                     ("表带/华为/某表带", "SN_STRAP"))
+        _lg_stock(conn, "SN_STRAP", "华为手表")     # 玲珑把表带归进华为手表
+        self.assertEqual(S.quadrants(conn)["BC"], 0, "表带不该进 BC")
+
+    def test_merge_池间平手时云商优先(self):
+        """两侧都判**六类**时（平手）按 `SOURCES` 顺序 = 云商侧赢。"""
+        got = CAT.merge({"erp_sales": {"SN1": "平板"}, "lg_stock": {"SN1": "手机"}})
+        self.assertEqual(got["SN1"], "平板", "平手时云商侧（SOURCES 在前）保留")
+
+    def test_merge_池间冲突时其它赢(self):
+        """⭐ 用户 2026-09-23 拍板**推翻第一版**：池间说法矛盾时「不参与」那侧赢。
+
+        第一版是「六类 > 其它」（多带一台只是噪音），但表带的实测把它证伪了 ——
+        池C 粗类说「穿戴」、池D/玲珑细判说「配件」，六类赢 ⇒ 表带混进 BC。
+        → 现在两侧矛盾就信「配件」，宁可少一条差异、不报假差异。
+        """
+        got = CAT.merge({"erp_sales": {"SN1": "手机"}, "lg_stock": {"SN1": CAT.OTHER}})
+        self.assertEqual(got["SN1"], CAT.OTHER, "一侧说配件、一侧说手机 → 剔")
+        got2 = CAT.merge({"erp_sales": {"SN1": CAT.OTHER}, "erp_stock": {"SN1": "手机"}})
+        self.assertEqual(got2["SN1"], CAT.OTHER)
+
+    def test_merge_池内多行六类优先(self):
+        """⚠ 池**内**多行是另一套（`_rank_within`，六类赢）—— 跟池间别混。
+
+        同一串号在池A 既买手机又挂 HUAWEI Care+（其它）⇒ 这台是手机。
+        若池内也按「其它赢」，`8BBUT26820011620` 这种真手机会被当成配件剔掉。
+        """
+        got = CAT.merge({"erp_sales": {"SN1": "手机"}})   # 单池内已由 take 按六类取过
         self.assertEqual(got["SN1"], "手机")
+        # 直接钉池内 rank 的次序
+        self.assertGreater(CAT._rank_within("手机"), CAT._rank_within(CAT.OTHER))
+        # 池间 rank 次序相反
+        self.assertGreater(CAT._rank_between(CAT.OTHER), CAT._rank_between("手机"))
 
     def test_merge_未知不覆盖认得出的(self):
         got = CAT.merge({"erp_sales": {"SN1": CAT.UNKNOWN}, "lg_stock": {"SN1": "音频"}})
@@ -188,7 +240,11 @@ class Test过滤生效(unittest.TestCase):
         _sold(conn, "SN_BAND", "智能穿戴")
         _lg_stock(conn, "SN_BAND", "华为手环")
         _sold(conn, "SN_TV", "智慧屏")
-        _lg_stock(conn, "SN_TV", "华为专属配件")     # 玲珑侧没有智慧屏这种类目 → 真 BC
+        # ⚠ 玲珑侧**没有**智慧屏这种类目，实测池B 一个智慧屏都没有 ——
+        #   所以这里给个**认不出的新词**（UNKNOWN），不是「华为专属配件」(其它)。
+        #   2026-09-23 池间改成「其它赢」后，给 OTHER 会把这台真智慧屏剔掉；
+        #   而 UNKNOWN 的 rank 最低、不参与池间胜负 ⇒ 池C 说的「智慧屏」(六类) 保留。
+        _lg_stock(conn, "SN_TV", "智慧屏系列")
         self.assertEqual(S.quadrants(conn)["BC"], 2)
 
     def test_对称_只在一侧过滤会造假差异(self):

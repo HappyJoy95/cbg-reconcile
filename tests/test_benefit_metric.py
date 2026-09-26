@@ -238,5 +238,133 @@ class Test系统人店表(unittest.TestCase):
         self.assertIn("erp_sales", src)
 
 
+class Test新机口径(unittest.TestCase):
+    """新机 = **手机零售净 + 美团/抖音转线上**，普通批发分销**不算新机**。
+
+    用户 2026-09-26 拍板：「新机的数据来源按照我刚才跟你说的来就行」——
+    即源表口径 (134+16)×0.9 里的 134=手机零售净、16=美团转线上（万达实数）。
+    ⚠ 修前 bug：`compute` 对手机行**不分单据类型全算**（含京东/天猫等普通分销），
+    万达 194 vs 文档口径 181。
+    ⚠ 判「美团/抖音」要同时看**客户/顾客字段**：万达备注含美团=0 台、
+    客户=美团外卖=16 台 —— 只看备注会把转线上全漏掉。
+    """
+
+    STORE = "青岛城阳万达店"
+
+    def _compute(self, rows):
+        import datetime
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        from src.features.valueadd.benefit import compute as bcomp
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        path = Path(tmp.name)
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE erp_sales (门店 TEXT, 店员 TEXT, 单据类型 TEXT,"
+            " 商品名称 TEXT, 一级分类 TEXT, 二级分类 TEXT, 数量 REAL,"
+            " 零售考核毛利 REAL, 支付时间 TEXT, 备注 TEXT, 单行备注 TEXT,"
+            " \"客户/顾客\" TEXT, 串号标识 TEXT)")
+        for d in rows:
+            base = {"门店": self.STORE, "店员": "张三", "单据类型": "零售",
+                    "商品名称": "智能手机/华为/nova 16", "一级分类": "手机",
+                    "二级分类": "手机", "数量": 1, "零售考核毛利": 0,
+                    "支付时间": "2026-09-12 10:00:00", "备注": "", "单行备注": "",
+                    "客户/顾客": "", "串号标识": "新"}
+            base.update(d)
+            ks = list(base)
+            conn.execute("INSERT INTO erp_sales (%s) VALUES (%s)"
+                         % (", ".join('"%s"' % k if "/" in k else k for k in ks),
+                            ",".join("?" * len(ks))),
+                         [base[k] for k in ks])
+        conn.commit()
+        conn.close()
+
+        swaps = [(bcomp, "find_db", lambda root=None: path),
+                 (bcomp, "load_people", lambda *a, **k: ({}, "empty", ""))]
+        olds = [(mm, nn, getattr(mm, nn)) for mm, nn, _ in swaps]
+        for mm, nn, v in swaps:
+            setattr(mm, nn, v)
+        self.addCleanup(lambda: [setattr(mm, nn, o) for mm, nn, o in olds])
+        bcomp._CACHE.clear()
+        self.addCleanup(bcomp._CACHE.clear)
+        return bcomp.compute(stores=[self.STORE], day=datetime.date(2026, 9, 26))
+
+    def test普通分销不算新机(self):
+        d = self._compute([
+            {},                                                     # 零售1
+            {"单据类型": "分销", "备注": "9.13京东国补订单362",
+             "客户/顾客": "京东到家", "支付时间": "2026-09-13 10:00:00"},   # 京东 → 不算
+            {"单据类型": "分销", "备注": "转线上",
+             "客户/顾客": "天猫商城", "支付时间": "2026-09-14 10:00:00"},    # 天猫 → 不算
+        ])
+        st = d["stores"][0]
+        self.assertEqual(st["new"], 1,
+                         "京东/天猫普通分销不该算新机，应只剩零售1台（修前=3）")
+        self.assertEqual(st["new_retail"], 1)
+        self.assertEqual(st["new_online"], 0)
+
+    def test转线上按客户字段认(self):
+        """万达实况：备注只写「转线上」不写美团，美团身份在 客户/顾客 字段。"""
+        d = self._compute([
+            {},
+            {"单据类型": "分销", "备注": "转线上 返顾客250",
+             "客户/顾客": "美团外卖", "支付时间": "2026-09-15 10:00:00"},
+            {"单据类型": "分销", "备注": "",
+             "客户/顾客": "抖音小时达", "支付时间": "2026-09-16 10:00:00"},
+        ])
+        st = d["stores"][0]
+        self.assertEqual(st["new"], 3, "零售 + 美团转线上 + 抖音 = 3")
+        self.assertEqual(st["new_retail"], 1)
+        self.assertEqual(st["new_online"], 2)
+
+    def test演示机样机不算新机_口径E(self):
+        """口径E（用户 2026-09-26 拍板）：商品名含演示机/-演 **或** 串号标识含「样」都排。"""
+        d = self._compute([
+            {"商品名称": "智能手机/华为/Pura 80 Pro+ 全网通版-演示机",
+             "串号标识": "J,新", "支付时间": "2026-09-10 10:00:00"},          # 商品名口径
+            {"商品名称": "智能手机/华为/nova 16 普通机", "串号标识": "样,新",
+             "支付时间": "2026-09-11 10:00:00"},                              # 标识口径
+            {"商品名称": "智能手机/华为/nova 16 正常机", "串号标识": "J,新",
+             "支付时间": "2026-09-12 10:00:00"},                              # 正常机 → 留
+        ])
+        self.assertEqual(d["stores"][0]["new"], 1,
+                         "演示机(商品名)与样机(标识)都该排，只剩正常机1台（修前=3）")
+
+    def test送Care机型不算新机(self):
+        """折叠屏 care-fold 活动送 Care+ 的机型不算新机；**Pura X View 要算**（活动 exclude）。"""
+        d = self._compute([
+            {"商品名称": "智能手机/华为/Pura X Max HOP-AL00(12GB+512GB)全网通版-零度白"},
+            {"商品名称": "智能手机/华为/Mate X7 DEL-AL10(12GB+512GB) 全网通版 曜石黑",
+             "支付时间": "2026-09-13 10:00:00"},
+            {"商品名称": "智能手机/华为/Pura X View VOL-AL00(12GB+512GB)全网通版",
+             "支付时间": "2026-09-14 10:00:00"},
+        ])
+        st = d["stores"][0]
+        self.assertEqual(st["new"], 1,
+                         "X Max / X7 是 care-fold 送 Care+ 机型应剔；View 要留（修前=3）")
+        self.assertEqual(d.get("foreign_dropped"), 0, "Care+机型是口径剔除，不算转单")
+
+    def test备注含美团也算(self):
+        # ⚠ 备注别写别家店名（如"顺和汇"）—— 那会先被 foreign 整行剔除
+        d = self._compute([
+            {"单据类型": "分销", "备注": "美团线上下单",
+             "客户/顾客": "", "支付时间": "2026-09-17 10:00:00"},
+        ])
+        self.assertEqual(d["stores"][0]["new_online"], 1,
+                         "备注含美团也要认（老口径不倒退）")
+
+    def test备注点名别家店的转单不计(self):
+        """与 foreign 规则的联动：转单行整行剔，不进新机。"""
+        d = self._compute([
+            {},
+            {"单据类型": "分销", "备注": "顺和汇美团下单",
+             "客户/顾客": "美团外卖", "支付时间": "2026-09-18 10:00:00"},
+        ])
+        self.assertEqual(d["stores"][0]["new"], 1,
+                         "备注点名顺和汇 → 整行剔，只剩本店零售1台")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -875,11 +875,19 @@ $('#btn-open-setup-ll')?.addEventListener('click', openSetup);
  *    真正的闸门在每个 `/api/*`（`role_scope` + `forbid`），这一层只管"菜单别露"。
  *    藏错方向的话门店会连自己该用的页都找不到，那才是事故。
  *  ⚠ **别在这儿写 if (type === ...) / if (needs_linglong)** —— 那就是第二份可见性表了。
+ *  ⚠⚠ 作用域**只有 `#sidebar`**（2026-09-26 2.2.1 bug #1 真踩过）：
+ *    可见性表管的是"**菜单**别露"，而这三个属性在页面内容区**另有键空间** ——
+ *    库存盘点结果区那排标签也叫 `data-tab="missing"/"extra"/…`（`inventory/ui.js`
+ *    动态拼的），`role.pages` 里没有它们 ⇒ 全文档扫的话，每 30 秒那趟
+ *    `loadOverview` 跑一次就把整排标签打成 `hidden`，下次重绘又造回来 ⇒
+ *    用户看到「表外码那排标签有时会消失」。复现：`.dsh/tasks/repro-inv-tabs-hidden.py`。
+ *    三类菜单 key（`data-tab`/`data-subtab`/`data-foot`）都只出现在侧栏里
+ *    （`test_roles.py::Test可见性对照` 钉着键表，这里钉着作用域）。
  */
 function applyProfile(role) {
   if (!role) return;
   const pages = Array.isArray(role.pages) ? role.pages : null;
-  $$('[data-tab], [data-subtab], [data-foot]').forEach((el) => {
+  $$('#sidebar [data-tab], #sidebar [data-subtab], #sidebar [data-foot]').forEach((el) => {
     const key = el.dataset.subtab || el.dataset.tab || el.dataset.foot;
     el.hidden = !!pages && !!key && pages.indexOf(key) < 0;
   });
@@ -2883,6 +2891,16 @@ function benefitNum(x) {
   if (!isFinite(n)) return String(x);
   return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toFixed(2);
 }
+/** 台量目标 / 台量进度 / 新机 —— **只显示整数部分**（截断，不是四舍五入）。
+ *  用户 2026-09-26：「台量目标、台量进度和新机都只显示整数部分吧」——
+ *  这三列原走 benefitNum 给 toFixed(2)，列表里全是 45.83 这种小数。
+ *  ⚠ 「整数部分」= Math.trunc：45.83 → 45；四舍五入会报 46，那不是一个意思。 */
+function benefitInt(x) {
+  if (x == null || x === '') return '';
+  const n = Number(x);
+  if (!isFinite(n)) return String(x);
+  return String(Math.trunc(n));
+}
 function benefitMoney(x) {
   const n = Number(x) || 0;
   return n.toFixed(n && Math.abs(n - Math.round(n)) > 1e-9 ? 2 : 0);
@@ -2912,6 +2930,7 @@ function benefitCell(v, kind, dig) {
   }
   if (kind === 'money') return '<td class="num">' + benefitMoney(v) + '</td>';
   if (kind === 'rate') return '<td class="num">' + benefitPct(v) + '</td>';
+  if (kind === 'int') return '<td class="num">' + benefitInt(v) + '</td>';
   return '<td class="num">' + benefitNum(v) + '</td>';
 }
 
@@ -3000,8 +3019,8 @@ function renderBenefitStores(d) {
     let x = '<tr' + (cls ? ' class="' + cls + '"' : '') + '>'
       + leadHtml
       + '<td>' + esc(r.store || '') + '</td>'
-      + benefitCell(r.day_target) + benefitCell(r.slot_progress)
-      + benefitCell(r.new) + benefitCell(r.new_rate, 'pct', 'overall')
+      + benefitCell(r.day_target, 'int') + benefitCell(r.slot_progress, 'int')
+      + benefitCell(r.new, 'int') + benefitCell(r.new_rate, 'pct', 'overall')
       + benefitCell(r.goal) + benefitCell(r.wuyou) + benefitCell(r.care)
       + benefitCell(r.total)
       + benefitCell(r.attach, 'pct', 'attach')
@@ -3080,7 +3099,7 @@ function renderBenefitRegions(d) {
     + '<th class="num">台均</th></tr></thead><tbody>';
   const tr = (r, cls) => '<tr' + (cls ? ' class="' + cls + '"' : '') + '>'
     + '<td>' + esc(r.region || '') + '</td>'
-    + benefitCell(r.stores) + benefitCell(r.new) + benefitCell(r.goal)
+    + benefitCell(r.stores) + benefitCell(r.new, 'int') + benefitCell(r.goal)
     + benefitCell(r.wuyou) + benefitCell(r.care) + benefitCell(r.total)
     + benefitCell(r.attach, 'pct', 'attach')
     + benefitCell(r.goal_rate, 'pct', 'goal')
@@ -3115,7 +3134,7 @@ function renderBenefitPeople(d) {
       + '<td>' + esc(r.store || '') + '</td>'
       + '<td>' + esc(r.title || '') + '</td>'
       + '<td>' + esc(r.name || '') + '</td>'
-      + benefitCell(r.new) + benefitCell(r.attach_ratio, 'pct', 'attach');
+      + benefitCell(r.new, 'int') + benefitCell(r.attach_ratio, 'pct', 'attach');
     tiers.forEach(t => { x += benefitCell((r.tiers || {})[t.key]); });
     x += benefitCell(r.care) + benefitCell(r.total)
       + benefitCell(r.rebate, 'money') + benefitCell(r.care_profit, 'money')
@@ -3519,6 +3538,12 @@ function bindClaimOnlineModal() {
     const okBtn = $('#claim-online-ok');
     // 「已领取」态：点确认 → 标已领（若后端还没标）→ 关窗
     if (okBtn && okBtn.dataset.mode === 'already') {
+      // ⚠ 防连点（2026-09-26 bug #3：「点确认太快会一直弹出」）——
+      //   这个分支原来**既不 disabled 也没有 in-flight 守卫**，连点 N 下 =
+      //   N 个并发 POST + N 次 toast + N 次 loadClaimPending 重画表格。
+      //   正常提交分支进门就 disable，这里漏了；两头现在一致。
+      if (okBtn.disabled) return;
+      okBtn.disabled = true;
       const pend = _claimAlreadyPending;
       const ctx0 = _claimOnlineCtx;
       try {
@@ -3529,6 +3554,7 @@ function bindClaimOnlineModal() {
           });
           if (r && !r.ok) {
             toast((r.why) || '标记失败', 'bad');
+            okBtn.disabled = false;   // 失败要还回来，否则卡死
             return;
           }
         }
@@ -3538,6 +3564,7 @@ function bindClaimOnlineModal() {
         if (ctx0) { /* closed */ }
       } catch (e) {
         toast('标记失败：' + e.message, 'bad');
+        okBtn.disabled = false;       // 异常同理
       }
       return;
     }

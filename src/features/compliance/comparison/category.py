@@ -11,10 +11,17 @@
 ## 为什么不能各池各判一次
 
 四个池装的是**同一批机器**（同一批串号在池间流动）。品类是**这台机器**的属性，
-所以四个池谁认得出来就用谁的（云商侧最准，优先），合并成 `{串号: 品类}` 再统一过滤。
+所以四个池谁认得出来就用谁的，合并成 `{串号: 品类}` 再统一过滤。
 
 各池各判的话，同一台机器可能在一侧算「手机」、另一侧算「配件」⇒ 一侧排掉一侧保留
 ⇒ **凭空多出 AD/BC** —— 那正是本项目最忌讳的假差异。
+
+## 合并的两层规则（2026-09-23 用户拍板，两层缺一不可）
+
+| 层 | 规则 | 为什么 |
+|---|---|---|
+| **池内**多行（`_rank_within`） | 六类 > 其它 —— **具体的赢** | 同串号既买手机又挂 Care+ 行，取「这台是手机」；反过来会把真手机判成配件剔掉 |
+| **池间**冲突（`_rank_between`） | 其它 > 六类 —— **排除的赢** | 池C 粗类说「穿戴」、池D/玲珑细判说「配件」时信细判 —— 表带不许进 BC（第一版「六类优先」就是让表带混进来的 bug） |
 
 ## ⚠⚠ 玲珑的**父类**别拿来判
 
@@ -42,6 +49,13 @@
 2026-09-21 对着 `out/cbg-2026.db` **实测全量**列出来的（`erp_sales` 13 种 /
 `erp_stock` 最新快照 101 种 / `lg_stock` 17 种 / `order_lines` 17 种），
 所以覆盖率是 100%、「未知」实测为 0。**新增了词就会冒出来** —— 这正是要的效果。
+
+2026-09-23 用参考库补了一批（玲珑新词 MateBook 系列 / 通话手环 / TY·ZY·TD /
+智能音箱…、云商 会员·增值服务·鸿蒙汽车、池A 体脂秤编码）——
+⚠ **`SY`（商品名「DFG-PD / 东风-Jade」）故意没补**：看不出是手机还是车品，
+不猜，留着 UNKNOWN 继续报出来。
+另：池C 判定改成 `classify_sales`（**商品名前缀优先**，`一级分类` 只兜底），
+因为粗类把表带 202 行 / 眼镜 74 行全归了「智能穿戴」。
 """
 
 from __future__ import annotations
@@ -74,6 +88,10 @@ ERP_SALES = {
     "外购散件": OTHER,
     "智能家居": OTHER,
     "潮玩礼品": OTHER,
+    # 2026-09-23 参考库补（这三个都无串号 / 汽车件，兜底别落 UNKNOWN）：
+    "会员": OTHER,
+    "增值服务": OTHER,
+    "鸿蒙汽车": OTHER,
 }
 
 # ---------------------------------------------------------------- 池D 云商在库
@@ -101,6 +119,9 @@ ERP_STOCK = {
     # 台式机 / 显示器 / 打印机 / 一体机：用户明确「电脑只算笔记本」
     "消费台式机": OTHER, "商用台式机": OTHER, "显示器": OTHER,
     "打印机": OTHER, "一体机": OTHER,
+    # ⚠ 「音箱」原先映射音频 —— 用户 2026-09-23 拍板：**音箱不算音频、不参与对账**
+    #   （AI 音箱 2e / Sound X 那批，一级分类也归「全屋智能」，两侧口径拉平成不参与）。
+    "音箱": OTHER,
     # 配件 / 周边
     "保护壳套": OTHER, "数据线": OTHER, "充电器": OTHER, "移动电源": OTHER,
     "触控笔": OTHER, "电脑鼠标": OTHER, "电脑键盘": OTHER, "键盘": OTHER,
@@ -143,6 +164,18 @@ LG_STOCK = {
     "华为礼品": OTHER, "华为物料": OTHER, "智能系列": OTHER,
     "华为专属配件": OTHER, "第三方配件": OTHER, "电源系列": OTHER,
     "华为路由器": OTHER,
+    # 2026-09-23 参考库补的**玲珑新词**（当时 16 个词全落 UNKNOWN：
+    # MateBook 系列被判"没见过" ⇒ 电脑被悄悄剔出对账 —— 正是红线说的静默）：
+    "华为MateBook系列": "电脑", "华为MateBook GT系列": "电脑",
+    "华为MateBook D系列": "电脑", "华为MateBook E系列": "电脑",
+    "华为MateBook X系列": "电脑",
+    "华为通话手环": "穿戴",
+    # ⚠ TY/ZY/TD 的商品名是 Adora/Jackie/Bayne/OceanM「8GB+256GB 全网通版」= 手机；
+    #   **SY 不补** —— 它的商品名是「DFG-PD / 东风-Jade」，看不出是手机还是车品，
+    #   不猜，留着 UNKNOWN 继续报出来（认不出就报，这是红线）。
+    "TY": "手机", "ZY": "手机", "TD": "手机",
+    "智能音箱": OTHER,            # 用户 2026-09-23：音箱不参与
+    "打印机": OTHER, "HiLink生态产品": OTHER, "摄影系列": OTHER,
 }
 
 # ---------------------------------------------------------------- 池A 玲珑销售单
@@ -165,6 +198,7 @@ LG_SALES = {
     "CMCG10000034": OTHER,          # 移动电源
     "CMCG10000024": OTHER,          # 路由
     "CMCG10000140": OTHER,          # 手机壳
+    "CMCG10000037": OTHER,          # 体脂秤（2026-09-23 补，原先落 UNKNOWN）
     "HWExclusiveAccessories": OTHER,
 }
 
@@ -188,16 +222,45 @@ def classify(value, table) -> Optional[str]:
     return table.get(text, UNKNOWN)
 
 
+def classify_sales(bill_class, item_name) -> Tuple[str, Optional[str]]:
+    """池C 一行的品类 —— **商品名前缀优先，一级分类兜底**（用户 2026-09-23）。
+
+    返回 `(品类, 要收进 unknown_words 的原词 or None)`。
+
+    ⚠⚠ 为什么不能只看 `一级分类`（第一版的 bug）：
+    池C 的 `一级分类` 是**粗类** —— 表带 202 行、眼镜 74 行全归「智能穿戴」
+    ⇒ 判成「穿戴」参与对账；而池D 按商品名前缀（`表带/…`→其它）和玲珑侧
+    （`华为专属配件`→其它）都判配件 ⇒ 粗类把两侧的细判盖掉 ⇒ **表带混进 BC**。
+    池D 的商品名格式和池C **完全一样**（`表带/华为/…`），所以先拿同一个
+    `ERP_STOCK` 词表按前缀判；前缀认不出（`手机贴膜` / `维修费` 等 329 个词）
+    才回落 `一级分类`。
+
+    ⚠ unknown 只在**两边都认不出**时收：前缀认出 = 词表够用；
+    前缀认不出但一级分类认出 = 兜住了（不报）；两边都不行才要人去补表。
+    """
+    head = head_of(item_name)
+    if head and head in ERP_STOCK:
+        return ERP_STOCK[head], None
+    cat = classify(bill_class, ERP_SALES)
+    if cat == UNKNOWN:
+        return cat, str(bill_class or "").strip() or head or None
+    if cat is None and head:
+        # 一级分类是空的、前缀又认不出 —— 按"没见过"报，别当空的混过去
+        return UNKNOWN, head
+    return cat, None
+
+
 def head_of(pro_name) -> str:
     """池D 的商品名 → 前缀（`智能手机/华为/...` → `智能手机`）。"""
     return str(pro_name or "").split("/")[0].strip()
 
 
-def _rank(cat) -> int:
-    """合并时的取舍：**六类 > 其它 > 空 / 未知**。
+def _rank_within(cat) -> int:
+    """**池内**多行取舍：六类(2) > 其它(1) > 空/未知(0) —— 具体的赢。
 
-    ⚠ 同一台机器两边说法不一致时（理论上不该有），选**更具体**的那个：
-      多带进一台六类的机器只是多点噪音，而少算一台会让它在差异里凭空出现。
+    池内的多行是**同一侧的事实**（这台机器在云商开过手机单、同串号还挂了
+    HUAWEI Care+ 行）—— 取"这台机器是什么"就该取具体的那个：
+    取 OTHER 会把 `8BBUT26820011620` 这种**真手机**连带 Care+ 一起判成配件剔掉。
     """
     if cat in CATS:
         return 2
@@ -206,15 +269,35 @@ def _rank(cat) -> int:
     return 0
 
 
+def _rank_between(cat) -> int:
+    """**池间**冲突取舍：其它(2) > 六类(1) > 空/未知(0) —— **排除的赢**。
+
+    ⚠⚠ 这条是 2026-09-23 用户拍的，**推翻了**第一版「六类优先 / 云商最准」：
+    表带的案例里，池C 粗类说「穿戴」、池D 和玲珑侧细判都说「配件」——
+    按旧规则粗类的六类赢 ⇒ 表带进 BC。用户要的是**表带这类配件不出现**，
+    所以两侧说法矛盾时信「不参与」那一侧（宁可少一条差异，不报假差异）。
+
+    ⚠ 代价已实测量化（参考库全量）：掉 30 台 = 15 表带眼镜 + 12 音箱 + 3 手机，
+    前两类本就该剔；3 手机那类由 `_rank_within` 的池内先取具体拦掉，
+    两层规则缺一不可。
+    """
+    if cat == OTHER:
+        return 2
+    if cat in CATS:
+        return 1
+    return 0
+
+
 def merge(sources: Dict[str, Dict[str, str]]) -> Dict[str, str]:
     """`{来源: {串号: 品类}}` → `{串号: 品类}` —— **一台机器只有一个品类**。
 
-    按 `SOURCES` 的顺序取，认得越具体越优先（见 `_rank`）。
+    按 `SOURCES` 的顺序遍历，**池间冲突排除优先**（`_rank_between`）；
+    平手（两边都是六类）保留先到的 = 云商侧（`SOURCES` 里云商在前）。
     """
     out: Dict[str, str] = {}
     for name in SOURCES:
         for sn, cat in (sources.get(name) or {}).items():
-            if _rank(cat) > _rank(out.get(sn)):
+            if _rank_between(cat) > _rank_between(out.get(sn)):
                 out[sn] = cat
     return out
 

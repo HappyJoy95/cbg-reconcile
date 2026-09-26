@@ -250,6 +250,57 @@ class TestQuadrants(unittest.TestCase):
         q = pools.quadrants(self._seed(), detail=True)
         self.assertNotIn("SNRRRRRR1", q["C"])
 
+    def test_sold_then_returned_offset_out_of_C(self):
+        """⭐ 2026-09-23 报障：**原销售行要被退货行冲销**，不能只剔退货行。
+
+        卖→退→货回库 ⇒ C 有原单、B/D 都有货 ⇒ 老口径造出假 BC。
+        这里造一台「卖了又退」+ 池B 有货，必须不算卖。
+        """
+        conn = self._seed()
+        conn.execute(
+            'INSERT INTO erp_sales (sn, document_no, 单号, 单据类型, 商品名称, 支付时间, 串号标识)'
+            " VALUES ('SNBBBBBB3','S4','S4','零售','机型B3','2026-09-01 10:00:00','新')")
+        conn.execute(
+            'INSERT INTO erp_sales (sn, document_no, 单号, 单据类型, 商品名称, 支付时间, 串号标识)'
+            " VALUES ('SNBBBBBB3','S5','S5','零售退','机型B3','2026-09-02 10:00:00','新')")
+        pools.save_snapshot(conn, "lg-stock",
+                            [{"sn": "SNBBBBBB3", "item_name": "机型B3",
+                              "warehouse_name": "可售仓", "stock_age": 5}],
+                            date="2026-09-17")
+        c, _ = pools._sold_sns(conn)
+        self.assertNotIn("SNBBBBBB3", c, "卖了又退的不该算卖")
+        q = pools.quadrants(conn, detail=True)
+        self.assertNotIn("SNBBBBBB3", q["BC"], "否则就是退货造成的假 BC")
+
+    def test_sold_returned_then_resold_stays_in_C(self):
+        """⚠ 卖→退→**又卖掉** = 真卖了，要留着（实测 6HR0226528000127）。
+
+        一刀切"有退货就剔"会把这种真差异误杀 —— 少给是本项目最忌讳的方向。
+        """
+        conn = self._seed()
+        for doc, kind, t in (("S6", "零售", "2026-07-30 21:00:00"),
+                             ("S7", "零售退", "2026-08-19 12:00:00"),
+                             ("S8", "分销", "2026-08-31 19:00:00")):
+            conn.execute(
+                'INSERT INTO erp_sales (sn, document_no, 单号, 单据类型, 商品名称, 支付时间, 串号标识)'
+                " VALUES ('SNBBBBBB4',?,?,?,?,?,'新')", (doc, doc, kind, "机型B4", t))
+        c, _ = pools._sold_sns(conn)
+        self.assertIn("SNBBBBBB4", c, "退货后又卖掉 = 真卖了")
+
+    def test_sale_without_time_still_counts(self):
+        """⚠⚠ 支付时间**可空** —— 没时间的销售不能被当成"没卖过"（真踩过）。
+
+        `net_sold` 曾拿时间戳的 truthiness 判"有没有销售"，测试库不写支付时间
+        ⇒ 整个池C 被清空 ⇒ BC 全 0。
+        """
+        from src.features.compliance.comparison.rules import net_sold, SALE, RETURN
+        self.assertTrue(net_sold([(SALE, "")]), "卖了但没记时间 = 卖了")
+        self.assertFalse(net_sold([(RETURN, "")]), "只有退货 = 没卖")
+        self.assertFalse(net_sold([(SALE, ""), (RETURN, "2026-09-02")]),
+                         "同刻分不出先后 → 保守判没卖")
+        # 卖得比退晚 = 卖掉了
+        self.assertTrue(net_sold([(RETURN, "2026-09-01"), (SALE, "2026-09-05")]))
+
     def test_counts_only_mode(self):
         q = pools.quadrants(self._seed())
         self.assertEqual(q["AD"], 1)

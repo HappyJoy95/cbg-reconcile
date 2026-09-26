@@ -16,7 +16,8 @@ from ....dump import clear_col_cache, colname, ensure_columns, jd, put
 
 from . import category as CAT
 from .rules import (CLOSED_STATUS, DETAIL_COLS, QUADRANT_LABELS, RETURN_BILL_TYPES,
-                       SAMPLE_MARK, combine, is_sample_marker)
+                       SALE, SAMPLE_MARK, combine, event_kind, is_sample_marker,
+                       net_sold)
 
 class PoolError(RuntimeError):
     """池子相关的问题。**别用 SystemExit** —— 本模块会被进程内调用（AGENTS.md 坑 11）。"""
@@ -250,44 +251,59 @@ def _category_maps(conn: sqlite3.Connection):
 
     ⚠ 取法和 `_latest_sn_set` / `_sold_sns` **对齐**（快照取最新一天、云商在库取
       四列串号、剔掉 `-`）—— 不对齐的话，过滤会把池里真实存在的串号判成"没品类"。
+
+    ⚠ 两个 rank 分工（2026-09-23，缺一不可）：
+      **池内**多行按 `CAT._rank_within`（六类优先 —— 同串号的手机行+Care+行
+      要取手机）；**池间**冲突在 `CAT.merge` 里按 `CAT._rank_between`
+      （其它优先 —— 表带不许被云商粗类盖进来）。
     """
     unknown: dict = {}
     maps: dict = {}
 
-    def take(source, rows, sn_idx, word_of):
-        table = CAT.TABLES[source]
-        got: dict = {}
-        for row in rows:
+    def judge_word(table, word_of):
+        """一个"按词判"的池 → `row -> (品类, 要收的原词|None)`。"""
+        def j(row):
             word = word_of(row)
             cat = CAT.classify(word, table)
-            if cat == CAT.UNKNOWN:          # ⚠ 没见过的词**单独收着**，不静默归「其它」
-                w = str(word or "").strip()
+            w = str(word or "").strip() if cat == CAT.UNKNOWN else None
+            return cat, w
+        return j
+
+    def take(source, rows, sn_idx, judge):
+        got: dict = {}
+        for row in rows:
+            cat, w = judge(row)
+            if w:                          # ⚠ 没见过的词**单独收着**，不静默归「其它」
                 unknown[w] = unknown.get(w, 0) + 1
             for i in sn_idx:
                 sn = str(row[i] or "").strip()
                 if sn and sn != "-":
-                    got[sn] = cat
+                    # ⚠ 池内多行：具体的赢（见 `CAT._rank_within` 注释）
+                    if CAT._rank_within(cat) > CAT._rank_within(got.get(sn)):
+                        got[sn] = cat
         maps[source] = got
 
     take("lg_sales",
          _pool_rows(conn, "order_lines", ("sn", "category_id"),
                     "SELECT sn, category_id FROM order_lines"),
-         (0,), lambda r: r[1])
+         (0,), judge_word(CAT.TABLES["lg_sales"], lambda r: r[1]))
     take("lg_stock",
          _pool_rows(conn, "lg_stock", ("sn", "category_name"),
                     "SELECT sn, category_name FROM lg_stock WHERE snapshot_date = "
                     "(SELECT MAX(snapshot_date) FROM lg_stock)"),
-         (0,), lambda r: r[1])
+         (0,), judge_word(CAT.TABLES["lg_stock"], lambda r: r[1]))
+    # ⚠ 池C 走 `classify_sales`（商品名前缀优先、一级分类兜底）——
+    #   只看 `一级分类` 会把表带判成穿戴（用户 2026-09-23 报的 bug）。
     take("erp_sales",
-         _pool_rows(conn, "erp_sales", ("sn", "一级分类"),
-                    "SELECT sn, 一级分类 FROM erp_sales"
+         _pool_rows(conn, "erp_sales", ("sn", "一级分类", "商品名称"),
+                    'SELECT sn, "一级分类", "商品名称" FROM erp_sales'
                     " WHERE sn NOT LIKE 'nosn:%'"),
-         (0,), lambda r: r[1])
+         (0,), lambda r: CAT.classify_sales(r[1], r[2]))
     take("erp_stock",
          _pool_rows(conn, "erp_stock", ("sn", "imei", "sub_imei", "sub_imei1", "pro_name"),
                     "SELECT sn, imei, sub_imei, sub_imei1, pro_name FROM erp_stock "
                     "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM erp_stock)"),
-         (0, 1, 2, 3), lambda r: CAT.head_of(r[4]))
+         (0, 1, 2, 3), judge_word(CAT.TABLES["erp_stock"], lambda r: CAT.head_of(r[4])))
     return maps, unknown
 
 def category_scope(conn: sqlite3.Connection):
@@ -326,7 +342,8 @@ def quadrants(conn: sqlite3.Connection, *, detail: bool = False) -> dict:
 
     两条实测出来的前提，不满足会**静默漏报**：
 
-    ⚠ **池C 必须剔退货单**（`RETURN_BILL_TYPES`）。
+    ⚠ **池C 必须按时间序净额冲销退货**（`rules.net_sold`，2026-09-23 起）——
+    只剔退货行不冲销原单，卖→退货回库就是假 BC（参考库实测 4/21 行中招）。
     ⚠ **池A 必须只取「已完成 且 未退货未退款」** —— 退货关闭的单会伪装成
     `AD`（实测误报过 1 台：`77TYD26606002629` 报了量又退货，订单已关闭）。
 
@@ -430,30 +447,57 @@ def _reported_sns(conn: sqlite3.Connection) -> set:
         raise
 
 def _sold_sns(conn: sqlite3.Connection) -> tuple:
-    """池C：云商卖出去的串号 —— **剔掉退货单**，并按样机拆成两组。
+    """池C：云商卖出去的串号 —— **时间序净额冲销退货**，并按样机拆成两组。
 
     返回 `(非样机, 样机)`。
 
     ⚠ **拆开而不是直接滤掉**：本项目最忌讳"少给了东西还不吭声" ——
     排除掉多少台必须留痕，`quadrants` 会把样机那组单列成 `BC_样机`。
 
-    ⚠ **样机也剔退货**：退了货的样机两边都不该出现。
+    ⚠ **退货要冲销原销售行，不能只剔退货行**（2026-09-23 用户报障修的）：
+    老口径 `单据类型 NOT IN 退货` 只把退货行自己剔掉，**原销售行还留着** ——
+    卖→退→货回库后 C 有原单、B/D 都有货 ⇒ `BC = B∩C` 命中假差异
+    （参考库实测 3112 个串号原单没冲销，当前 BC 21 行里 4 行中招）。
+    现在按 `rules.net_sold` 比「最后一次销售 vs 最后一次退货」，
+    卖→退→再卖的（实测 6HR0226528000127）**保留** —— 那是真差异。
+
+    ⚠ **样机也过冲销**（退了货的样机两边都不该出现），而且**只看销售行**的标识 ——
+    退货行的 `串号标识` 是复制原单的，拿它判样机会让"卖样机→退货"留成样机差异。
 
     ⚠ 一台机器可能有多行销售（多次卖）。**只要有一行是样机就算样机** ——
     业务上样机卖出去玲珑就报不了量，别的行是什么都不改变这件事。
     """
     try:
-        marks = ",".join("?" for _ in RETURN_BILL_TYPES)
+        # ⚠ 时间列**按实际存在的列拼**：支付时间是主时钟（实测 146960 行全非空、
+        #   精确到秒），制单时间只做兜底；精简库 / 测试库没有制单时间列 ——
+        #   硬写 `IFNULL("制单时间")` 会 `no such column` 炸掉整个池C（真炸过）。
+        have = _table_cols(conn, "erp_sales")
+        tcols = [c for c in ("支付时间", "制单时间") if c in have]
+        if not tcols:
+            time_expr = "''"
+        elif len(tcols) == 1:
+            time_expr = "IFNULL(\"%s\", '')" % tcols[0]
+        else:
+            # ⚠ COALESCE 在 SQLite 至少要两个参数（单参直接 OperationalError）
+            time_expr = "COALESCE(" + ", ".join(
+                "IFNULL(\"%s\", '')" % c for c in tcols) + ")"
         rows = conn.execute(
-            'SELECT sn, "串号标识" FROM erp_sales '
-            'WHERE IFNULL("单据类型", \'\') NOT IN (%s)' % marks, RETURN_BILL_TYPES)
-        sample_of: dict = {}
-        for sn, mk in rows:
+            'SELECT sn, "单据类型", "串号标识", %s FROM erp_sales' % time_expr)
+        per: dict = {}
+        for sn, kind, mk, t in rows:
             if not sn or not is_real_sn(sn):
                 continue
-            sample_of[sn] = sample_of.get(sn, False) or is_sample_marker(mk)
-        sample = {s for s, v in sample_of.items() if v}
-        return set(sample_of) - sample, sample
+            slot = per.get(sn)
+            if slot is None:
+                slot = per[sn] = {"ev": [], "marks": []}
+            kind = event_kind(kind)
+            slot["ev"].append((kind, str(t or "")))
+            if kind == SALE:
+                slot["marks"].append(mk)
+        sold = {sn for sn, v in per.items() if net_sold(v["ev"])}
+        sample = {sn for sn in sold
+                  if any(is_sample_marker(m) for m in per[sn]["marks"])}
+        return sold - sample, sample
     except sqlite3.OperationalError as e:
         # ⚠ **只吞"表还没建"，别的错误必须炸出来。**
         #   原先这里一律 `return set()` —— 于是 SQL 语法错也被吞成空集，
@@ -506,11 +550,22 @@ def details(conn: sqlite3.Connection, quadrant: str) -> list[dict]:
         # ⚠ 金额取**行金额** `l.included_tax_amount`，不是整单的 `o.paid_amount` ——
         #   一单多行时（比如买手机送移动电源），整单金额会挂到赠品那行上，
         #   看着像"这个移动电源 5999 元"。
+        # ⚠ **明细查询也要套有效单条件**（2026-09-23）：`sns` 虽然来自过滤过的 A，
+        #   但同一个串号可能既有有效单又有「已关闭+退货」单 —— 不筛的话
+        #   明细带出的是**退掉那一单**的信息（实测 2 个串号命中），门店照着
+        #   退货单去追，白跑。`ORDER BY doc_create_time` 升序 ⇒ merge 后行覆盖
+        #   前行，最终显示**最新一笔有效单**。
+        marks = ",".join("?" for _ in CLOSED_STATUS)
         merge(conn.execute(
             "SELECT TRIM(l.sn), l.item_name, o.store_name, o.document_no,"
             " o.doc_create_time, l.included_tax_amount, o.sales_assistant_id"
             " FROM order_lines l JOIN orders o ON o.document_no = l.document_no"
-            " WHERE TRIM(l.sn) IN (%s)" % ph, args),
+            " WHERE TRIM(l.sn) IN (%s)"
+            "   AND o.status_name NOT IN (%s)"
+            "   AND IFNULL(o.return_status, 0) = 0"
+            "   AND IFNULL(o.refund_status, 0) = 0"
+            " ORDER BY IFNULL(o.doc_create_time, '')" % (ph, marks),
+            tuple(args) + tuple(CLOSED_STATUS)),
             ("玲珑机型", "玲珑门店", "玲珑单号", "玲珑时间", "玲珑金额", "玲珑店员"))
     else:
         merge(conn.execute(
@@ -533,9 +588,21 @@ def details(conn: sqlite3.Connection, quadrant: str) -> list[dict]:
             "   AND (%s)" % where, args * max(len(keys), 1)),
             ("云商机型", "云商仓", "云商库龄", "云商状态"))
     else:
+        # ⚠ **明细不列退货行**（2026-09-23）：`sns` 已经过了净额冲销，但同一个
+        #   串号的退货行还在表里 —— 不筛的话明细显示出来是「单据类型=零售退」，
+        #   用户看到的就是"没筛掉退货"。`ORDER BY 支付时间` 升序 ⇒ merge 后行
+        #   覆盖前行，最终显示**最新一笔销售**。
+        marks = ",".join("?" for _ in RETURN_BILL_TYPES)
+        # ⚠ ORDER BY 的列同样按实际存在拼 —— 精简库 / 只写过部分字段的库
+        #   没有 `支付时间` 时别整张明细炸掉（没有就保持原顺序）。
+        order = (' ORDER BY IFNULL("支付时间", \'\')'
+                 if "支付时间" in _table_cols(conn, "erp_sales") else "")
         merge(conn.execute(
             'SELECT sn, "商品名称", "门店", "支付时间", "单据类型", document_no,'
-            ' "串号标识", "金额", "业务员" FROM erp_sales WHERE sn IN (%s)' % ph, args),
+            ' "串号标识", "金额", "业务员" FROM erp_sales'
+            ' WHERE sn IN (%s)'
+            '   AND IFNULL("单据类型", \'\') NOT IN (%s)%s' % (ph, marks, order),
+            tuple(args) + tuple(RETURN_BILL_TYPES)),
             ("云商机型", "云商门店", "云商时间", "云商单据类型", "云商单号",
              "云商标识", "云商金额", "云商业务员"))
 

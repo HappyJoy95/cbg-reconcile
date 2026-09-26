@@ -39,6 +39,66 @@ def is_sample_marker(marker) -> bool:
 #: 那**是正常的**；不剔会造出一堆假异常（实测 `C∩D=10` 里 7 个就是这么来的）。
 RETURN_BILL_TYPES = ("零售退", "分销退")
 
+#: 事件种类（`net_sold` 的入参）
+SALE = "sale"
+RETURN = "return"
+
+
+def event_kind(bill_type) -> str:
+    """池C 一行的事件种类 —— 退货行 `RETURN`，其余（含 NULL / 核销 / 客情单）`SALE`。
+
+    ⚠ **核销 / 客情单算"卖了"是有意的**（用户 2026-09-23 拍板方案 A：维持现状）：
+    实测参考库它们**一个都没进 AD/BC** —— 客情单 1711 行全是手机贴膜且
+    **零串号**；核销 245 个真串号进了池C 但**品类全是"其它"**（贴膜/保护壳）
+    ⇒ 被六类过滤挡在 keep 之外。⚠ 边界：核销里有 707 行 head=「耳机麦克」
+    判**音频（六类）**，现在没进 C **只因为那些行没有 ≥8 位串号** ——
+    哪天出现串号级核销单（整机核销带真 SN），它会以六类进池C，
+    那时要不要改成"不算卖"（方案 B/C）再议。
+    （旁证：`config/stores.yaml` 的 `exclude` 含核销，注释"金额为 0"。）
+    """
+    return RETURN if str(bill_type or "") in RETURN_BILL_TYPES else SALE
+
+
+def net_sold(events) -> bool:
+    """时间序净额 —— 这个串号最终算不算「卖掉了」。**纯函数**。
+
+    `events` = `[(kind, time)]`，`kind` 见 `event_kind`，`time` 是可字典序比较的
+    时间串（`YYYY-MM-DD HH:MM:SS`；空串 = 没有时间，排在最早）。
+
+    规则（用户 2026-09-23 拍的「时间序净额冲销」）：
+
+    * 比 **最后一次销售** 和 **最后一次退货**：退货更晚 ⇒ 货回库了，**没卖掉**；
+    * 退货之后**又卖出去** ⇒ 算卖掉（实测 `6HR0226528000127` 卖→退→再卖，
+      是真差异，一刀切"有退货就剔"会把它误杀）；
+    * **同一刻**分不出先后 ⇒ 判「没卖掉」（保守方向：宁可少报一条差异，
+      也不报假差异 —— 本项目最忌讳假差异）。
+
+    ⚠ 为什么用字符串比：`支付时间` 实测 146960 行全非空、格式统一到秒，
+      字典序 == 时间序。日期短串（`2026-09-01`）比长串小 ⇒ 同天无时分秒时
+      退货赢，方向仍是保守的那侧。
+    ⚠⚠ **"有没有销售"看 `has_sale`，不看时间戳是否为空** —— 支付时间是**可空**的
+      （测试和精简库里常为空）。拿 `last_sale` 的 truthiness 当"没卖过"，
+      会把"卖了但没记时间"的机器判成没卖掉 ⇒ 从池C 消失 ⇒ BC 少报（真踩过）。
+    """
+    has_sale = has_return = False
+    last_sale = ""
+    last_return = ""
+    for kind, t in events:
+        t = str(t or "")
+        if kind == RETURN:
+            has_return = True
+            if t > last_return:
+                last_return = t
+        else:
+            has_sale = True
+            if t > last_sale:
+                last_sale = t
+    if not has_sale:
+        return False               # 只退没销（孤儿退货）：没卖掉
+    if not has_return:
+        return True                # 没退过：卖掉了（时间为空也算卖）
+    return last_sale > last_return  # 同刻 / 销售没时间 → False（保守：货回库了）
+
 #: 池A 里**不算"报了量"**的订单状态
 CLOSED_STATUS = ("已关闭",)
 

@@ -149,6 +149,32 @@ def is_meituan(note: str) -> bool:
     return ("美团" in n) or ("抖音" in n)
 
 
+def is_demo(name: str, sid: str) -> bool:
+    """演示机/样机 —— 用户 2026-09-26 拍板口径 **E：两种都排**。
+
+    * 商品名称含「演示」「样机」或以「-演」结尾（商品名口径，覆盖 12/12 台）；
+    * 串号标识含「样」（`样,新` / `s,样,新`，逗号分段精确比，避免误伤）。
+    ⚠ 两种口径不一致：商品名 12 台 ⊃ 标识 6 台（麦凯乐3台标识是 `J,新`/`新`）——
+      E = 并集，万达 143 与麦凯乐 36 里麦凯乐会排掉3台（人算没排，差异已知）。
+    """
+    n = name or ""
+    s = sid or ""
+    if ("演示" in n) or ("样机" in n) or ("-演" in n):
+        return True
+    return "样" in [x.strip() for x in s.split(",")]
+
+
+def is_online_cust(cust: str) -> bool:
+    """`客户/顾客` 字段是不是线上平台（美团外卖 / 抖音小时达 …）。
+
+    ⚠ 必须和 `is_meituan` 一起用（用户 2026-09-26 定的「美团转线上」口径）：
+      万达实况是**备注只写「转线上」、平台身份在客户字段**（备注含美团=0台、
+      客户=美团外卖=16台）—— 只看备注会把转线上全漏掉。
+    """
+    c = cust or ""
+    return ("美团" in c) or ("抖音" in c)
+
+
 def sell_ok(typ: str) -> bool:
     return (typ or "") in SELL_TYPES
 
@@ -580,6 +606,7 @@ def region_of(store: str, regions: dict) -> str:
 
 __all__ = [
     "TIERS", "CARE_REBATE", "SELL_TYPES", "DEFAULT_TRACKS", "DEFAULT_REGIONS",
+    "is_online_cust", "is_demo",
     "DEFAULT_PEOPLE", "DEFAULT_POOLS", "TOP3_SHARE", "TOP3_GATE",
     "TRACK_ATTACH_PENALTY", "TRACK_ATTACH_FINE", "BONUS_MONTH_K",
     "tier_of", "is_care", "is_phone", "is_meituan", "sell_ok", "rebate_unit",

@@ -6,6 +6,9 @@
 #   category     品类：手机 / 平板 / PC / 音频 / 穿戴
 #   title        展示标题
 #   match        商品名**包含其一**即命中（大小写不敏感；长的放前面）
+#   exclude      商品名**包含其一即不认**（先于 match 判）—— 子串会吸错机型时用：
+#                match 写 `FreeBuds 7` 会吸进 `FreeBuds 7i`，配 exclude: [FreeBuds 7i] 挡
+#                （同理 Pura X 吸 View；踩过两次，见 catalog.py 对应活动的注释）
 #   start / end  赠送时间（YYYY-MM-DD，含首尾）；都空 = 不限日期
 #   benefit      赠送权益名
 #   content      赠送权益内容

@@ -26,7 +26,9 @@ from typing import Dict, List, Optional, Tuple
 
 from ....paths import ROOT
 from ....config_io import load_raw
+from ...tools.claim.activities import catalog as claim_catalog
 from . import metric
+from .. import foreign as foreign_mod
 
 
 def _f(x) -> float:
@@ -102,8 +104,17 @@ def _load_rows(db: Path, start: str, end: str):
     conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
     try:
         conn.row_factory = sqlite3.Row
+        # 「客户/顾客」是判「美团转线上」的关键列（万达备注不写美团、客户字段写）
+        # ⚠ 老库可能没这列 —— PRAGMA 问一下，缺就补 '' AS，别让整页炸（同 film._select_sql）
+        try:
+            have = {str(x[1]) for x in conn.execute("PRAGMA table_info(erp_sales)")}
+        except sqlite3.Error:
+            have = set()
+        cust = '"客户/顾客"' if "客户/顾客" in have else "'' AS \"客户/顾客\""
+        # 串号标识：认演示机/样机（口径E）用
+        sid = "串号标识" if "串号标识" in have else "'' AS 串号标识"
         sql = ("SELECT 门店, 店员, 单据类型, 商品名称, 一级分类, 二级分类,"
-               " 数量, 零售考核毛利, 支付时间, 备注, 单行备注"
+               " 数量, 零售考核毛利, 支付时间, 备注, 单行备注, " + cust + ", " + sid +
                " FROM erp_sales WHERE 支付时间 >= ? AND 支付时间 < ?")
         for r in conn.execute(sql, (start, end_ex)):
             yield {
@@ -117,6 +128,8 @@ def _load_rows(db: Path, start: str, end: str):
                 "profit": _f(r["零售考核毛利"]),
                 "ts": r["支付时间"] or "",
                 "note": " ".join(str(r[k] or "") for k in ("备注", "单行备注")),
+                "cust": r["客户/顾客"] or "",
+                "sid": r["串号标识"] or "",
             }
     finally:
         conn.close()
@@ -177,11 +190,21 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
 
     orphan = 0
     orphan_names: Dict[str, int] = {}
+    dropped = 0                     # 备注点名别家门店、整行剔除的台数（note 里报出来）
+    fidx: Dict = {}
     as_of = ""
     src = "missing"
     db = find_db(root)
     if db and db.exists():
         src = "erp_sales"
+        # 倒排索引只建一次（读 config/stores.yaml）；名单读不到 = 空 = 一个不剔
+        fidx = foreign_mod.name_index(root)
+        # 送 **Care+** 的机型（折叠屏金秋礼遇活动）不算新机 ——
+        # 用户 2026-09-26 拍板；机型表**跟着权益领取活动目录走**（换月随版本更新）。
+        # 判据 = benefit 含 "Care+" 且是手机类活动（nova无忧礼包/丢失无忧等不命中美掉）。
+        care_models = [a for a in claim_catalog.load_activities(root)
+                       if "Care+" in str((a or {}).get("benefit") or "")
+                       and str((a or {}).get("category") or "") == "手机"]
         for r in _load_rows(db, start, end):
             store = r["store"]
             if want is not None and store not in want:
@@ -194,6 +217,12 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
             if a is None:
                 # 店不在赛道/区域表（联想店、已关店）—— 整行跳过
                 continue
+            # ⚠ 备注点名**别家门店**（转单/代下单）→ 整行不算本店，
+            #   在 orphan/累加**之前**剔，店、人、利润一处都不留
+            #   （用户 2026-09-26：「备注其他门店的需要排除，不止针对麦凯乐和丽达茂」）
+            if foreign_mod.other_store_in(store, r.get("note"), fidx):
+                dropped += 1
+                continue
             if pa is None and r["who"]:
                 # 有单但不在人店表：**计入店、不进人榜**（note 里报笔数）
                 orphan += 1
@@ -202,9 +231,21 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
             if not metric.sell_ok(r["typ"]):
                 continue
 
-            # —— 新机（手机）
+            # —— 新机（手机）= 手机零售净 + 美团/抖音转线上
+            #   ⚠ 用户 2026-09-26 拍板口径；**普通批发分销不算新机**（京东/天猫等）
+            #   修前不分单据类型全算 → 万达 194 vs 口径 181
             if metric.is_phone(r["c1"]):
-                bucket = "new_o" if metric.is_meituan(r["note"]) else "new_r"
+                # 演示机/样机不算新机（口径E：商品名 或 串号标识 两种认法都排 —— 用户拍板）
+                if metric.is_demo(r["name"], r.get("sid")):
+                    continue
+                # 送 Care+ 的折叠屏机型（care-fold 活动）不算新机
+                # （源表口径：排 Care+ 机型后 12/26 店与人算精确相等、误差34）
+                if any(claim_catalog.matches_model(a, r["name"]) for a in care_models):
+                    continue
+                online = metric.is_meituan(r["note"]) or metric.is_online_cust(r.get("cust"))
+                if r["typ"] in ("分销", "分销退") and not online:
+                    continue
+                bucket = "new_o" if online else "new_r"
                 for tgt in (a, pa):
                     if tgt is None:
                         continue
@@ -300,6 +341,9 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
         note = "找不到订单库（out/cbg-*.db）—— 先跑「抓数据」"
     if orphan:
         note += " · 名册外有单 %d 笔（已计入店、未进人榜）" % orphan
+    if dropped:
+        # ⚠ 必须报出来 —— 否则门店只会发现"数变小了"，以为系统算错（坑13 同类）
+        note += " · 备注点名别家门店，剔除 %d 台" % dropped
 
     return {
         "ok": src != "missing",
@@ -312,6 +356,7 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
         "src": src,
         "note": note,
         "orphan": orphan,
+        "foreign_dropped": dropped,
         "roster_source": roster_src,
         "roster_why": roster_why,
         "stores": store_rows,
@@ -353,6 +398,9 @@ def load(root=None, stores: Optional[List[str]] = None, day=None, force: bool = 
         db, start, end,
         root / "config" / "valueadd-benefit.yaml",
         root / _staff_mod.ROSTER_REL,
+        # 剔除判据读门店名单（foreign.name_index）—— 改了名单必须重算，
+        # 否则新店/改名后的转单行会继续被算进本店（陈旧剔除表）
+        root / "config" / "stores.yaml",
     )
     if not force and _FINGER.get(key) == fp and key in _CACHE:
         return _CACHE[key]

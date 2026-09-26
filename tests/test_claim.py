@@ -179,6 +179,47 @@ class Test排除PuraXView(unittest.TestCase):
             act, "智能手机/华为/Pura X 典藏版/内屏6.3英寸..."))
 
 
+class Test排除FreeBuds7i(unittest.TestCase):
+    """2.2.1 bug #2（用户 2026-09-26）：「领取权益时 FreeBuds 7i 会混在
+    FreeBuds 7 里面，这个权益应该只有 buds7，没有 7i」。
+
+    和 `Pura X` 吸 `Pura X View` 是同一类坑：`match` 是**子串**匹配，
+    `FreeBuds 7i 耳机 T0025-…`（真实商品名，out/cbg-2026.db 里实测有）
+    含子串 `FreeBuds 7` ⇒ 被吸进丢失无忧活动。活动级 `exclude` 挡。
+    """
+
+    def test_7i不进buds7丢失无忧(self):
+        act = catalog.activity_by_id("freebuds7-lost-202609")
+        for name in (
+            "耳机麦克/华为/无线耳机/FreeBuds 7i 耳机 T0025-深空灰",
+            "耳机麦克/华为/无线耳机/FreeBuds 7i 耳机 T0025-贝母白-JC",
+            "耳机麦克/华为/无线耳机/FreeBuds 7i 耳机 T0025-演示机",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(
+                    catalog.matches_model(act, name),
+                    "FreeBuds 7i 不是本活动机型（只有 buds7）")
+                self.assertEqual(
+                    metric.match_activities(
+                        name, "2026-09-10", catalog.DEFAULT_ACTIVITIES,
+                        c1="音频产品", c2="耳机"),
+                    [], "7i 不该进待领清单")
+
+    def test_真FreeBuds7仍命中(self):
+        act = catalog.activity_by_id("freebuds7-lost-202609")
+        for name in (
+            "耳机麦克/华为/无线耳机/FreeBuds 7 T0028-星空黑",
+            "耳机麦克/华为/无线耳机/FreeBuds 7 T0028-月光白-HX",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(catalog.matches_model(act, name))
+        hits = metric.match_activities(
+            "耳机麦克/华为/无线耳机/FreeBuds 7 T0028-星空黑",
+            "2026-09-10", catalog.DEFAULT_ACTIVITIES,
+            c1="音频产品", c2="耳机")
+        self.assertTrue(any(h["id"] == "freebuds7-lost-202609" for h in hits))
+
+
 class Test设备SN识别(unittest.TestCase):
     def test_JC前缀去掉后16位(self):
         # 用户：序列号前缀可能有 JC

@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from ....paths import ROOT
 from ...plan.monthly.plan import stores_by_region, stores_in_scope
 from . import metric
+from .. import foreign as foreign_mod
 
 
 def _f(x) -> float:
@@ -75,6 +76,9 @@ def _load_rows_sqlite(db: Path, start: str, end: str, stores=None):
                 continue
             note = " ".join(str(r[k] or "") for k in ("备注", "单行备注",
                                                      "客户/顾客", "付款方式"))
+            # 「备注点名别家门店」的剔除判据只认**备注/单行备注**（用户口径），
+            # 不能拿 note 全量判 —— 客户/付款方式里出现店名会误伤
+            xnote = " ".join(str(r[k] or "") for k in ("备注", "单行备注"))
             yield {
                 "店": store,
                 "谁": (r["店员"] or "").strip(),
@@ -85,6 +89,7 @@ def _load_rows_sqlite(db: Path, start: str, end: str, stores=None):
                 "数量": _f(r["数量"]),
                 "毛利": _f(r["零售考核毛利"]),
                 "note": note,
+                "xnote": xnote,
                 "ts": r["支付时间"] or "",
             }
     finally:
@@ -154,12 +159,19 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
             warn = "本月库里还没有贴膜行（可能刚修过无串号落库，等下一次 erp-dump）"
 
     as_of = ""
+    dropped = 0        # 备注点名别家门店、整行剔除（note 里报出来，别静默改数）
+    fidx = foreign_mod.name_index(root) if src == "erp_sales" else {}
     for r in stream:
         if r.get("ts") and r["ts"] > as_of:
             as_of = r["ts"]
         store = r["店"]
         a = acc.get(store)
         if a is None:
+            continue
+        # ⚠ 备注点名**别家门店**（转单/代下单）→ 整行不算本店
+        #   （用户 2026-09-26 通用规则，与权益页同口径）
+        if foreign_mod.other_store_in(store, r.get("xnote"), fidx):
+            dropped += 1
             continue
         pa = pacc.setdefault((store, r.get("谁") or ""), _blank_acc())
         qty, profit, typ = r["数量"], r["毛利"], r["类型"]
@@ -199,6 +211,8 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         rows.append(r)
     note = ("新机=(零售净+美团分销净)×0.9；京东分销不算。台均基线内置 25/30/35/40。"
             "源：仅 erp_sales（SQLite）。")
+    if dropped:
+        note += " · 备注点名别家门店，剔除 %d 台" % dropped
     if warn:
         note += " · " + warn
     return {
@@ -211,6 +225,7 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         "rows": rows,
         "summary": metric.summarize(rows),
         "source": src,
+        "foreign_dropped": dropped,
         "note": note,
     }
 
@@ -227,7 +242,17 @@ def _fp(root: Path, start: str, end: str) -> tuple:
             return (("db", str(db), int(st.st_mtime_ns), int(st.st_size)),)
         except OSError:
             pass
-    return (("db", "missing"),)
+    return (("db", "missing"), _stores_fp(root))
+def _stores_fp(root: Path) -> tuple:
+    """门店名单指纹 —— 剔除判据（foreign.name_index）读它，改名单必须重算。"""
+    p = Path(root) / "config" / "stores.yaml"
+    try:
+        st = p.stat()
+        return ("stores", int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return ("stores", 0, 0)
+
+
 
 
 def load(root=None, stores=None, day=None, force: bool = False) -> dict:

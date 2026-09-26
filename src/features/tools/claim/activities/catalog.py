@@ -284,6 +284,11 @@ DEFAULT_ACTIVITIES: List[dict] = [
         "category": "音频",
         "title": "FreeBuds 7 丢失无忧",
         "match": ["FreeBuds 7"],
+        # ⚠ 子串 `FreeBuds 7` 会吸进 **FreeBuds 7i**（T0025）——
+        #   2026-09-26 用户：「7i 会混在 FreeBuds 7 里面，这个权益应该只有 buds7」。
+        #   和 `Pura X` 吸 View 是同一类坑，一样用 exclude 挡（先于 match 判）。
+        #   ⚠ 写 `FreeBuds 7i` 而不是 `7i`：后者会误伤 FreeBuds 6i。
+        "exclude": ["FreeBuds 7i"],
         "start": "2026-08-24",
         "end": "2026-10-07",
         "benefit": "丢失无忧",
