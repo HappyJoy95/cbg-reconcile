@@ -691,6 +691,7 @@ function showSetup(st) {
     ? `${p.erp_name}${p.marker ? ' · 标识 ' + p.marker : ''}`
     : '还没认出是哪家店';
 
+  const LH = !!(setupState && setupState.lifehall);   // 生活馆版：只有玲珑一步
   const erp = (setupState && setupState.erp) || {};
   const ll = (setupState && setupState.linglong) || {};
   // ⚠ **好了就别说话** —— 用户 2026-09-19：「切换账号还告诉我 ✅ 门店配置已就绪。
@@ -703,14 +704,20 @@ function showSetup(st) {
   //   显示成"可选的一步"会让人以为还得登，白折腾。
   // ⚠ 按**身份**判，不看 `needs_linglong` —— 第②步只对体验店出现
   //   （合作店不走玲珑，平台岗不属于任何一家店）。
-  const needLL = (p.type || '') === 'experience';
+  // ⚠ 生活馆版（LH）：第①步（云商）整段藏掉，玲珑变第 1 步；
+  //   原判据 `p.type === 'experience'` 在生活馆没意义（认店可能失败、type=partner）。
+  const needLL = LH || (p.type || '') === 'experience';
+  $('#setup-step-erp').hidden = LH;
   $('#setup-step-linglong').hidden = !needLL;
   // 这一步要露脸 ⇒ 把玲珑那套控件搬进来（不露脸就让它待在玲珑授权页）
   mountLinglong(needLL);
-  $('#setup-linglong-num').textContent = needLL ? '2' : '';
+  $('#setup-linglong-num').textContent = LH ? '1' : (needLL ? '2' : '');
   $('#setup-linglong-why').innerHTML = ll.ok ? '' : esc(ll.why || '');
   $('#setup-step-linglong').classList.toggle('done', !!ll.ok);
-  $('#setup-lead').innerHTML = needLL
+  $('#setup-lead').innerHTML = LH
+    ? '这台电脑先把<b>玲珑</b>登录好就能用：<b>抓到会话就放行。</b>'
+      + '（生活馆版没有云商那一步。）'
+    : needLL
     ? '这台电脑要先把<b>门店的云商账号</b>和<b>玲珑</b>都登录好，才能进主界面。'
       + '<b>不登录、或者登录了但用不了，都不给用。</b>'
     : '这家店（<b>不在串号标识名单里</b>）不走玲珑 —— 只要把<b>云商账号</b>登录好就能用。';
@@ -718,8 +725,9 @@ function showSetup(st) {
   // ⚠ 2026-09-21（用户：「先把**体验店登录需要玲珑**这个跳过一下……我想看看
   //   **体验店的界面**」）—— 玲珑那步没过时，多给一个「先看看界面」。
   //   `preview_available` 由后端给（= 云商那步过了、只差玲珑），前端不自己判。
+  //   生活馆版没有"跳过看界面"这回事（后端恒 False），连段一起藏。
   const pv = $('#setup-step-preview');
-  if (pv) pv.hidden = !(setupState && setupState.preview_available);
+  if (pv) pv.hidden = LH || !(setupState && setupState.preview_available);
 
   mask.hidden = false;
   document.body.classList.add('setup-locked');
@@ -891,6 +899,15 @@ function applyProfile(role) {
     const key = el.dataset.subtab || el.dataset.tab || el.dataset.foot;
     el.hidden = !!pages && !!key && pages.indexOf(key) < 0;
   });
+  // 生活馆等裁剪版：首屏固定的 'sales' 可能已被藏 —— 落到第一个可见页签。
+  // ⚠ boot 里那次 `switchTab('sales')` 在 `loadOverview()`（本函数的调用点）**之前**，
+  //   所以藏完页签时 'sales' 往往正亮着却已经看不见了 ⇒ 首屏一片空白。
+  //   `$$` 返回数组（`Array.from(...)`），`find` 直接用；生活馆唯一一级页是 'tools'。
+  if (pages) {
+    const cur = $$('#sidebar .tab').find((x) => !x.hidden);
+    const active = $('#sidebar .tab.active');
+    if (active && (!cur || active.hidden)) switchTab(cur ? cur.dataset.tab : 'tools');
+  }
   // 「导出 Excel」只给能导的身份（区长 / 平台）—— 用户 2026-09-21：
   //   「区长账号有导出为 excel 功能」「平台也要能导出」「**门店不用导出**」。
   // ⚠ 判据**来自后端**（`role.can`，唯一那一处在 `web._can_for`）——
