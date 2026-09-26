@@ -13,6 +13,12 @@ import os
 
 os.environ.setdefault("CBG_NO_DB_REBUILD", "1")
 
+# ⚠ 本仓库（lifehall 分支）的 `EDITION` 文件写着 lifehall，但**既有 2810 条
+#   测试全是按主包（full）写的** —— 测试默认钉 full，验生活馆行为的测试显式
+#   patch env 再 `edition.reload()`（见 tests/test_edition.py）。
+#   生产机器上没有这个 env，读到的就是 `EDITION` 文件 —— 两条路互不打扰。
+os.environ.setdefault("CBG_EDITION", "full")
+
 
 # ─────────────────────── 测试**不许往项目根写东西** ───────────────────────
 #
