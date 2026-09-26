@@ -401,6 +401,16 @@ def last_digest(root):
     return body if isinstance(body, dict) else None
 
 
+#: 这些版本的更新日志**与生活馆无关**（讲的是被裁掉的功能：四池对账 / POS /
+#: 报量 / 达成 / 计划 / 盘点……）—— 生活馆机器上 `notes_for` 给通用说明、
+#: `versions_after` 直接滤掉，弹窗和推送都不带它们。
+#:
+#: ⚠⚠ 这是 **lifehall 分支私有段**（用户 2026-09-26）：合并回 main 时
+#:   **整段不带**（主包的门店要看这些日志）—— 提交信息里写明，防误合。
+#: ⚠ 新写 lifehall 专属 note 时**不要**加进这张表。
+LIFEHALL_SKIP = ("2.0.0", "2.0.1", "2.1.0", "2.1.1", "2.2.0", "2.2.1")
+
+
 #: 发版号变成 `yy.mmdd.hhmmss` 后，**不必**每打一包手写一条 NOTES 键 ——
 #: 精确对不上时落到这条通用说明（有测试钉「发版号不能弹空窗」）。
 DEFAULT_NOTE = {
@@ -421,6 +431,12 @@ def notes_for(version: str):
     """
     key = str(version)
     if key in NOTES:
+        from . import edition
+        if edition.is_lifehall() and key in LIFEHALL_SKIP:
+            # 生活馆看不到被裁功能的更新日志（用户 2026-09-26）——
+            # 当前版恰是被 skip 的键时给通用说明，别让弹窗空着
+            # （`pending` 拿到 None 就什么都不弹，"更新了却什么都没说"）。
+            return DEFAULT_NOTE
         return NOTES[key]
     if _is_pack_ver(key):
         return DEFAULT_NOTE
@@ -461,6 +477,13 @@ def versions_after(seen: str, current: str):
     """
     lo = _vkey(seen) if seen else (0,)
     hi = _vkey(current)
+    from . import edition
+    if edition.is_lifehall():
+        # 生活馆不带被裁功能那几版的待办（LIFEHALL_SKIP —— lifehall 分支
+        # 私有段，合回 main 时整段不带）。⚠ 新写 lifehall 专属 note
+        # 别加进那张表，否则那条待办在生活馆也发不出去。
+        return [v for v in NOTES
+                if lo < _vkey(v) <= hi and v not in LIFEHALL_SKIP]
     return [v for v in NOTES if lo < _vkey(v) <= hi]
 
 
