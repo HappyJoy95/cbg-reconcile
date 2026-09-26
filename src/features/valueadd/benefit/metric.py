@@ -140,6 +140,24 @@ def is_care(c2: str) -> bool:
     return (c2 or "") == "延保服务"
 
 
+def care_profit_ok(name: str) -> bool:
+    """Care+ **利润**只认这一种行：商品名称含 `Care+` 且含 `/华为/` 路径段。
+
+    用户 2026-09-26 拍板（对齐公司手算表：23/26 家精确相等、误差 5377 → 416）。
+    剔掉的是这几类「延保服务」：
+      * `延保服务/Mate XT 2 | ULTIMATE DESIGN HUAWEI Care+…` —— 899 那种大额，
+        名称里**没有 `/华为/` 段**；
+      * `延保服务/华为/nova 15 /延长服务宝1年` —— 不含 `Care+`；
+      * `延保服务/matepad 11.5寸/HUAWEI Care+ 12月`、电脑周边那类 ——
+        有 `Care+` 但**没有 `/华为/` 段**。
+
+    ⚠ **只收利润**：Care+ **达成件数**（`care_qty`）不收紧 —— 人算的件数里
+      含 Mate XT 那台（永旺东部 达成10 / 利润912=1811−899，就是这么来的）。
+    """
+    n = name or ""
+    return ("Care+" in n) and ("/华为/" in n)
+
+
 def is_phone(c1: str) -> bool:
     return (c1 or "") == PHONE_C1
 
@@ -606,7 +624,7 @@ def region_of(store: str, regions: dict) -> str:
 
 __all__ = [
     "TIERS", "CARE_REBATE", "SELL_TYPES", "DEFAULT_TRACKS", "DEFAULT_REGIONS",
-    "is_online_cust", "is_demo",
+    "is_online_cust", "is_demo", "care_profit_ok",
     "DEFAULT_PEOPLE", "DEFAULT_POOLS", "TOP3_SHARE", "TOP3_GATE",
     "TRACK_ATTACH_PENALTY", "TRACK_ATTACH_FINE", "BONUS_MONTH_K",
     "tier_of", "is_care", "is_phone", "is_meituan", "sell_ok", "rebate_unit",

@@ -261,7 +261,11 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
                     if tgt is None:
                         continue
                     tgt["care_qty"] += r["qty"]
-                    tgt["care_profit"] += r["profit"]
+                    # ⚠ 达成件数照算，**利润**只认「含 Care+ 且含 /华为/」的行
+                    #   （用户 2026-09-26 拍板；Mate XT 那类 899、延长服务宝、
+                    #    matepad Care+ 12月都不算利润）
+                    if metric.care_profit_ok(r["name"]):
+                        tgt["care_profit"] += r["profit"]
                 continue
 
             # —— 无忧六档

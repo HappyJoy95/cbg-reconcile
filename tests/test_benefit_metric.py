@@ -365,6 +365,37 @@ class Test新机口径(unittest.TestCase):
         self.assertEqual(d["stores"][0]["new"], 1,
                          "备注点名顺和汇 → 整行剔，只剩本店零售1台")
 
+    def test_Care利润只算含Care且含华为路径的行(self):
+        """Care+ **利润**只算「商品名称含 `Care+` 且含 `/华为/` 路径」的行
+        —— 用户 2026-09-26 拍板（人算 23/26 对上、误差 5377 → 416）。
+
+        剔掉的四类：Mate XT 那种 899 大额延保（名称里没有 `/华为/` 段）、
+        延长服务宝（不含 `Care+`）、matepad/电脑那类 Care+（没有 `/华为/`）。
+        ⚠ Care+ **达成台量不收紧** —— 人算的件数里含 Mate XT 那台。
+        """
+        rows = [
+            {"一级分类": "手机平板周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/华为/Pura X View/HUAWEI Care+(一年期)",
+             "零售考核毛利": 69, "支付时间": "2026-09-10 10:00:00"},           # 算
+            {"一级分类": "手机平板周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/Mate XT 2 | ULTIMATE DESIGN HUAWEI Care+(一年期)",
+             "零售考核毛利": 899, "支付时间": "2026-09-11 10:00:00"},          # 无 /华为/ → 利润剔
+            {"一级分类": "手机平板周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/华为/nova 15 /延长服务宝1年",
+             "零售考核毛利": 76, "支付时间": "2026-09-12 10:00:00"},           # 无 Care+ → 利润剔
+            {"一级分类": "电脑周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/matepad 11.5寸/HUAWEI Care+ 12月",
+             "零售考核毛利": 64, "支付时间": "2026-09-13 10:00:00"},           # 无 /华为/ → 利润剔
+        ]
+        st = self._compute(rows)["stores"][0]
+        self.assertAlmostEqual(st["care_profit"], 69, places=6,
+                               msg="只有「/华为/ + Care+」那行算利润（修前=1108）")
+        self.assertAlmostEqual(st["care"], 4, places=6,
+                               msg="达成台量不收紧：4 行都算件数（store_row 里叫 care）")
+        # 利润合计跟着 care_profit 走（这批行没有无忧/权益利润）
+        self.assertAlmostEqual(st["profit_total"], 69, places=6,
+                               msg="利润合计 = 权益利润 + Care+利润 + 无忧利润")
+
 
 if __name__ == "__main__":
     unittest.main()
