@@ -174,6 +174,36 @@ class Testtick派发(unittest.TestCase):
                         argv)
         self.assertEqual(timer.once_list(self.root), [], "派发完没删注册")
 
+    def test_不同时刻一起逾期_下一组留到下一跳(self):
+        timer.register_once(self.root, "report", at=NOW - datetime.timedelta(seconds=2),
+                            key="先到")
+        timer.register_once(self.root, "attain", at=NOW - datetime.timedelta(seconds=1),
+                            key="后到")
+
+        first = timer.tick(self.root, spawn=self._spawn, config="c.yaml", now=NOW)
+        self.assertEqual(first["ran"], ["report"])
+        self.assertEqual([x["key"] for x in timer.once_list(self.root)], ["后到"])
+
+        second = timer.tick(self.root, spawn=self._spawn, config="c.yaml", now=NOW,
+                            busy=lambda: False)
+        self.assertEqual(second["ran"], ["attain"])
+        self.assertEqual(timer.once_list(self.root), [])
+        self.assertEqual([a[a.index("--steps") + 1] for a in self.argv],
+                         ["report", "attain"])
+
+    def test_周期任务先派发时_一次性登记仍在(self):
+        timer.register_once(self.root, "report", at=NOW - datetime.timedelta(seconds=1))
+        periodic = {"cmd": "dump", "label": "抓数", "order": 1,
+                    "slot": NOW - datetime.timedelta(seconds=3),
+                    "slot_text": "2026-09-21 09:59", "when_text": "每天 09:59"}
+        with mock.patch.object(timer, "due", return_value=[periodic]):
+            first = timer.tick(self.root, spawn=self._spawn, config="c.yaml", now=NOW)
+        self.assertEqual(first["ran"], ["dump"])
+        self.assertEqual(len(timer.once_list(self.root)), 1)
+        second = timer.tick(self.root, spawn=self._spawn, config="c.yaml", now=NOW,
+                            busy=lambda: False)
+        self.assertEqual(second["ran"], ["report"])
+
     def test_正在跑就不取_登记还在(self):
         """⚠ `tick()` 先看"有没有在跑"再取 —— 所以撞上别的活时**登记不会被吃掉**。"""
         timer.register_once(self.root, "report", at=NOW - datetime.timedelta(seconds=1))

@@ -91,6 +91,18 @@ STEP_FLAGS = _reg_flags()
 MANUAL_STEPS = _reg_default()
 
 
+def requested_steps(raw) -> list:
+    """两层 daily 入口共用的用法校验；执行任何副作用前先调用。"""
+    only = [x.strip() for x in str(raw or "").replace("，", ",").split(",") if x.strip()]
+    if not only:
+        raise ValueError("现在必须点名跑 —— 请给 `--steps`（逗号分隔）")
+    bad = [x for x in only if x not in STEP_FLAGS]
+    if bad:
+        raise ValueError("不认识的步骤：%s（只认 %s）"
+                         % ("、".join(bad), "、".join(STEPS)))
+    return only
+
+
 def _norm_steps(steps):
     """校验 + 按 `STEPS` 的固定顺序去重。
 
@@ -170,25 +182,18 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     # ---- 「就跑这几步」—— **唯一**的入口（`--steps` 必给）
-    only = [x.strip() for x in str(getattr(args, "steps", "") or "").replace("，", ",").split(",")
-            if x.strip()]
-    if not only:
+    try:
+        only = requested_steps(getattr(args, "steps", ""))
+    except ValueError as e:
         # ⚠ **报错，不回落**。回落成"整批"的话，一份老脚本 / 一次手滑
         #   （忘了写 `--steps`）会变成"把一整套又跑一遍"：抓数、推送、上报
         #   全都真做一遍，而**发出去的东西收不回来**。
-        print("❌ 现在必须点名跑 —— 请给 `--steps`（逗号分隔），例如：", file=sys.stderr)
+        print("❌ %s，例如：" % e, file=sys.stderr)
         print("     python -m src.cli -c %s daily --steps %s"
               % (args.config, ",".join(MANUAL_STEPS)), file=sys.stderr)
         print("   认得的步骤：%s" % "、".join(STEPS), file=sys.stderr)
         print("   到点跑哪几步不再需要人来定 —— 内置定时器按**每一步自己的时刻**派发"
               "（控制台「定时器设置」页里能看到每一步的时间）。", file=sys.stderr)
-        return cli.EXIT_USAGE
-    bad = [x for x in only if x not in STEP_FLAGS]
-    if bad:
-        # ⚠ 认不出来**当场报错退出**，不回落成"跑一大套" ——
-        #   回落的话"只在周一算达成"会变成"每天整批跑"，而且日志里一个字都不说。
-        print("❌ 不认识的步骤：%s（只认 %s）" % ("、".join(bad), "、".join(STEPS)),
-              file=sys.stderr)
         return cli.EXIT_USAGE
     # ⚠ **老脚本带来的 `--skip-*`**：先看一眼（下面那圈会把它们全覆写掉）。
     _legacy = sorted(f for c, f in STEP_FLAGS.items()
@@ -402,17 +407,24 @@ def main(argv=None) -> int:
         store = ""
         try:
             _cfg = config_io.load_raw(Path(args.config)) or {}
+            if not _cfg:
+                raise ValueError("门店配置为空或读不到")
             # ⚠⚠ **平台岗 / 办公室不能当成"某家店"** —— 它们的 `erp_store_name`
             #   是「平台岗」（虚拟门店），拿它当过滤条件 ⇒ 一行都匹配不上 ⇒
             #   报「这家店不在目标表里（门店名对不上？）：平台岗」（实测踩过）。
             #   判据用**画像**（`show_all`），别自己去猜名字。
-            _prof = cli.store_profile_of(_cfg) if _cfg else {}
+            _prof = cli.store_profile_of(_cfg)
             # ⚠ `erp_name` 拿不到就**回落到配置里的店名**，**不许悄悄变成"看全区"** ——
             #   那正是用户 2026-09-21 报的那个 bug（门店账号看到全区）。
             store = "" if _prof.get("show_all") else (
                 _prof.get("erp_name") or _cfg.get("erp_store_name") or "")
+            if not _prof.get("show_all") and not store:
+                raise ValueError("没有可确认的本店名称")
         except Exception as e:                                    # noqa: BLE001
-            print(f"  ⚠ 读不出本店名（{type(e).__name__}: {e}）—— 按全区算")
+            print(f"  ❌ 读不出本店名（{type(e).__name__}: {e}）—— 销售达成本次不算，"
+                  "避免把全区当本店", file=sys.stderr)
+            done.append(("销售达成", cli.EXIT_FETCH))
+            return
         res = attain_run(config_path=args.config, root=None, store_filter=store,
                              no_push=args.no_push, no_mail=args.no_mail, emit=print)
         rc5 = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH

@@ -2734,6 +2734,23 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").split(":")[0].strip("[]").lower()
         return host in ("127.0.0.1", "localhost", "::1", "")
 
+    def _write_origin_ok(self) -> bool:
+        """浏览器写请求只收同源；无来源头的本机脚本仍可调用。"""
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        try:
+            sent = urlparse(origin)
+            local = urlparse("http://" + (self.headers.get("Host") or ""))
+            return (sent.scheme == "http" and sent.hostname == local.hostname
+                    and sent.port == local.port and not sent.username
+                    and not sent.password and not sent.path and not sent.query)
+        except ValueError:
+            return False
+
     # ---------------------------------------------------------------- 路由
     def do_GET(self):
         self._dispatch("GET")
@@ -2756,6 +2773,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/") and not self._host_ok():
             return self._json({"error": "只接受来自本机的请求"}, 403)
+        if path.startswith("/api/") and method in ("POST", "PUT", "DELETE") \
+                and not self._write_origin_ok():
+            return self._json({"error": "只接受本机页面的写请求"}, 403)
 
         try:
             if path.startswith("/api/"):

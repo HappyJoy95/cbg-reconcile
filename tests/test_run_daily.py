@@ -390,7 +390,7 @@ class TestCliWiring(unittest.TestCase):
     def test_daily路由到run_daily(self):
         with mock.patch.object(cli, "cmd_daily", return_value=7) as m:
             with mock.patch("sys.argv", ["x"]):
-                rc = cli.main(["daily", "--days-ago", "2"])
+                rc = cli.main(["daily", "--days-ago", "2", "--steps", "dump"])
         self.assertEqual(rc, 7)
         self.assertEqual(m.call_args[0][0].days_ago, 2)
 
@@ -415,13 +415,16 @@ class TestCliWiring(unittest.TestCase):
         return seen["argv"]
 
     def test_cmd_daily翻译成run_daily的argv(self):
-        argv = self._argv_for(["daily", "--days-ago", "2", "--skip-dump"])
-        self.assertEqual(argv, ["-c", cli.DEFAULT_CONFIG, "--days-ago", "2", "--skip-dump"])
+        argv = self._argv_for(["daily", "--days-ago", "2", "--skip-dump",
+                               "--steps", "dump"])
+        self.assertEqual(argv, ["-c", cli.DEFAULT_CONFIG, "--days-ago", "2",
+                                "--steps", "dump", "--skip-dump"])
 
     def test_cmd_daily_把log_file和verbose带过去(self):
         # ⚠ `-v` 是**全局**参数，得写在子命令**前面**（`check` 也是这规矩）：
         #   `cli -v daily` ✅   `cli daily -v` ❌ unrecognized arguments
-        argv = self._argv_for(["-v", "daily", "--log-file", "out/run.log"])
+        argv = self._argv_for(["-v", "daily", "--log-file", "out/run.log",
+                               "--steps", "dump"])
         self.assertIn("--log-file", argv)
         self.assertIn("out/run.log", argv)
         self.assertIn("-v", argv)
@@ -439,8 +442,9 @@ class TestCliWiring(unittest.TestCase):
 
         塞了就会覆盖 `run_daily` 自己的默认值，两处默认值迟早对不上。
         """
-        argv = self._argv_for(["daily"])
-        self.assertEqual(argv, ["-c", cli.DEFAULT_CONFIG, "--days-ago", "1"])
+        argv = self._argv_for(["daily", "--steps", "dump"])
+        self.assertEqual(argv, ["-c", cli.DEFAULT_CONFIG, "--days-ago", "1",
+                                "--steps", "dump"])
 
     def test_daily认得check的每一个参数(self):
         """⚠ 这条是**迁移的保险丝**：老门店 `run.bat` 里写的是 `check`。
@@ -809,3 +813,40 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
                                   + ["-c", str(self.cfg_file), "--no-push", "--no-mail"])
         self.assertEqual(rc, cli.EXIT_OK)
         self.assertEqual(sent, [], "给了 --no-push --no-mail 还发出去了")
+
+
+class Test达成身份读不到不能算全区(unittest.TestCase):
+    def test_配置缺失时不调用达成计算(self):
+        calls = []
+        with mock.patch.object(cli, "load_config", side_effect=SystemExit("配置缺失")), \
+             mock.patch.object(run_daily.config_io, "load_raw", return_value={}), \
+             mock.patch.object(run_daily, "attain_run",
+                               side_effect=lambda **kw: calls.append(kw) or {"ok": True}):
+            rc = run_daily.main(["--steps", "attain"])
+        self.assertEqual(rc, cli.EXIT_FETCH)
+        self.assertEqual(calls, [], "本店未知时不能把空过滤条件送进全区计算")
+
+    def test_明确的平台身份仍能算全区(self):
+        cfg = {"platform": True}
+        calls = []
+        with mock.patch.object(cli, "load_config", return_value=cfg), \
+             mock.patch.object(run_daily.config_io, "load_raw", return_value=cfg), \
+             mock.patch.object(run_daily, "attain_run",
+                               side_effect=lambda **kw: calls.append(kw) or {"ok": True}):
+            rc = run_daily.main(["--steps", "attain"])
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertEqual(calls[0]["store_filter"], "")
+
+
+class TestDaily用法先于副作用(unittest.TestCase):
+    def test_漏填或写错步骤时不做库重建与升级提醒(self):
+        for argv in (["daily"], ["daily", "--steps", "不存在"]):
+            with self.subTest(argv=argv):
+                calls = []
+                with mock.patch.object(cli, "_maybe_rebuild_db",
+                                       side_effect=lambda: calls.append("rebuild")), \
+                     mock.patch.object(cli, "_upgrade_check",
+                                       side_effect=lambda *a: calls.append("upgrade")):
+                    rc = cli.main(argv)
+                self.assertEqual(rc, cli.EXIT_USAGE)
+                self.assertEqual(calls, [], "命令无效时不应先执行副作用")

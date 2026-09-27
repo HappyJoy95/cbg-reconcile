@@ -1013,18 +1013,20 @@ def tick(root=None, *, spawn: Callable[[list], object] = None, config: str = "",
         return {"ran": [], "why": "算到点任务时出错：%s: %s" % (type(e).__name__, e)}
     # ⭐ **一次性注册**也并进这一跳（用户 2026-09-21：「把 timer 的注册加上这种
     #   **单次注册**机制吧，**记录日志**，**执行完删除注册**」）。
-    #   ⚠ `take_due()` **取走即从文件里删掉**（那就是"执行完删除注册"）——
+    #   ⚠ 先看候选，选中本次 slot 后才取走它；其他已到点任务留给下一跳。
     #     所以上面那个"有任务正在跑就等下一跳"的早退特别重要：它保证**没被取走的
     #     登记一定还在**（旁边那趟跑完，下一跳照样会派发它）。
     once_problem = ""
     try:
-        for row in once_mod.take_due(root, now=now):
+        once_mod.take_due(root, now=now, selected=())  # 每一跳照常清掉过期登记
+        for row in once_mod.peek_due(root, now=now):
             when = once_mod._parse(row.get("at") or "") or now
             hits.append({"cmd": row["cmd"], "label": _label_of(row["cmd"]),
                          "order": _order_of(row["cmd"]), "slot": when,
                          "slot_text": row["slot_text"],
                          "when_text": "一次性（%s）" % row.get("at"),
-                         "once": True, "once_key": row.get("key", "")})
+                         "once": True, "once_key": row.get("key", ""),
+                         "once_at": row.get("at", "")})
     except Exception as e:                                     # noqa: BLE001
         once_problem = "算一次性任务时出错：%s: %s" % (type(e).__name__, e)
     if not hits:
@@ -1032,6 +1034,16 @@ def tick(root=None, *, spawn: Callable[[list], object] = None, config: str = "",
     hits.sort(key=lambda x: (x["slot"], x["order"]))
     slot_text = hits[0]["slot_text"]
     group = [h for h in hits if h["slot_text"] == slot_text]
+    selected_once = {(str(h["once_key"]), str(h["once_at"]))
+                     for h in group if h.get("once")}
+    if selected_once:
+        try:
+            taken = once_mod.take_due(root, now=now, selected=selected_once)
+        except Exception as e:                                 # noqa: BLE001
+            return {"ran": [], "why": "取一次性任务时出错：%s: %s"
+                    % (type(e).__name__, e)}
+        if {(str(x.get("key") or ""), str(x.get("at") or "")) for x in taken} != selected_once:
+            return {"ran": [], "why": "一次性任务登记已变化，下一跳重新判定"}
     cmds = [h["cmd"] for h in group]
     argv = wake_argv(root, config, cmds, slot_text)
     info = {"slot": slot_text, "steps": cmds, "argv": argv,

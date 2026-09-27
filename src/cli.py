@@ -1416,7 +1416,14 @@ def cmd_daily(args) -> int:
     把它迁到 `daily` 时，`check` 认得的参数在这里必须都接得住
     （子解析器是超集，见 `daily` 那段）。
     """
-    # ⚠ 一次性库重建（2.1.0）—— 必须在别的动作**之前**，
+    from . import run_daily
+    try:
+        run_daily.requested_steps(getattr(args, "steps", ""))
+    except ValueError as e:
+        print("❌ %s" % e, file=sys.stderr)
+        return EXIT_USAGE
+
+    # ⚠ 一次性库重建（2.1.0）—— 必须在其他有效命令的动作**之前**，
     #   因为它会把库改名，后面所有读库的步骤都得看到"新世界"。
     _maybe_rebuild_db()
 
@@ -1425,7 +1432,6 @@ def cmd_daily(args) -> int:
     # （光靠控制台弹窗不够 —— 门店的日常是"它自己跑，我不看"。）
     _upgrade_check(args.config)
 
-    from . import run_daily
     argv = ["-c", args.config]
     # argparse 默认值 vs "用户真给了" —— 空串/None 表示没给，别把默认值当成用户意图
     # 硬塞过去（塞了会覆盖 `run_daily` 自己的默认，两处默认值迟早对不上）。

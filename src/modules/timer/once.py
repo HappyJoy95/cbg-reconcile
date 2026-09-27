@@ -191,7 +191,23 @@ def tasks(root=None, now=None) -> List[dict]:
     return out
 
 
-def take_due(root=None, now=None) -> List[dict]:
+def peek_due(root=None, now=None) -> List[dict]:
+    """只看已到点且未过期的登记；由派发方先选本次要跑的时刻组。"""
+    now = now or datetime.datetime.now()
+    grace = datetime.timedelta(hours=ONCE_GRACE_HOURS)
+    rows = []
+    for x in load(root):
+        when = _parse(x.get("at") or "")
+        if when is None or when > now or now - when > grace:
+            continue
+        row = dict(x)
+        row["late"] = int((now - when).total_seconds())
+        row["slot_text"] = "once:" + str(x.get("at") or "")
+        rows.append(row)
+    return rows
+
+
+def take_due(root=None, now=None, selected=None) -> List[dict]:
     """**取走到点的那些** —— ⚠ **取走即从文件里删掉**（用户要的"执行完删除注册"）。
 
     为什么在"取"的时候就删，而不是等子进程跑完：
@@ -204,10 +220,12 @@ def take_due(root=None, now=None) -> List[dict]:
 
     过期（到点超过 `ONCE_GRACE_HOURS` 小时）的**不返回**，直接作废 + 记一笔为什么。
 
-    ⚠ 只有到点的那几条会被删；没到点的**原样留着**（重启也不会丢）。
+    `selected` 给派发方传本次选中的 `(key, at)`；没选中的到点登记留给下一跳。
+    不传时保留原接口行为：取走全部到点登记。过期登记每次都清理。
     """
     now = now or datetime.datetime.now()
     items = load(root)
+    chosen = None if selected is None else set(selected)
     grace = datetime.timedelta(hours=ONCE_GRACE_HOURS)
     due, keep, expired = [], [], []
     for x in items:
@@ -222,6 +240,10 @@ def take_due(root=None, now=None) -> List[dict]:
                             % (x.get("at"), int((now - when).total_seconds() // 3600),
                                ONCE_GRACE_HOURS)))
         else:
+            if chosen is not None and (str(x.get("key") or ""),
+                                       str(x.get("at") or "")) not in chosen:
+                keep.append(x)
+                continue
             late = int((now - when).total_seconds())
             row = dict(x)
             row["late"] = late
@@ -252,4 +274,4 @@ def take_due(root=None, now=None) -> List[dict]:
 
 
 __all__ = ["REL", "KIND", "ONCE_GRACE_HOURS", "path", "load", "register", "cancel",
-           "clear", "seconds_left", "tasks", "take_due"]
+           "clear", "seconds_left", "tasks", "peek_due", "take_due"]

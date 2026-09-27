@@ -422,21 +422,32 @@ def run(root=None, emit=None) -> dict:
     res = health.begin("benefit", note="无忧会员权益", root=root)
     try:
         d = load(root, force=True)
+        if not d.get("ok"):
+            why = str(d.get("why") or "权益数据没算成")
+            res.done(ok=False, why=why)
+            if emit:
+                emit("  失败：" + why)
+            return {"ok": False, "why": why, "rows": 0}
         out = root / "out"
         out.mkdir(parents=True, exist_ok=True)
         payload = dict(d)
         payload["_saved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-        (out / "benefit.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=1, default=str),
-            encoding="utf-8")
-        ok = bool(d.get("ok"))
-        res.done(ok=ok, rows=len(d.get("stores") or []),
-                 why="" if ok else str(d.get("why") or ""))
+        tmp = out / "benefit.json.tmp"
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str),
+                           encoding="utf-8")
+            tmp.replace(out / "benefit.json")
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        res.done(ok=True, rows=len(d.get("stores") or []))
         if emit:
             emit("  门店 %d · 区域 %d · 人员 %d（名册=%s） · 快照 out/benefit.json" % (
                 len(d.get("stores") or []), len(d.get("regions") or []),
                 len(d.get("people") or []), d.get("roster_source") or "?"))
-        return {"ok": ok, "why": d.get("why") or "", "rows": len(d.get("stores") or [])}
+        return {"ok": True, "why": "", "rows": len(d.get("stores") or [])}
     except Exception as e:
         res.done(ok=False, why=str(e))
         if emit:
