@@ -49,7 +49,7 @@ APP_NAME = "盛联门店数据平台"
 #
 # 自更新：`selfupdate` 读远端 `version.py` 的 `VERSION` 与本地比大小。
 # 时间戳定宽 ⇒ `parse_version` 按点拆数字即可比（26.0923.101530）。
-VERSION = "26.0926.180135"           # 发版号；正式打包会改成 yy.mmdd.hhmmss
+VERSION = "26.0927.125725"           # 发版号；正式打包会改成 yy.mmdd.hhmmss
                             # 2.2.0：**原按 3.0.0 规划的那轮大改版，号用户 2026-09-23
                             #        定为 2.2.0**（beta 包要用对号，见 AGENTS 发版节：
                             #        想打 vX.Y.Z-beta 的前提是 VERSION 已是 X.Y.Z）。
