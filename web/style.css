@@ -4,6 +4,22 @@
 
 * { box-sizing: border-box; }
 
+/* lifehall：三个工具平铺为一级入口；左下角只留主题与玲珑授权。 */
+.nav-lifehall { display: none; }
+body.lifehall-edition .nav-lifehall { display: block; }
+body.lifehall-edition .nav-item[data-tab="tools"]:not(.nav-lifehall) { display: none; }
+body.lifehall-edition #side-foot [data-foot="account"],
+body.lifehall-edition #side-foot [data-foot="update"],
+body.lifehall-edition #side-foot [data-foot="general"],
+body.lifehall-edition #side-foot [data-foot="stores"],
+body.lifehall-edition #side-foot [data-foot="scheduler"] { display: none; }
+.lifehall-weather-row { display: none; }
+body.lifehall-edition .lifehall-weather-row {
+  display: block; padding: 5px 6px 2px; color: var(--muted);
+  font-size: 10.5px; line-height: 1.35; white-space: nowrap;
+}
+#lifehall-weather[hidden] { display: none; }
+
 body {
   margin: 0;
   background: var(--bg);

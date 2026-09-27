@@ -75,6 +75,20 @@ class Test注册表收窄(unittest.TestCase):
         # 生活馆只有"门店"一种身份，全部放行（"" = 都看得见）
         self.assertTrue(all(v == "" for v in rules.values()))
 
+    def test_侧栏只保留小工具入口(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        side = html.split('id="side-foot"', 1)[1].split("</div>", 1)[0]
+        css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+        self.assertIn('body.lifehall-edition .nav-lifehall', css)
+        self.assertIn('data-foot="theme"', side)
+        self.assertIn('data-foot="linglong"', side)
+        self.assertTrue({"tools", "pricetag", "claim-pending",
+                         "theme", "linglong"}.issubset(edition.LIFEHALL_PAGES))
+        self.assertNotIn("badge", edition.LIFEHALL_PAGES)
+        self.assertIn('id="lifehall-weather"', html)
+        for key in ("pricetag", "claim-pending"):
+            self.assertIn('data-direct-subtab="%s"' % key, html)
+
     def test_刷新待领走dump(self):
         import src.web as web
         steps = web._refresh_steps()

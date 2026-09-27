@@ -106,14 +106,18 @@ mkdir -p "${STAGE}" "${DIST}"
 #   门店装了这种包、下一次自更新就被"清理旧文件"当成残留删掉（新版里没有它），
 #   等于发了一个**短命包**。
 #   "发布必须来自已提交状态"本来就是发版纪律，这里只是把它变成机器拦得住的。
-if command -v git >/dev/null 2>&1 && [ -d "${ROOT}/.git" ]; then
+if command -v git >/dev/null 2>&1 && git -C "${ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   _dirty="$(git -C "${ROOT}" status --porcelain 2>/dev/null || true)"
   if [ -n "${_dirty}" ]; then
-    echo "    ✗ 工作区不干净 —— 打出来的包会跟仓库里的不一致："
+    echo "    ! 工作区不干净 —— 打出来的包会跟远端仓库不一致："
     echo "${_dirty}" | sed 's/^/       /'
-    echo "    先 commit（或 stash）再打包；确要跳过就设 CBG_ALLOW_DIRTY=1。"
-    [ "${CBG_ALLOW_DIRTY:-}" = "1" ] || exit 1
-    echo "    （CBG_ALLOW_DIRTY=1，继续打包 —— 这份包**只能自己测**，别发门店）"
+    if [ -n "${BETA_N}" ]; then
+      echo "    beta 测试包可供门店手工安装测试；测试期间不要执行自更新。"
+    else
+      echo "    正式包先 commit（或 stash）再打；确要跳过就设 CBG_ALLOW_DIRTY=1。"
+      [ "${CBG_ALLOW_DIRTY:-}" = "1" ] || exit 1
+      echo "    （CBG_ALLOW_DIRTY=1，继续打包 —— 这份包只能自己测，别发门店）"
+    fi
   fi
 fi
 
@@ -153,7 +157,7 @@ rsync -a \
   --exclude '*.pyc' \
   --exclude '.pytest_cache/' \
   --exclude '.DS_Store' \
-  --exclude '.git/' \
+  --exclude '.git' \
   --exclude 'run.sh' \
   --exclude 'run.bat' \
   --exclude 'run-now.sh' \
@@ -190,7 +194,9 @@ rsync -a \
 # 仓库/git 里始终没有它。安装时 `bootstrap._seed_central_mail()` 会把它播进
 # 门店的 `.secrets/mail.env`（已有键不覆盖），自更新不会动 `.secrets/` ⇒ 一直有效。
 CENTRAL_SRC="${ROOT}/.secrets/mail.env"
-if grep -q '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" 2>/dev/null; then
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "  · 生活馆版不使用邮件推送，跳过中台邮箱授权码"
+elif grep -q '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" 2>/dev/null; then
   grep '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" > "${STAGE}/central-mail.env"
   echo "  · 已把中台邮箱授权码塞进包（之后门店一直默认用它）"
 else
@@ -224,7 +230,9 @@ if [ -e "${ROOT}/mail-key.json" ]; then
   exit 1
 fi
 KEY_SRC="${ROOT}/.secrets/mail-key.json"
-if [ -f "${KEY_SRC}" ]; then
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "  · 生活馆版不使用邮件附件，跳过邮件密钥"
+elif [ -f "${KEY_SRC}" ]; then
   cp "${KEY_SRC}" "${STAGE}/mail-key.json"
   _kid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("current","?"))' \
           "${KEY_SRC}" 2>/dev/null || echo '?')"

@@ -129,23 +129,25 @@ def state(cfg: dict, root=None) -> dict:
     """
     from ...paths import ROOT
     from ...session import CbgAuthError, CbgSession
+    from ... import edition
     root = Path(root) if root else ROOT
     cfg = cfg or {}
     acc = accounts(cfg, root)
     items = []
 
-    # ① 云商：凭据齐不齐（**两套账号任一可用就算通**）
-    erp_acc = acc.get("erp") or {}
-    st_acc = acc.get("erp_store") or {}
-    usables = [n for n, a in (("主账号", erp_acc), ("门店账号", st_acc))
-               if a.get("has_password") or a.get("has_token") or a.get("builtin")]
-    erp_ok = bool(usables)
-    items.append(_item("erp", "云商账号", erp_ok,
-                       why="" if erp_ok else "没有云商凭据（设置页填一次就行）",
-                       need="取不到云商销售/库存，池C、池D 会空着",
-                       detail="%s｜%s" % (erp_acc.get("user") or "—",
-                                          st_acc.get("user") or "—"),
-                       usable=usables))
+    if not edition.is_lifehall():
+        # ① 云商：凭据齐不齐（**两套账号任一可用就算通**）
+        erp_acc = acc.get("erp") or {}
+        st_acc = acc.get("erp_store") or {}
+        usables = [n for n, a in (("主账号", erp_acc), ("门店账号", st_acc))
+                   if a.get("has_password") or a.get("has_token") or a.get("builtin")]
+        erp_ok = bool(usables)
+        items.append(_item("erp", "云商账号", erp_ok,
+                           why="" if erp_ok else "没有云商凭据（设置页填一次就行）",
+                           need="取不到云商销售/库存，池C、池D 会空着",
+                           detail="%s｜%s" % (erp_acc.get("user") or "—",
+                                              st_acc.get("user") or "—"),
+                           usable=usables))
 
     # ② 华为会话：文件在不在、鲜不鲜
     sp = session_path(cfg, root)

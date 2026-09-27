@@ -500,7 +500,7 @@ class Test玲珑数据源(unittest.TestCase):
                 consumer_guide_name TEXT, doc_create_time TEXT, remark TEXT);
             CREATE TABLE order_lines (
                 document_no TEXT NOT NULL, line_no INTEGER NOT NULL,
-                sn TEXT, item_name TEXT, quantity REAL,
+                sn TEXT, item_name TEXT, quantity REAL, category_id TEXT,
                 PRIMARY KEY (document_no, line_no));
             CREATE TABLE returns (document_no TEXT, related_doc_no TEXT);
         """)
@@ -520,7 +520,9 @@ class Test玲珑数据源(unittest.TestCase):
         for doc, store, item, sn, qty, ts, ret in rows:
             conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?)",
                          (doc, "SCN1", store, "已完成", 2, ret, "张三", ts, ""))
-            conn.execute("INSERT INTO order_lines VALUES (?,?,?,?,?)",
+            conn.execute("INSERT INTO order_lines"
+                         " (document_no, line_no, sn, item_name, quantity)"
+                         " VALUES (?,?,?,?,?)",
                          (doc, 1, sn, item, qty))
         conn.commit()
         conn.close()
@@ -531,6 +533,36 @@ class Test玲珑数据源(unittest.TestCase):
             self.db, "2026-09-01", "2026-09-30")
         names = [(r["doc"], r["sn"]) for r in out]
         self.assertEqual(names, [("D1", "1234567890ABCDEF")])
+
+    def test_玲珑真机名称和SN入待领_礼品串号不入(self):
+        from src.features.tools.claim.pending import compute
+        conn = sqlite3.connect(str(self.db))
+        for doc in ("D6", "D7", "D8"):
+            conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?)",
+                         (doc, "SCN1", "店A", "已完成", 2, 0, "张三",
+                          "2026-09-15 12:00:00", ""))
+        conn.executemany(
+            "INSERT INTO order_lines VALUES (?,?,?,?,?,?)", [
+                ("D6", 1, "A" * 43, "礼品-定制-Wooki平板包", 1,
+                 "ISRP12000001"),
+                ("D7", 1, "1234567890ABCDE0", "礼品-定制-Wooki平板包", 1,
+                 "ISRP12000001"),
+                ("D8", 1, "1234567890ABCDE1",
+                 "HUAWEI MatePad Air 12 WIFI 12GB+256GB", 1,
+                 "CMCG10000018"),
+            ])
+        conn.commit()
+        conn.close()
+        sales = compute.load_sales_linglong(
+            self.db, "2026-09-01", "2026-09-30")
+        activity = {"id": "wooki", "title": "Wooki 权益", "benefit": "Care+",
+                    "match": ["Wooki", "MatePad Air 12"],
+                    "start": "2026-09-01", "end": "2026-09-30"}
+        pending, _ = compute.build_rows(sales, [activity], {})
+        self.assertEqual([(r["doc"], r["name"], r["claim_sn"])
+                          for r in pending],
+                         [("D8", "HUAWEI MatePad Air 12 WIFI 12GB+256GB",
+                           "1234567890ABCDE1")])
 
     def test_load走玲珑分支(self):
         from src.features.tools.claim.pending import compute

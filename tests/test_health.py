@@ -11,6 +11,7 @@
 import sqlite3
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -150,6 +151,26 @@ class Test启动自检分级(unittest.TestCase):
         self.assertTrue(any("自己出错" in i["why"] for i in st["items"]),
                         "炸掉的那项要退化成一条警告，而不是消失")
         self.assertFalse(st["blocking"], "退化成警告 ⇒ 不该拦启动")
+
+
+class Test生活馆登录自检(unittest.TestCase):
+    def test_不把云商账号列为待办(self):
+        from src import edition
+        old = os.environ.get("CBG_EDITION")
+        os.environ["CBG_EDITION"] = "lifehall"
+        edition.reload()
+        self.addCleanup(edition.reload)  # 后执行：先恢复环境，再清缓存
+        self.addCleanup(lambda: (os.environ.__setitem__("CBG_EDITION", old)
+                                 if old is not None else os.environ.pop("CBG_EDITION", None)))
+        from src.modules import auth
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(auth, "accounts", return_value={
+                        "erp": {"why": "生活馆版没有云商"},
+                        "erp_store": {"why": "生活馆版没有云商"},
+                        "cbg": {"ready": True},
+                    }):
+            st = auth.state({}, d)
+        self.assertNotIn("erp", [item["key"] for item in st["items"]])
 
 
 class Test结构那项先修再判(unittest.TestCase):

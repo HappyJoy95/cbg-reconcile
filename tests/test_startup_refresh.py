@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -161,3 +162,15 @@ class Test人员刷新走业务模块(_Base):
         with mock.patch.object(app_staff, "staff_state",
                                lambda *a, **k: {"ok": False, "error": "还没认出这家店"}):
             self.assertIn("跳过", startup._refresh_roster(self.app))
+
+
+class Test生活馆启动刷新(unittest.TestCase):
+    def test_生活馆不注册云商人员刷新(self):
+        from src import edition
+        old = os.environ.get("CBG_EDITION")
+        os.environ["CBG_EDITION"] = "lifehall"
+        edition.reload()
+        self.addCleanup(edition.reload)  # 后执行：先恢复环境，再清缓存
+        self.addCleanup(lambda: (os.environ.__setitem__("CBG_EDITION", old)
+                                 if old is not None else os.environ.pop("CBG_EDITION", None)))
+        self.assertEqual([name for name, _ in startup.tasks()], ["检查更新"])

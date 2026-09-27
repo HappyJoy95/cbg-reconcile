@@ -212,12 +212,14 @@ function switchTab(tab, subtab) {
   const home = subs[0] || '';
   const known = subs.slice();
   subtab = subtab && known.indexOf(subtab) >= 0 ? subtab : home;
-  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab
+    && (!x.dataset.directSubtab || x.dataset.directSubtab === subtab)));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + tab));
   // 盘点已拆 iframe，正常跟 main 一起滚；不再需要 inv-open 收底部 padding
   // 小工具：**仅价签/工牌 iframe** 满高（tools-frame-mode）；
   //   权益领取走普通文档流，否则卡片下面会空一大截（2026-09-23）。
   const mainEl = document.querySelector('main');
+  document.body.classList.toggle('lifehall-edition', !!(setupState && setupState.lifehall));
   mainEl?.classList.toggle('tools-open', tab === 'tools');
   mainEl?.classList.toggle(
     'tools-frame-mode',
@@ -328,6 +330,9 @@ $$('.nav-item').forEach((item) => {
   item.addEventListener('mouseleave', () => scheduleCloseNavMenus());
   // ⚠ 光靠 hover 的话**触屏机上一辈子打不开** —— 聚焦也展开一份
   item.addEventListener('focusin', () => openNavMenu(item));
+  const direct = item.querySelector('[data-direct-subtab]');
+  if (direct) direct.addEventListener('click', () =>
+    switchTab(item.dataset.tab, direct.dataset.directSubtab));
   Array.from(item.querySelectorAll('[data-subtab]')).forEach((b) =>
     b.addEventListener('click', () => switchTab(item.dataset.tab, b.dataset.subtab)));
 });
@@ -823,6 +828,8 @@ function hideSetup() {
 async function checkSetup() {
   let st;
   try { st = await api('/api/setup'); } catch (e) { return true; }  // 读不到就别拦着人
+  if (st) setupState = st;
+  document.body.classList.toggle('lifehall-edition', !!(st && st.lifehall));
   if (st && st.ready) { hideSetup(); return true; }
   showSetup(st);
   return false;
@@ -7421,7 +7428,7 @@ function ipGeo() {
     'http://ip-api.com/json/?fields=status,lat,lon&lang=zh-CN', 6000)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error('ip http'))))
     .then((d) => {
-      if (!d || d.status !== 'fail' || d.lat == null) throw new Error('ip empty');
+      if (!d || d.status !== 'success' || d.lat == null) throw new Error('ip empty');
       return { lat: d.lat, lng: d.lon };
     });
 }
@@ -7447,6 +7454,7 @@ function resolveGeo() {
 
 async function loadFootWeather() {
   const el = $('#foot-weather');
+  const lifehallEl = $('#lifehall-weather');
   try {
     const geo = await resolveGeo();
     const url = 'https://api.open-meteo.com/v1/forecast'
@@ -7472,12 +7480,23 @@ async function loadFootWeather() {
       el.textContent = (temp == null ? '' : temp + '° ') + cond;
       el.title = '天气 · 日出 ' + fmtHM(themeSunrise) + ' · 日落 ' + fmtHM(themeSunset);
     }
+    if (lifehallEl) {
+      lifehallEl.hidden = false;
+      lifehallEl.textContent = (temp == null ? '' : temp + '° ') + cond
+        + ' · 日出 ' + fmtHM(themeSunrise) + ' · 日落 ' + fmtHM(themeSunset);
+      lifehallEl.title = '天气 · 日出 ' + fmtHM(themeSunrise) + ' · 日落 ' + fmtHM(themeSunset);
+    }
     // 拿到真实日出日落后再按映射判一次（可能刚跨过边界）
     if (themePrefAuto()) applyThemeSchedule();
     else renderThemeAutoStatus();
   } catch (e) {
     // 天气挂了：主题仍可用（时段兜底）；侧栏不硬塞错误字
     if (el) { el.hidden = true; el.textContent = ''; }
+    if (lifehallEl) {
+      lifehallEl.hidden = false;
+      lifehallEl.textContent = '天气暂不可用 · 日出 --:-- · 日落 --:--';
+      lifehallEl.title = '天气服务暂不可用；联网后自动显示天气与日出日落时间';
+    }
     renderThemeAutoStatus(
       '天气暂不可用（' + (e && e.message ? e.message : e) + '），日夜改按本地时段判断。');
   }

@@ -29,8 +29,8 @@ VALID = ("full", "lifehall")
 #: 生活馆版**保留**的页面 key（`PAGE_RULES` 的键 = HTML 的 `data-tab/subtab/foot`）。
 #: ⚠ 不在这张表里的页面在生活馆包里**连接口一起 404**（见 `web.LIFEHALL_GONE`）。
 LIFEHALL_PAGES = (
-    "tools", "pricetag", "badge", "claim-pending",        # 三个工具 + 一级容器
-    "account", "update", "general", "theme", "linglong",  # 左下角（定时器/数据交换不要）
+    "tools", "pricetag", "claim-pending",                 # 价签 / 权益领取
+    "theme", "linglong",                                   # 左下角保留外观与玲珑授权
 )
 
 #: 生活馆版保留的**能力层步骤**：抓玲珑（待领清单的数据源）+ 自动更新。

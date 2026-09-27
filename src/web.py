@@ -1350,6 +1350,23 @@ class App:
         def add(label, value, kind=""):
             rows.append({"label": label, "value": value, "kind": kind})
 
+        if _edition.is_lifehall():
+            # Lifehall 没有云商、推送和定时器；悬浮状态只显示玲珑侧信息。
+            # 不要顺路计算通用版 profile（会读云商登录人），也不加载 mailer/
+            # wecom/timer 状态，否则被裁掉的设置会在这里报错。
+            st = _setup_state_lifehall(self)
+            profile = st.get("profile") or {}
+            name = str(profile.get("erp_name") or "").strip()
+            if name:
+                add("门店名称", name)
+            code = str(profile.get("store_code") or v.get("store_code") or "").strip()
+            if code:
+                add("华为门店编码", code)
+            sess = st.get("linglong") or {}
+            add("玲珑会话", "已导入" if sess.get("ok") else "未导入",
+                "ok" if sess.get("ok") else "bad")
+            return {"rows": rows}
+
         # ---- 这台电脑是哪家店
         erp_name = (v.get("erp_store_name") or "").strip()
         add("门店名称", erp_name or "未配置", "" if erp_name else "bad")
@@ -1814,7 +1831,7 @@ class App:
         }
 
     def claim_pending(self) -> dict:
-        """「小工具 · 权益领取 · 待领清单」—— erp_sales 匹配 + 状态 join + **滤店**。
+        """「小工具 · 权益领取 · 待领清单」—— 按版本读销售池、合状态并滤店。
 
         ⚠ 门禁：**登录**（接口不在 `SETUP_ALLOW`）+ **`role_scope()` 滤店**
           —— 门店账号只能读到本店；区长所辖；平台全部（坑 18）。

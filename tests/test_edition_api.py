@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -137,6 +138,29 @@ class Test定时器按版(unittest.TestCase):
             got = timer.set_order(Path(d), ["dump", "autoupdate"])
         self.assertTrue(got["ok"])
         self.assertEqual(got["order"][:2], ["dump", "autoupdate"])
+
+
+class Test生活馆悬浮状态(unittest.TestCase):
+    def test_状态抽屉不加载云商推送和定时器(self):
+        restore = _switch_to("lifehall")
+        self.addCleanup(restore)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "config").mkdir()
+            cfg = root / "config" / "store-X.yaml"
+            cfg.write_text('store_code: "X123"\n', encoding="utf-8")
+            app = web.App(root, str(cfg))
+            with mock.patch.object(web.mailer, "describe_mail",
+                                   side_effect=AssertionError("不应读取邮件配置")), \
+                    mock.patch.object(web.wecom, "describe_wecom",
+                                      side_effect=AssertionError("不应读取企微配置")), \
+                    mock.patch.object(web.timer, "wakes",
+                                      side_effect=AssertionError("生活馆没有定时执行")):
+                rows = app.status_brief()["rows"]
+        labels = [row["label"] for row in rows]
+        self.assertNotIn("推送通道", labels)
+        self.assertNotIn("上次自动跑", labels)
+        self.assertIn("玲珑会话", labels)
 
 
 if __name__ == "__main__":

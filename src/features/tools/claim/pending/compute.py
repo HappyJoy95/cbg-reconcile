@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""待领清单 —— 查本地 `erp_sales`，按活动机型×日期匹配，并 join 领取状态。
+"""待领清单 —— 按版本读取本地销售池，匹配活动机型、日期与领取状态。
 
-⚠ **只读 erp_sales**（fetch 落的），不读桌面 Excel。
-⚠ 退货行不进待领；无串号行也列（`status_key` 回落 row:…）。
+正式版读 `erp_sales`，生活馆版读 `orders` × `order_lines`；均只读本地库。
+⚠ 退货行不进待领；正式版可列无串号行，生活馆版只列有真 SN 的整机。
 范围：调用方传 `stores=`（来自 `role_scope()`）。
 """
 
@@ -89,6 +89,18 @@ SN_SQL_CANDIDATES = (
     "Imei", "IMEI1", "Imei2", "Imei3",
 )
 NEVER_AS_SN = frozenset({"串号标识", "OldFlag", "old_flag", "发票号码", "单号"})
+
+# 玲珑销售明细的 category_id 是内部编码。礼品等行即使填了串号、
+# 商品名碰巧含活动机型，也不能成为待领商品；未知新编码仍交给机型与真 SN 判定。
+LINGLONG_NON_DEVICE_CATEGORIES = frozenset({
+    "ISRP12000001",          # 礼品
+    "CMCG10000040",          # Care+
+    "CMCG10000034",          # 移动电源
+    "CMCG10000024",          # 路由器
+    "CMCG10000140",          # 手机壳
+    "CMCG10000037",          # 体脂秤
+    "HWExclusiveAccessories",  # 专属配件
+})
 
 
 def _select_sql(conn: sqlite3.Connection) -> str:
@@ -189,36 +201,42 @@ def load_sales_linglong(db: Path, start: str, end: str) -> List[dict]:
     * 窗口：`doc_create_time`（≈ 支付时间）在 [start, end+1)；
     * 有效单：`pay_status=2`（已付）且 `return_status=0`，
       且单号不在 `returns.related_doc_no` 里（部分退货的单）；
-    * **整机**：`order_lines.sn <> ''` —— 玲珑侧配件无 SN（dump.py 文件头写明），
-      这比商品名前缀可靠；商品名过滤仍走 `metric` 的硬排除 + 前缀兜底；
+    * **整机**：排除已知礼品/服务/配件品类，且必须有可用的真 SN。
+      礼品的 43 位标识虽然非空，却不能拿去领取；
     * 退货单不进待领（权益跟着原单）—— 有效单过滤已挡。
 
-    ⚠ c1/c2 传空：`category_id` 是内部编码，进不了 DEVICE_C1 中文白名单；
-      `match_activities` 对空品类只看商品名 + 硬排除。**真机数据核对点**
-      （2026-09-26 设计 §6 既定风险，Step 0 核实：本机唯一的 order_lines 库
-      `in/packages/cbg-SCN231409-2026-09-21.db` 是 **0 行**，商品名格式未见真数据）：
-      若玲珑商品名不带 `手机/ 华为 HUAWEI ` 等前缀，is_device_row 的名字
-      兜底会漏 —— 到时候补前缀，别改 erp 侧共用逻辑。
+    `category_id` 不直接传给中文品类白名单；机型命中仍看商品名称。
+    未知新编码保留真 SN + 机型匹配的机会，避免新品静默消失。
     """
     end_ex = (datetime.date.fromisoformat(end)
               + datetime.timedelta(days=1)).isoformat()
     conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
     try:
         conn.row_factory = sqlite3.Row
+        line_cols = {str(col[1]) for col in conn.execute(
+            "PRAGMA table_info(order_lines)")}
+        category_sql = ("l.category_id AS category_id" if "category_id" in line_cols
+                        else "'' AS category_id")
         sql = (
             "SELECT o.document_no AS doc, o.store_name AS store,"
             " o.consumer_guide_name AS who, o.doc_create_time AS ts,"
-            " l.item_name AS name, l.quantity AS qty, l.sn AS sn"
+            " l.item_name AS name, l.quantity AS qty, l.sn AS sn, %s"
             " FROM orders o JOIN order_lines l"
             "   ON l.document_no = o.document_no"
             " WHERE o.doc_create_time >= ? AND o.doc_create_time < ?"
             "   AND o.pay_status = 2 AND o.return_status = 0"
             "   AND l.sn <> ''"
             "   AND NOT EXISTS (SELECT 1 FROM returns r"
-            "                    WHERE r.related_doc_no = o.document_no)")
+            "                    WHERE r.related_doc_no = o.document_no)"
+        ) % category_sql
         out = []
         for r in conn.execute(sql, (start, end_ex)):
-            sn = str(r["sn"] or "").strip()
+            category_id = str(r["category_id"] or "").strip()
+            if category_id in LINGLONG_NON_DEVICE_CATEGORIES:
+                continue
+            sn = metric.pick_true_sn(r["sn"])
+            if not sn:
+                continue
             if metric.hard_excluded(r["name"] or ""):
                 continue
             out.append({
@@ -227,7 +245,7 @@ def load_sales_linglong(db: Path, start: str, end: str) -> List[dict]:
                 "name": r["name"] or "", "qty": _f(r["qty"]),
                 "ts": r["ts"] or "", "doc": r["doc"] or "",
                 "sn": sn,
-                "claim_sn": sn if metric.pick_true_sn(sn) else "",
+                "claim_sn": sn,
                 "sn_kind": metric.sn_kind(sn),
                 "c1": "", "c2": "",          # 内部编码进不了中文白名单（见 docstring）
                 "note": "",
@@ -330,7 +348,7 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
                      if r.get("sn_kind") == "imei" and r.get("claim_sn"))
     if lifehall:
         note = ("源：玲珑销售单（orders × order_lines）。匹配 = 商品名命中活动机型"
-                " + 订单时间在赠送期内 + **有串号的整机**（配件/手提袋无串号不进）；"
+                " + 订单时间在赠送期内 + 有效设备 SN；排除礼品、服务、配件品类，"
                 "退货不进待领。")
     else:
         note = ("源：仅 erp_sales（SQLite）。匹配 = **整机品类** + 商品名命中活动机型 + 支付日在赠送期内；"
