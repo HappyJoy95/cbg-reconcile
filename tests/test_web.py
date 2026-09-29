@@ -2317,6 +2317,39 @@ class Test历史记录接口(unittest.TestCase):
                 self.assertNotEqual(code, 200, "%s 竟然被受理了" % method)
 
 
+class _FrozenTimerClock:
+    """`src.modules.timer` 眼里的 `datetime` —— `now()` 钉在 `FROZEN`（上午 10:00）。
+
+    ⚠ 为什么要有它：`/api/timer` 的 `next_run` **走真实时钟**（那层没有 now 注入口，
+      `timer.next_run()` 自己 `datetime.datetime.now()`），而「下一次」的断言写的是
+      "21:00 那一批（dump…）"。每天 **21:00–21:30** 这半小时，最近的一趟是
+      「数据交换」（21:15 上报 / 21:30 收取）⇒ 断言**必红** —— 2026-09-29 21:07
+      跑三头当场抓到（main 同时段一样红：是断言跟钟点耦合，不是功能坏了）。
+    ⚠ 只换 `src.modules.timer` 包里 `import datetime` 那**一个绑定**：
+      `when.py` / `once.py` 各有自己的 import（when 在这条路径上不读 now、
+      once 根本不在 GET /api/timer 上）—— 不动全局 `datetime` 模块，
+      `runlog` 和测试自己照常用真实时间。
+    """
+
+    FROZEN = datetime.datetime(2026, 9, 29, 10, 0, 0)
+
+    class _DT(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            at = _FrozenTimerClock.FROZEN
+            return at if tz is None else at.replace(tzinfo=tz)
+
+    def __getattr__(self, name):
+        if name == "datetime":
+            return _FrozenTimerClock._DT
+        return getattr(datetime, name)
+
+
+def _freeze_timer_clock():
+    """把 `src.modules.timer.datetime` 换成 `_FrozenTimerClock`（`addCleanup` 停）。"""
+    return mock.patch("src.modules.timer.datetime", _FrozenTimerClock())
+
+
 class Test定时器的那一屏(unittest.TestCase):
     """用户 2026-09-20：「加一个**定时器执行日志**，记录什么时间唤醒了什么，成功了没。
     然后定时器设置页面**最上面大字**写着**下一次执行的是啥，什么时间**。
@@ -2344,6 +2377,10 @@ class Test定时器的那一屏(unittest.TestCase):
         conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         conn.close()
+        # ⚠ 「下一次」的断言跟钟点耦合（21:00–21:30 那半小时必红，见 _FrozenTimerClock）
+        p = _freeze_timer_clock()
+        p.start()
+        self.addCleanup(p.stop)
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
@@ -2374,15 +2411,11 @@ class Test定时器的那一屏(unittest.TestCase):
         _, body = self.srv.request("GET", "/api/timer")
         nxt = body["next_run"]
         self.assertIn("上报数据", nxt["labels"], "调到同一刻了，这行字还是不带它")
-        # ⚠ `/api/timer` 走的是**真实时钟**（这一层没有注入口）⇒ "今天/明天"得按当前时间推：
-        #   21:00 一过，"下一个 21:00"就是明天 —— 写死"今天 21:00"的话**每天 21 点后必红**
-        #   （2026-09-21 21:42 跑三头就是这么红的，看着像代码坏了）。
-        now = datetime.datetime.now()
-        at = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        if at <= now:
-            at += datetime.timedelta(days=1)
-        expect = ("今天 " if at.date() == now.date() else "明天 ") + "21:00"
-        self.assertEqual(nxt["at_text"], expect)
+        # ⚠ 时钟被钉在上午 10:00（_FrozenTimerClock）⇒ 下一个 21:00 恒是"今天"。
+        #   原来这段按真实 now 推"今天/明天"：21:00 一过就变"明天"，可 next_run
+        #   那时挑中的根本不是 21:00 那批（是 21:15/21:30 的数据交换）⇒ 推了也红
+        #   （2026-09-29 21:07 跑三头实测）。冻结时钟后两种红一起没了。
+        self.assertEqual(nxt["at_text"], "今天 21:00")
         # 再调回自己的 21:15 ⇒ 它不该再挤进 21:00 那一趟
         timer.set_whens(self.root, "report",
                         [{"kind": "daily", "time": "21:15"}])
@@ -2719,6 +2752,10 @@ class Test自动更新不进前端(unittest.TestCase):
         conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         conn.close()
+        # ⚠ `test_下一次是每天那趟` 的断言跟钟点耦合（21:00–21:30 必红，见 _FrozenTimerClock）
+        p = _freeze_timer_clock()
+        p.start()
+        self.addCleanup(p.stop)
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
