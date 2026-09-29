@@ -93,6 +93,8 @@ class Test清单(unittest.TestCase):
         self.assertIn("theme", edition.LIFEHALL_PAGES)
         self.assertIn("linglong", edition.LIFEHALL_PAGES)
         self.assertIn("general", edition.LIFEHALL_PAGES)
+        self.assertIn("update", edition.LIFEHALL_PAGES)   # 自更新引擎在跑，页面得看得见
+        self.assertNotIn("account", edition.LIFEHALL_PAGES)  # 云商账号设置，生活馆没有（用户定）
         self.assertNotIn("badge", edition.LIFEHALL_PAGES)
         self.assertEqual(set(edition.LIFEHALL_BUILTIN_STEPS),
                          {"dump", "autoupdate"})

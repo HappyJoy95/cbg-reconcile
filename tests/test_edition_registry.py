@@ -86,7 +86,7 @@ class Test注册表收窄(unittest.TestCase):
         self.assertIn('data-foot="theme"', side)
         self.assertIn('data-foot="linglong"', side)
         self.assertTrue({"tools", "pricetag", "claim-pending", "cashier",
-                         "theme", "linglong"}.issubset(edition.LIFEHALL_PAGES))
+                         "theme", "linglong", "update"}.issubset(edition.LIFEHALL_PAGES))
         self.assertNotIn("badge", edition.LIFEHALL_PAGES)
         self.assertIn('id="lifehall-weather"', html)
         # 三个平级直连入口（⭐ 2026-09-29 加了「收银」—— 利润核算录入端）

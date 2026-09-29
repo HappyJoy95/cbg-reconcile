@@ -32,6 +32,11 @@ LIFEHALL_PAGES = (
     "tools", "pricetag", "claim-pending",                 # 价签 / 权益领取
     "cashier",                                            # 收银（2026-09-29 利润核算录入端）
     "general", "theme", "linglong",                       # 设置 / 外观 / 玲珑授权
+    # 检查更新（2026-09-29 加回）：自更新引擎（BRANCH=lifehall + autoupdate
+    # 内置步骤）9/26 就接上了，但 9/27「页面清单收窄」把这页裁了 ——
+    # 结果是"装能自己更新、门店却看不见有没有新版、也没法手动查"的半截状态。
+    # ⚠ 不要顺手加 `account`：那是云商的账号设置，生活馆没有云商（用户定）。
+    "update",
 )
 
 #: 生活馆版实际接入 `notify.send` 的业务开关。当前保留的工具没有业务推送调用，
