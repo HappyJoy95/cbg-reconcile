@@ -52,8 +52,13 @@ class WebSocket:
         self.port = u.port or 80
         self.path = (u.path or "/") + (f"?{u.query}" if u.query else "")
         self.timeout = timeout
-        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
-        self.sock.settimeout(timeout)
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+            self.sock.settimeout(timeout)
+        except OSError as e:
+            # 端口刚没了 / 浏览器正在退出 —— 也要是 CdpError，
+            # 否则调用方的 except CdpError 兜不住（同 recv 那条的理由）
+            raise CdpError(f"连不上 CDP（{self.host}:{self.port}）：{e}") from e
         self._buf = b""
         self._handshake()
 
@@ -69,13 +74,16 @@ class WebSocket:
             "Sec-WebSocket-Version: 13\r\n"
             "\r\n"
         )
-        self.sock.sendall(req.encode())
         head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise CdpError("WebSocket 握手时连接被关闭")
-            head += chunk
+        try:
+            self.sock.sendall(req.encode())
+            while b"\r\n\r\n" not in head:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise CdpError("WebSocket 握手时连接被关闭")
+                head += chunk
+        except OSError as e:
+            raise CdpError(f"WebSocket 握手失败：{e}") from e
         head, _, rest = head.partition(b"\r\n\r\n")
         self._buf = rest
         text = head.decode("latin-1")
@@ -116,7 +124,15 @@ class WebSocket:
         return opcode, fin, payload
 
     def recv_text(self, deadline: float | None = None) -> str:
-        """收一条完整文本消息（自动拼分片、自动回 pong）。"""
+        """收一条完整文本消息（自动拼分片、自动回 pong）。
+
+        ⚠ socket 层的超时/断开**一律折成 `CdpError`**（2026-09-29 实测）：
+        `sock.recv` 到期抛的是裸 `TimeoutError`，而调用方（抓取循环、
+        `csrf_from_page`、`try_auto_login` …）兜底全是 `except CdpError` ——
+        漏出去一个就是"登录成功了却当场崩、会话没保存"（用户原话：
+        「手动登上了，还是抓不到」）。socket.timeout 在 3.10+ 就是
+        TimeoutError，3.8/3.9 是它的子类，一起接。
+        """
         import time
         end = time.monotonic() + (deadline if deadline is not None else self.timeout)
         data = b""
@@ -124,8 +140,14 @@ class WebSocket:
             left = end - time.monotonic()
             if left <= 0:
                 raise CdpError("等 CDP 回复超时")
-            self.sock.settimeout(left)
-            opcode, fin, payload = self._read_frame()
+            try:
+                self.sock.settimeout(left)
+                opcode, fin, payload = self._read_frame()
+            except OSError as e:
+                # OSError 覆盖 TimeoutError / socket.timeout / ConnectionReset 等
+                if isinstance(e, (TimeoutError, socket.timeout)):
+                    raise CdpError("等 CDP 回复超时") from e
+                raise CdpError(f"CDP 连接中断：{e}") from e
             if opcode == 0x9:                       # ping → pong
                 self._send_frame(0xA, payload)
                 continue
@@ -157,7 +179,11 @@ class WebSocket:
         mask = os.urandom(4)                        # 客户端必须掩码
         header += mask
         masked = bytes(c ^ mask[i % 4] for i, c in enumerate(payload))
-        self.sock.sendall(bytes(header) + masked)
+        try:
+            self.sock.sendall(bytes(header) + masked)
+        except OSError as e:
+            # 浏览器刚退出时是 BrokenPipe —— 同 recv：漏出去调用方接不住
+            raise CdpError(f"发 CDP 帧失败：{e}") from e
 
     def send_text(self, text: str):
         self._send_frame(0x1, text.encode("utf-8"))
@@ -165,7 +191,7 @@ class WebSocket:
     def close(self):
         try:
             self._send_frame(0x8, b"")
-        except OSError:
+        except (CdpError, OSError):        # CdpError 已包了 OSError，两个都接稳
             pass
         try:
             self.sock.close()

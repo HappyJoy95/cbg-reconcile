@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from src import browser
+from src.cdp import CdpError
 from src.session import CbgAuthError
 
 
@@ -764,6 +765,30 @@ class TestCaptureSession(unittest.TestCase):
                                         verify=lambda s: False)
         self.assertEqual(len(killed), 2)
 
+    def test_csrf_read_timeout_survives_and_falls_back_to_api(self):
+        """2026-09-29 真因回归：**登录成功了，抓取却当场崩**。
+
+        手动登录后页面还在跳转，读 csrf 时 CDP 求值超时抛出裸
+        `TimeoutError` —— 循环里全是 `except CdpError` 接不住，整个抓取
+        进程崩掉、会话根本没走到保存（用户：「手动登上了，还是抓不到」）。
+
+        钉两件事：真实现的 `csrf_from_page` 把超时吞成 None；
+        循环拿着 None 走接口退路，抓取**活下来**并交付会话。
+        """
+        with _patch_launch(), \
+                mock.patch.object(browser, "cookies_from_browser",
+                                  return_value=("JSESSIONID=S; hwssot3=1", {})), \
+                mock.patch.object(browser, "_pick_cbg_page",
+                                  side_effect=TimeoutError("timed out")), \
+                mock.patch.object(browser, "csrf_from_api", return_value="API-CSRF"), \
+                mock.patch.object(browser, "_page_ws",
+                                  side_effect=CdpError("端口没了")), \
+                mock.patch.object(browser, "_shutdown", lambda p: None), \
+                mock.patch.object(browser.time, "sleep", lambda s: None):
+            sess = browser.capture_session(Path("/x"), headless=True, timeout=5,
+                                           verify=lambda s: True)
+        self.assertEqual(sess.csrf, "API-CSRF", "页面读不到就该走接口退路")
+
 
 class TestCsrfFromApi(unittest.TestCase):
     def _resp(self, payload, status=200):
@@ -1041,6 +1066,62 @@ class TestAutoLogin(unittest.TestCase):
             CdpMock.return_value = mock.MagicMock()
             browser.try_auto_login(1, 'u"x', 'p\\"y')
         self.assertIn(json.dumps('p\\"y'), captured["expr"], "密码必须经过 json.dumps 转义")
+
+
+class TestHelpersNeverThrowIntoTheLoop(unittest.TestCase):
+    """抓取循环里裸调的三个 helper —— **谁往外抛，谁把登录弄丢**。
+
+    2026-09-29 实测：`csrf_from_page` 在页面跳转时抛出裸 `TimeoutError`
+    （建连/求值都在 try 外面），循环全线只接 `CdpError` → 当场崩，
+    手动登录白登（用户：「手动登上了，还是抓不到」）。
+    契约：读不到 = None / no-form，**绝不外抛**。
+    """
+
+    def test_csrf_from_page_swallows_construction_failure(self):
+        """建连失败（端口刚没了）→ None，不是异常。"""
+        with mock.patch.object(browser, "_pick_cbg_page", return_value="ws://x"), \
+                mock.patch.object(browser, "Cdp",
+                                  side_effect=CdpError("连不上 CDP")):
+            self.assertIsNone(browser.csrf_from_page(12345))
+
+    def test_csrf_from_page_swallows_eval_timeout(self):
+        """求值超时（页面正在跳）→ None —— 这就是原始崩溃点。"""
+        pg = mock.MagicMock()
+        pg.call.side_effect = TimeoutError("timed out")
+        with mock.patch.object(browser, "_pick_cbg_page", return_value="ws://x"), \
+                mock.patch.object(browser, "Cdp", return_value=pg):
+            self.assertIsNone(browser.csrf_from_page(12345))
+
+    def test_csrf_from_page_swallows_page_pick_failure(self):
+        with mock.patch.object(browser, "_pick_cbg_page",
+                               side_effect=CdpError("端口没了")):
+            self.assertIsNone(browser.csrf_from_page(12345))
+
+    def test_try_auto_login_swallows_construction_failure(self):
+        """连不上页面 → no-form（下一轮再试），不是异常。"""
+        with mock.patch.object(browser, "_page_ws",
+                               side_effect=CdpError("连不上 CDP")):
+            self.assertEqual(browser.try_auto_login(1234, "u", "p"), "no-form")
+
+    def test_try_auto_login_swallows_raw_socket_error(self):
+        """裸 socket 错（防线兜底）→ 同样 no-form。"""
+        with mock.patch.object(browser, "_page_ws", return_value="ws://x"), \
+                mock.patch.object(browser, "Cdp",
+                                  side_effect=TimeoutError("timed out")):
+            self.assertEqual(browser.try_auto_login(1234, "u", "p"), "no-form")
+
+    def test_goto_url_never_throws(self):
+        """兜底导航失败就算了 —— 抛出去会把抓取循环炸掉。"""
+        with mock.patch.object(browser, "_page_ws",
+                               side_effect=CdpError("连不上 CDP")):
+            browser.goto_url(12345, "https://example.invalid")   # 不抛就是通过
+
+    def test_goto_url_swallows_navigate_failure(self):
+        pg = mock.MagicMock()
+        pg.call.side_effect = CdpError("页面没了")
+        with mock.patch.object(browser, "_page_ws", return_value="ws://x"), \
+                mock.patch.object(browser, "Cdp", return_value=pg):
+            browser.goto_url(12345, "https://example.invalid")
 
 
 class TestCaptureWithCredentials(unittest.TestCase):

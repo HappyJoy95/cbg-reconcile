@@ -308,13 +308,17 @@ def try_auto_login(port: int, username: str, password: str, say=None) -> str:
         'captcha'    要图形验证码 —— 自动不了，得人来
         'error'      页面已经报错了（多半是账号密码不对）—— **必须停手**
         'no-form'    不在登录页（可能已经登上了）
+
+    ⚠ **绝不往外抛**：建连（`_page_ws` / `Cdp(ws)`）也在 try 里 ——
+      页面正跳转时连接失败抛出去会把抓取循环整个炸掉（同 csrf 那条）。
     """
     say = say or (lambda m: None)
-    ws = _page_ws(port)
-    if not ws:
-        return "no-form"
-    pg = Cdp(ws, timeout=20)
+    pg = None
     try:
+        ws = _page_ws(port)
+        if not ws:
+            return "no-form"
+        pg = Cdp(ws, timeout=20)
         info = json.loads(_eval(pg, _DETECT_JS) or "{}")
         if not info.get("hasForm"):
             return "no-form"
@@ -340,26 +344,37 @@ def try_auto_login(port: int, username: str, password: str, say=None) -> str:
             return "no-form"
         say("已填好账号密码并提交登录")
         return "submitted"
-    except (CdpError, ValueError):
+    except (CdpError, OSError, ValueError):
+        # OSError 双保险：cdp.py 源头已折，这里再接一层（TimeoutError ⊂ OSError）
         return "no-form"
     finally:
-        pg.close()
+        if pg is not None:
+            try:
+                pg.close()
+            except Exception:                          # noqa: BLE001
+                pass
 
 
 def goto_url(port: int, url: str, say=None) -> None:
-    """导航到指定页面（还没跳到登录页时别干等）。"""
-    ws = _page_ws(port)
-    if not ws:
-        return
-    pg = Cdp(ws, timeout=20)
+    """导航到指定页面（还没跳到登录页时别干等）。**失败就算了，别抛** ——
+    它是兜底动作，抛出去会把抓取循环炸掉（同 csrf 那条的理由）。"""
+    pg = None
     try:
+        ws = _page_ws(port)
+        if not ws:
+            return
+        pg = Cdp(ws, timeout=20)
         pg.call("Page.enable")
         pg.call("Page.navigate", {"url": url})
         (say or (lambda m: None))(f"导航到 {url}")
-    except CdpError:
+    except (CdpError, OSError):
         pass
     finally:
-        pg.close()
+        if pg is not None:
+            try:
+                pg.close()
+            except Exception:                          # noqa: BLE001
+                pass
 
 
 def login_page_url(target: str) -> str:
@@ -982,22 +997,32 @@ def cookies_from_browser(port: int) -> tuple[str, dict]:
 
 
 def csrf_from_page(port: int, timeout: float = 6.0) -> str | None:
-    """在 cbg 页面上读 localStorage —— 前端把 csrf token 存在这里。"""
-    page = _pick_cbg_page(port)
-    if not page:
-        return None
-    pg = Cdp(page, timeout=timeout)
+    """在 cbg 页面上读 localStorage —— 前端把 csrf token 存在这里。
+
+    ⚠ **绝不往外抛**（2026-09-29 实测：抓取循环在读 csrf 时页面正在跳转，
+    CDP 求值超时抛出裸 `TimeoutError`，循环里全是 `except CdpError` 接不住
+    → 整个抓取当场崩、登录白登）。读不到就是 None，调用方自己走接口退路。
+    """
+    pg = None
     try:
+        page = _pick_cbg_page(port)
+        if not page:
+            return None
+        pg = Cdp(page, timeout=timeout)
         res = pg.call("Runtime.evaluate", {
             "expression": f"window.localStorage.getItem({CSRF_STORAGE_KEY!r}) || ''",
             "returnByValue": True,
         }, timeout=timeout)
         val = (res.get("result") or {}).get("value")
         return val.strip() if isinstance(val, str) and val.strip() else None
-    except CdpError:
+    except (CdpError, OSError, ValueError):
         return None
     finally:
-        pg.close()
+        if pg is not None:
+            try:
+                pg.close()
+            except Exception:                          # noqa: BLE001 关不掉就算了
+                pass
 
 
 def csrf_from_api(cookies: str, timeout: int = 20) -> str | None:
