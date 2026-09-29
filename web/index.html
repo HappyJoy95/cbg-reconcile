@@ -883,10 +883,30 @@
                style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px;min-width:200px;flex:1;max-width:280px" />
         <span class="hint" id="claim-filter-count"></span>
       </div>
+      <!-- 批量自动领取（2.2.4，2026-09-29 用户：「每个条目前面加个多选框，
+           可以批量自动领取」）。
+           ⚠ 全选**只选当前页**（用户拍板）；批量前**一次确认**（用户拍板）。
+           ⚠ 走的是单条那个 `/api/claim/submit` —— 范围校验/86码拦截/无链接拦截
+             全部复用，不为批量开第二条提交路径（坑 18）。 -->
+      <div class="form-row" style="margin:0 0 8px;flex-wrap:wrap;gap:8px;align-items:center"
+           id="claim-batch-bar">
+        <label class="hint" for="claim-select-page"
+               style="margin:0;min-width:0;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="claim-select-page" aria-label="选中本页全部可领行" />
+          选本页
+        </label>
+        <span class="hint" id="claim-batch-info">未选中</span>
+        <button type="button" class="btn primary small" id="claim-batch-claim" disabled
+                title="对勾选的行逐条直提华为领取接口（失败的继续下一条，跑完给汇总）">批量自动领取</button>
+        <button type="button" class="btn ghost small" id="claim-batch-clear" disabled>清空选择</button>
+      </div>
+      <div class="hint" id="claim-batch-result" hidden style="margin:0 0 8px 0"></div>
       <div id="claim-pending-table">加载中…</div>
       <div class="hint" id="claim-pending-legend" style="margin-top:8px">
         匹配口径：商品名命中活动机型，且支付日在赠送期内；退货不进待领。
-        「手动领取」打开华为官方页；「在线领取」走接口直提。状态落 <code>out/claim-status.json</code>。
+        「手动领取」打开华为官方页；「在线领取」走接口直提。状态落 <code>out/claim-status.json</code>。<br>
+        <b>批量自动领取</b>：行首打勾（表头「选本页」= 本页全选）→ 一次确认 → 逐条直提；
+        <b>灰掉的勾</b> = 这行不能自动领，鼠标停上去看得见原因（没链接 / 86码没反查到SN / 已领）。
       </div>
     </div>
   </div>

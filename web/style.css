@@ -1576,14 +1576,28 @@ main.tools-frame-mode .subpanel.active {
 #claim-pending-table table td {
   vertical-align: middle;
 }
-#claim-pending-table table .claim-col-store,
+/* ⚠ 2.2.4（2026-09-29）首列插了「批量多选」⇒ 下面所有 `th:Nth-child(N)`
+   **全部 +1** —— 只改 class 不改 nth-child 的话，表头会比内容整体错一格
+   （`.claim-col-*` 只在 <td> 上，<th> 是 table() 用纯字符串拼的、没有 class，
+   所以表头只能靠 nth-child 定位 —— 这也是原来那组选择器存在的唯一理由）。 */
+#claim-pending-table table .claim-col-pick,
 #claim-pending-table table th:nth-child(1) {
+  width: 34px;
+  min-width: 34px;
+  text-align: center;
+}
+#claim-pending-table table .claim-col-pick input {
+  margin: 0;
+  vertical-align: middle;
+}
+#claim-pending-table table .claim-col-store,
+#claim-pending-table table th:nth-child(2) {
   width: 110px;
   min-width: 96px;
   white-space: nowrap;
 }
 #claim-pending-table table .claim-col-who,
-#claim-pending-table table th:nth-child(2) {
+#claim-pending-table table th:nth-child(3) {
   /* 三个字店名（如 郭芮志）+ 一点余量 */
   width: 72px;
   min-width: 68px;
@@ -1591,7 +1605,7 @@ main.tools-frame-mode .subpanel.active {
   text-align: center;
 }
 #claim-pending-table table .claim-col-name,
-#claim-pending-table table th:nth-child(3) {
+#claim-pending-table table th:nth-child(4) {
   /* 商品名收窄，长名换行/省略 */
   width: 28%;
   min-width: 160px;
@@ -1602,23 +1616,23 @@ main.tools-frame-mode .subpanel.active {
   line-height: 1.35;
 }
 #claim-pending-table table .claim-col-ts,
-#claim-pending-table table th:nth-child(4) {
+#claim-pending-table table th:nth-child(5) {
   width: 110px;
   min-width: 100px;
   white-space: nowrap;
 }
 #claim-pending-table table .claim-col-act,
-#claim-pending-table table th:nth-child(5) {
+#claim-pending-table table th:nth-child(6) {
   width: 14%;
   min-width: 100px;
 }
 #claim-pending-table table .claim-col-benefit,
-#claim-pending-table table th:nth-child(6) {
+#claim-pending-table table th:nth-child(7) {
   width: 10%;
   min-width: 72px;
 }
 #claim-pending-table table .claim-col-value,
-#claim-pending-table table th:nth-child(7) {
+#claim-pending-table table th:nth-child(8) {
   width: 72px;
   max-width: 88px;
   white-space: nowrap;
@@ -1626,12 +1640,12 @@ main.tools-frame-mode .subpanel.active {
   text-overflow: ellipsis;
 }
 #claim-pending-table table .claim-col-status,
-#claim-pending-table table th:nth-child(8) {
+#claim-pending-table table th:nth-child(9) {
   width: 72px;
   white-space: nowrap;
 }
 #claim-pending-table table .claim-col-acts,
-#claim-pending-table table th:nth-child(9) {
+#claim-pending-table table th:nth-child(10) {
   min-width: 168px;
   width: 176px;
 }

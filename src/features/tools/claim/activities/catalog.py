@@ -49,6 +49,13 @@ DEFAULT_ACTIVITIES: List[dict] = [
         "category": "手机",
         "title": "nova 16 / Pro / Ultra 无忧大礼包",
         "match": ["nova 16 Ultra", "nova 16 Pro", "nova 16"],
+        # ⚠ 「nova 16」是 **`nova 16 SE` 的前缀**，而匹配是**纯子串**（大小写不敏感）
+        #   ⇒ 同一台 SE 会同时挂两条活动，nova16 那行去华为一查就是
+        #   「该 SN 下没有匹配到可领权益」—— **假待领**。
+        #   2026-09-29 实测炸出来：**100 行**、批量领取第一条就撞上。
+        #   `exclude` 先于 match（同 FreeBuds 7 / Pura X 那两处）⇒ 挡掉；
+        #   SE 自己有 `nova16se-gift-202609`（码 8813045771）。
+        "exclude": ["nova 16 SE"],
         "start": "2026-08-01",
         "end": "2026-10-07",
         "benefit": "nova无忧大礼包",
@@ -107,6 +114,10 @@ DEFAULT_ACTIVITIES: List[dict] = [
         "category": "平板",
         "title": "MatePad Air 12英寸鸿蒙焕新版 无忧大礼包",
         "match": ["MatePad Air 12"],
+        # ⚠ 同款**前缀碰撞**（nova 16 / SE 那次的同构问题）：「MatePad Air 12」
+        #   是 `MatePad Air 12英寸（第三代）` 的前缀，第三代有自己的一条活动。
+        #   2026-09-29 扫出来的**结构隐患**（当前库里还没这种机型的成交，先堵上）。
+        "exclude": ["MatePad Air 12英寸（第三代）"],
         "start": "2026-07-08",
         "end": "2026-12-31",
         "benefit": "无忧大礼包",
@@ -156,6 +167,11 @@ DEFAULT_ACTIVITIES: List[dict] = [
         "category": "平板",
         "title": "MatePad 11.5 鸿蒙焕新版 / SE 焕新版 无忧大礼包",
         "match": ["MatePad 11.5 鸿蒙焕新版", "MatePad SE 焕新版", "MatePad 11.5"],
+        # ⚠ 同款**前缀碰撞**：「MatePad 11.5」是 `MatePad 11.5 S` 的前缀。
+        #   2026-09-29 扫出来的结构隐患 —— 库里现在的名字是 `MatePad 11.5s 2025款`
+        #   （小写且**没空格**，匹配不上「MatePad 11.5 S」）所以还没炸，先堵上；
+        #   exclude 是大小写不敏感的子串 ⇒ 也**不会**误伤 `11.5s` 那批。
+        "exclude": ["MatePad 11.5 S"],
         "start": "2026-07-27",
         "end": "2026-12-31",
         "benefit": "无忧大礼包",
