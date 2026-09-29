@@ -60,6 +60,29 @@ _HTTPServer.serve_forever = _fast_serve_forever
 #
 # ⚠ 已有的重试测试（`test_erp_net_retry` / `test_tdoc`）都把 session mock 成
 #   `MagicMock`，压根不进这里，不受影响。
+
+# ───────────── 回环地址不许走代理（2026-09-29 第三次提速，150s → 26s）─────────────
+#
+# ⚠ 这条**只管测试进程自己**，改不了系统设置：macOS 的**系统代理**
+#   （`scutil --proxy` → 127.0.0.1:7897）在管事，而 `urllib` 读的正是它 ——
+#   于是测试里探**本机** CDP 端口 `http://127.0.0.1:12345/json/version`
+#   也被送进代理，代理连不上那个端口就回 **502**，每次 1~2 秒。
+#
+#   现象同样是"测试条数太多"的假象：`test_browser.py` 105 条全量要 **140 秒**
+#   （一条 27 秒），而 `_nav_watch()` 明明把 `time.sleep` 打桩成 no-op 了 ——
+#   因为卡的是 **urllib 的 socket 读**，不归假时钟管。
+#   ⚠ 更坑的是它**随代理开合漂移**：代理没开时 Connection refused 是 0 秒，
+#   一开就慢。同一批代码，上午 26 秒、下午 150 秒，很容易误判成"谁改坏了"。
+#
+#   ⇒ `no_proxy` 指回环地址 ⇒ urllib 直连 ⇒ 立刻 refused。实测同一条
+#   `test_headless_never_navigates_to_the_login_page`：**26s → 0.02s**。
+#   ⚠ 这也**不会**削弱上一道外网总闸：总闸拦的是"真外网"，而这里放行的是
+#   "本机服务"——两道闸的口径本来就是一致的（回环=本机，其余=外网）。
+import os as _os
+
+for _k in ("no_proxy", "NO_PROXY"):
+    _os.environ[_k] = "127.0.0.1,localhost,::1"
+
 from urllib.parse import urlparse as _urlparse
 
 import requests as _requests
