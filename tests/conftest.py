@@ -20,6 +20,70 @@ os.environ.setdefault("CBG_NO_DB_REBUILD", "1")
 os.environ.setdefault("CBG_EDITION", "full")
 
 
+# ─────────────────── 测试起的 HTTP 服务：shutdown 别等满 0.5s ───────────────────
+#
+# ⚠ 这条是**测试提速的头号来源**（2026-09-29 实测）：
+#   `ThreadingHTTPServer.serve_forever()` 的默认 `poll_interval=0.5`，
+#   而 `shutdown()` 要等**下一次轮询**才看得到停止标志 ⇒ 每个 `close()`
+#   固定卡 0.5 秒。9 个测试文件都在 setUp 里真起服务、tearDown 里 shutdown
+#   ⇒ 光这一项就吃掉 **约 86 秒**（全量 170s → 84s，见 git log）。
+#
+#   现象很隐蔽：`--durations` 看不出哪条慢（那 0.5s 记在**拆 fixture 的
+#   teardown** 上，而 teardown 不进 durations 的 call 段），所以它一直被
+#   当成"测试条数太多"。**测试条数一条都没少**（2859 条，24 秒跑完）。
+#
+#   改成 0.01s 只影响"多久发现该停了"，不改任何语义 —— 真正的断言都在
+#   请求/响应上，跟轮询周期无关。
+from http.server import HTTPServer as _HTTPServer
+
+_serve_forever = _HTTPServer.serve_forever
+
+
+def _fast_serve_forever(self, poll_interval=0.01):
+    return _serve_forever(self, poll_interval)
+
+
+_HTTPServer.serve_forever = _fast_serve_forever
+
+
+# ─────────────────────── 测试**不许打真外网** ───────────────────────
+#
+# ⚠ 第二大耗时来源（2026-09-29 实测）：**只有 8 条测试**在真发 HTTP，
+#   被本机代理（7897 拒绝连接）挡住后走 `_with_net_retry` 的 1.5s + 3.0s 退避
+#   ⇒ 一条测试吃掉 13 秒，8 条合计约 **60 秒**，而且**结果取决于当天网络**
+#   （`test_staff_report` 那条就因此红过 —— 接口把 `ok` 回成了 false）。
+#
+# 现在在这儿兜一道：**回环地址放行**（测试真起的 127.0.0.1 服务不算），
+# 其余一律**立刻**抛错，且抛的**不是** `SSLError / ConnectionError / Timeout`
+# —— 这样 `_is_transient_net_error()` 判它为"非瞬时错" ⇒ **当场 raise、不重试**。
+# 于是"忘了打桩"从「等 60 秒 + 结果看天」变成「立刻红 + 栈里指名道姓」。
+#
+# ⚠ 已有的重试测试（`test_erp_net_retry` / `test_tdoc`）都把 session mock 成
+#   `MagicMock`，压根不进这里，不受影响。
+from urllib.parse import urlparse as _urlparse
+
+import requests as _requests
+
+
+class _TestNetworkBlocked(RuntimeError):
+    """测试里发起了真外网请求 —— 打桩掉它，别连出去。"""
+
+
+_orig_session_request = _requests.Session.request
+
+
+def _guarded_session_request(self, method, url, *args, **kw):
+    host = (_urlparse(url).hostname or "").lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return _orig_session_request(self, method, url, *args, **kw)
+    raise _TestNetworkBlocked(
+        "测试不许打真外网：%s %s —— 这条要联网就用 mock.patch 打桩"
+        % (method, url))
+
+
+_requests.Session.request = _guarded_session_request
+
+
 # ─────────────────────── 测试**不许往项目根写东西** ───────────────────────
 #
 # ⚠ 这条是**用真金白银换来的**（2026-09-19 一天里踩了三次）：

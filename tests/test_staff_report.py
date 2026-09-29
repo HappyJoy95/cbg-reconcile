@@ -254,6 +254,25 @@ class Test接口(_Base):
                               lambda app: {"ready": True, "need": "", "why": ""})
         p.start()
         self.addCleanup(p.stop)
+        # ⚠ `/api/staff` 的返回里会带一份 `staff_state(...)`（**顺带刷一遍名单**），
+        #   那一步要连云商读组织架构 —— 而这一类测的是"保存后**报还等几秒**"，
+        #   跟名单毫无关系。2026-09-29 之前它一直在真联网：本机代理不通时
+        #   `_with_net_retry` 退避 1.5s+3.0s，**一条测试吃 5 秒**，而且
+        #   `staff_state` 的 `ok: False` 会**盖掉**响应里那个 `ok: True`
+        #   （`{..., **staff_state(app)}` 后展开的赢）⇒ 保存明明成功、接口却回失败。
+        #   ⇒ 打桩掉网络那一层，让真逻辑（保存 / 登记一次性任务 / 报秒数）照跑。
+        client = mock.Mock()
+        client.creds = {"token": "T"}
+        client.call.return_value = {"Data": [
+            {"Name": "青岛城阳万象汇店", "Id": 308466, "IsBranch": 1}]}
+        client.users.return_value = []
+        p = mock.patch.object(staff, "ErpClient", lambda *a, **k: client)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(staff, "load_credentials",
+                               lambda *a, **k: {"token": "T"})
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_门店保存后说清还等几秒(self):
         """真跑一遍：门店保存 ⇒ **登记一条一次性任务** ⇒ 接口回"还有几秒"。"""
