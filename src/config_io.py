@@ -51,14 +51,31 @@ def load_raw(path) -> dict:
 STORES_REL = "config/stores.yaml"
 
 
+def _list_of(root, rel: str, key: str) -> list:
+    """读 `config/<rel>` 里的 `key:` 列表 —— **读不到 / YAML 写坏都给空表，不抛**。
+
+    ⚠⚠ 这个 `try` 不是装饰（2026-09-29 实测补上）：上面那句"不抛异常"原来**是假的** ——
+      `load_raw()` 里是 `yaml.safe_load()`，名单里手抖写坏一个字它就 `raise`。
+      而调用链是 `store_profile()` → `find_store()` → 这里，最后被
+      `role_scope()` 的 `except Exception: prof = {}` 吞掉 ⇒
+      **平台岗静默降级成门店**（范围只剩虚拟店名「平台岗」，增值/达成/月度全被
+      滤空，页面上只剩一句「只看本店（平台岗）」，2026-09-29 门店实测）。
+      ⇒ 坏 YAML 必须在这儿变成**空表**，让上面那些函数按"这家店没在名单里"处理。
+    """
+    try:
+        doc = load_raw(Path(root) / rel) or {}
+    except Exception:                                          # noqa: BLE001
+        return []
+    return [x for x in (doc.get(key) or []) if isinstance(x, dict)]
+
+
 def stores_table(root) -> list:
     """读 `config/stores.yaml` 的 `stores:` 列表。
 
     读不到/格式不对就给**空表** —— 调用方要能区分"表里没有这家店"和"表根本没读到"，
     所以这里不抛异常，由调用方按空表处理并说清。
     """
-    doc = load_raw(Path(root) / STORES_REL) or {}
-    return [s for s in (doc.get("stores") or []) if isinstance(s, dict)]
+    return _list_of(root, STORES_REL, "stores")
 
 
 def managers_table(root) -> list:
@@ -67,8 +84,7 @@ def managers_table(root) -> list:
     读不到/格式不对给**空表** —— 调用方要能区分"这家店没配区长"和"名单没读到"，
     所以这里不抛异常（跟 `stores_table` 一个套路）。
     """
-    doc = load_raw(Path(root) / "config" / "managers.yaml") or {}
-    return [m for m in (doc.get("managers") or []) if isinstance(m, dict)]
+    return _list_of(root, "config/managers.yaml", "managers")
 
 
 #: `stores.yaml` 里标区域的字段名
@@ -310,12 +326,29 @@ def store_profile(values: dict, root) -> dict:
     #   它跟别的店**同一套机制**：登录 → 把店名写进配置 → 画像照名单认。
     #   跟上面那条老标志的区别是：老标志不写店名，于是"平台岗"和"某家店"
     #   两种身份能同时留在配置里（见 `PLATFORM_KIND` 的注释）。
-    if (hit or {}).get("kind") == PLATFORM_KIND:
-        return {"erp_name": name,
+    #
+    # ⚠⚠ 判据是**两个**：名单里那行确认（`kind: 平台岗`）**或**店名就是
+    #   `PLATFORM_STORE`（2026-09-29 加固，用户报的现场问题）。
+    #
+    #   为什么只认名单那行不够：平台岗登录时写进配置的正是
+    #   `erp_store_name: 平台岗`，而**新登录流程会把老标志 `platform` 清成空串**
+    #   ⇒ 那时"是不是平台岗"就只剩名单那一条信号作证。名单随程序走，但它会旧、
+    #   会被人手改、会写坏（坏 YAML 原先还会抛，见 `_list_of`）—— 一旦那行认不出来，
+    #   平台岗就**静默降级成门店**：范围只剩"平台岗"这一个虚拟店名，
+    #   增值 / 达成 / 月度 / 四池所有按店过滤的页全被滤空，界面上只有一句
+    #   「只看本店（平台岗）」，看不出是身份掉了（2026-09-29 门店实测，已复现）。
+    #
+    #   按名字认**不会放宽范围**：`PLATFORM_STORE` 是不绑任何一家真门店的虚拟名
+    #   （见它的定义与 `config/stores.yaml` 里那条注释），真门店里没有这个名字；
+    #   名单那行因此从"唯一判据"降级成**冗余确认**。
+    if (hit or {}).get("kind") == PLATFORM_KIND or name == PLATFORM_STORE:
+        return {"erp_name": name or PLATFORM_STORE,
                 "huawei_code": (values.get("store_code") or "").strip(),
                 "marker": "", "kind": PLATFORM_KIND,
                 "huawei_name": (hit or {}).get("huawei_name") or "",
-                "in_roster": True, "platform": True,
+                # ⚠ 按名字认时名单里**没命中**就是没命中，别写死 True ——
+                #   `in_roster` 表达的是"名单里找得到这家店"，写假了下一个读它的人会被骗。
+                "in_roster": bool(hit), "platform": True,
                 "needs_linglong": False, "show_all": True, "type": "platform"}
     # ⚠ **名单优先**，配置里的只是"名单里没这家店"时的兜底。
     #

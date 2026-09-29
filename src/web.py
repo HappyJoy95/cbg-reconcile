@@ -626,6 +626,14 @@ def role_scope(app) -> dict:
       （30 家 = 5ms/遍，按店数各读一遍实测 25ms/请求）。加字段前先看一眼这点。
     """
     from . import config_io
+    # ⚠ `cfg` 必须**在 try 外面先绑上**（2026-09-29 实测踩到）：
+    #   `except` 只兜了 `prof`，而下面第 ③ 段（门店兜底）还要读
+    #   `cfg.get("erp_store_name")` —— 配置文件 YAML 写坏时 `load_raw` 一抛，
+    #   `cfg` 就是**未绑定**局部变量 ⇒ `UnboundLocalError`。
+    #   而这个函数**每个 `/api/*` 请求都要算一次** ⇒ 那一刻整站接口全 500，
+    #   比"身份掉成门店"严重得多（掉身份至少还看得到页面）。
+    #   ⇒ 先给空表：画像读不到就是"认不出这家店"，照旧退到门店兜底（范围最小）。
+    cfg = {}
     try:
         cfg = config_io.load_raw(app.config_path) or {}
         prof = app._profile_with_who(cfg)
