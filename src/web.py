@@ -563,6 +563,11 @@ def _can_for(role: str) -> dict:
         "plan.export": not is_store,
         "film.export": not is_store,
         "benefit.export": not is_store,
+        # 分销看板（2.3.0，2026-09-29）：整页 `types="multi"`（区长/平台），
+        # 门店连菜单行都没有 ⇒ 改区域映射 / 导出明细都跟页面同口径。
+        # ⚠ 页面藏起来不算权限（坑 18）—— `/api/dist/*` 每条路由另有 403。
+        "dist.write": not is_store,
+        "dist.export": not is_store,
     }
 
 
@@ -1599,6 +1604,157 @@ class App:
         """导出防护膜达成 Excel —— 走的就是 `self.film(day)`（**同一个窗口** + 已按身份过滤）。"""
         from .features.valueadd.film import export as film_export_mod
         return film_export_mod.export(self.root, self.film(day=day), who=who, name=name)
+
+    # ------------------------------------------------------------ 分销（2.3.0）
+    # ⚠ 这一组的可见性是 `types="multi"`（区长/平台），路由层每条另有 403
+    #   （坑 18：藏菜单从来不算权限）。数据范围=渠道分销部，**不走** `scope_store_ok`
+    #   —— 它不在 `config/stores.yaml` 的 30 家名单里（那是门店名单，
+    #   渠道分销部是职能部门），按名单判会把所有人拦成"没有数据"。
+
+    @staticmethod
+    def _dist_range(query: dict, default_days: int = 30) -> tuple:
+        """从查询串取 `start`/`end`（YYYY-MM-DD），缺省 = 最近 30 天。
+
+        ⚠ 解析失败**不抛** —— 回落到缺省并在返回里带 `range_note`，
+        否则用户手改日期框一个错字整页就空白了。
+        """
+        import datetime as _dt
+        today = _dt.date.today()
+        bad = [False]
+
+        def _pick(key, fallback):
+            raw = (query.get(key) or [""])[0]
+            if not raw:
+                return fallback
+            try:
+                return _dt.date.fromisoformat(raw)
+            except ValueError:
+                bad[0] = True          # 错字不抛 —— 回落缺省 + 通知界面
+                return fallback
+        end = _pick("end", today)
+        start = _pick("start", end - _dt.timedelta(days=default_days - 1))
+        note = ""
+        if end < start:
+            start, end = end, start
+            note = "开始/结束日期反了，已自动调换"
+        elif bad[0]:
+            note = "日期格式不对（应为 YYYY-MM-DD），已用缺省区间"
+        return start, end, note
+
+    def dist_board(self, kind: str, query: dict) -> dict:
+        """三张看板之一：`kind` ∈ {region, model, salesman}。"""
+        from .features.distribution import TARGET_STORE as _dist_store_name
+        from .features.distribution import metrics as dist_metrics
+        from .features.distribution import region as dist_region
+        from .features.distribution import store as dist_store
+        start, end, note = self._dist_range(query)
+        rows = dist_store.read_rows(self.root, start, end)
+        mapping = dist_region.load_mapping(self.root)
+        covered = dist_store.range_covered(self.root, start, end)
+        common = {
+            "ok": True, "kind": kind,
+            "start": start.isoformat(), "end": end.isoformat(),
+            "range_note": note,
+            # covered=None ⇒ 这段**还没拉过**（missing ≠ zero —— 界面要分清
+            # 「没拉」和「这段真没有分销单」，数据五态那条规矩）
+            "fetched": covered is not None,
+            "covered": {"from": covered[0], "to": covered[1]} if covered else None,
+            "store": _dist_store_name,
+        }
+        if kind == "region":
+            common["board"] = dist_metrics.region_board(rows, mapping)
+        elif kind == "model":
+            common["board"] = dist_metrics.model_board(rows)
+        elif kind == "salesman":
+            common["board"] = dist_metrics.salesman_board(rows)
+        else:
+            return {"ok": False, "why": "不认识的看板：%s" % kind}
+        return common
+
+    def dist_detail(self, query: dict, limit: int = 2000) -> dict:
+        """明细底表：区间行 + 区标注（下拉就挂在这一页）。"""
+        from .features.distribution import TARGET_STORE as _dist_store_name
+        from .features.distribution import metrics as dist_metrics
+        from .features.distribution import region as dist_region
+        from .features.distribution import store as dist_store
+        start, end, note = self._dist_range(query)
+        zone = str((query.get("zone") or [""])[0] or "").strip()
+        rows = dist_store.read_rows(self.root, start, end)
+        # 补三级分类档（Pura X View 等）—— 跟看板同一口径，别看板归档了明细还显示未分类
+        dist_metrics.fix_cat3(rows)
+        mapping = dist_region.load_mapping(self.root)
+        dist_region.annotate(rows, mapping)
+        if zone:
+            rows = [r for r in rows if r["_zone"] == zone]
+        total = len(rows)
+        return {"ok": True, "start": start.isoformat(), "end": end.isoformat(),
+                "range_note": note, "fetched": dist_store.range_covered(
+                    self.root, start, end) is not None,
+                "store": _dist_store_name,
+                "total": total, "rows": rows[:limit], "truncated": total > limit,
+                "mapping": {k: v for k, v in mapping.items() if v}}
+
+    def dist_fetch(self, body: dict, who: str = "") -> dict:
+        """拉取选定时间段的分销单（长任务：30 天 ≈ 3 段 × 10 天，几十秒）。"""
+        from .features.distribution import fetch as dist_fetch
+        import datetime as _dt
+        note = ""
+        def _p(key, fb):
+            raw = str(body.get(key) or "")
+            try:
+                return _dt.date.fromisoformat(raw) if raw else fb
+            except ValueError:
+                return fb
+        today = _dt.date.today()
+        end = _p("end", today)
+        start = _p("start", end.replace(day=1))
+        if end < start:
+            start, end = end, start
+        try:
+            res = dist_fetch.run(self.root, start, end)
+        except dist_fetch.FetchBusy as e:
+            return {"ok": False, "busy": True, "why": str(e)}
+        if res.get("ok"):
+            audit(self, "拉取分销单", detail={"start": start.isoformat(),
+                                              "end": end.isoformat(),
+                                              "rows": res.get("rows")})
+        return res
+
+    def dist_confirm(self, body: dict, who: str = "") -> dict:
+        """人工确认某客户属于哪个区（或清除）—— 映射落盘、跨时段沿用。"""
+        from .features.distribution import region as dist_region
+        res = dist_region.confirm(self.root, str(body.get("customer") or ""),
+                                  str(body.get("zone") or ""), who=who)
+        if res.get("ok") and res.get("changed"):
+            audit(self, "确认分销区域", detail={"customer": res.get("customer"),
+                                                "zone": res.get("zone") or "(清除)"})
+        return res
+
+    def dist_map(self, query: dict) -> dict:
+        """映射表明细（谁、什么时候定的）+ 待确认队列所在的区间信息。"""
+        from .features.distribution import region as dist_region
+        from .features.distribution import store as dist_store
+        start, end, note = self._dist_range(query)
+        rows = dist_store.read_rows(self.root, start, end)
+        mapping = dist_region.load_mapping(self.root)
+        return {"ok": True, "start": start.isoformat(), "end": end.isoformat(),
+                "range_note": note,
+                "list": dist_store.map_detail(self.root),
+                "pending": dist_region.pending_customers(rows, mapping)}
+
+    def dist_reset_map(self) -> dict:
+        """整张映射表清空（用户要的「以后可以修改」里的重置）。"""
+        from .features.distribution import store as dist_store
+        n = dist_store.map_reset(self.root)
+        audit(self, "重置分销区域映射", detail={"removed": n})
+        return {"ok": True, "removed": n}
+
+    def dist_export(self, query: dict, who: str = "", name: str = "") -> dict:
+        """导出分销明细 Excel —— 数据走 `dist_detail`（同一份口径）。"""
+        from .features.distribution import export as dist_export
+        d = self.dist_detail(query, limit=100000)
+        return dist_export.export(self.root, d, who=who, name=name)
+
 
     def filter_benefit_rows(self, d: dict) -> dict:
         """无忧会员权益按身份滤店 —— 店 / 区域 / 人员三块都滤，合计重算。
@@ -3217,6 +3373,59 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sn-trace" and method == "GET":
             code = (query.get("code") or [""])[0]
             return self._json(app.sn_trace(code))
+        # **分销（2.3.0，2026-09-29）** —— 渠道分销部四张看板。
+        # ⚠ 每条都有 403（坑 18：菜单 `types="multi"` 藏起来**不算权限**，
+        #   写个 curl 就进来了）；判据跟页面同一份：门店一律拦。
+        if path.startswith("/api/dist"):
+            if scope.get("role") == ROLE_STORE:
+                return self._json(forbid(scope, "看分销看板",
+                                         "这是区长/平台看的页面"), 403)
+            if path == "/api/dist/board" and method == "GET":
+                return self._json(app.dist_board(
+                    (query.get("kind") or ["region"])[0], query))
+            if path == "/api/dist/detail" and method == "GET":
+                return self._json(app.dist_detail(query))
+            if path == "/api/dist/map" and method == "GET":
+                return self._json(app.dist_map(query))
+            if path == "/api/dist/fetch" and method == "POST":
+                if not scope["can"].get("dist.write"):
+                    return self._json(forbid(scope, "拉取分销数据",
+                                             "这个身份不能拉取"), 403)
+                res = app.dist_fetch(self._read_json() or {},
+                                     who=scope.get("who") or scope.get("account") or "")
+                if not res.get("ok"):
+                    res = dict(res, error=res.get("why") or "拉取失败")
+                    return self._json(res, 400)
+                return self._json(res)
+            if path == "/api/dist/zone" and method == "POST":
+                if not scope["can"].get("dist.write"):
+                    return self._json(forbid(scope, "确认分销区域",
+                                             "这个身份不能改区域映射"), 403)
+                res = app.dist_confirm(self._read_json() or {},
+                                       who=scope.get("who") or scope.get("account") or "")
+                if not res.get("ok"):
+                    res = dict(res, error=res.get("why") or "确认失败")
+                    return self._json(res, 400)
+                return self._json(res)
+            if path == "/api/dist/map/reset" and method == "POST":
+                if not scope["can"].get("dist.write"):
+                    return self._json(forbid(scope, "重置区域映射",
+                                             "这个身份不能改区域映射"), 403)
+                return self._json(app.dist_reset_map())
+            if path == "/api/dist/export" and method == "POST":
+                if not scope["can"].get("dist.export"):
+                    return self._json(forbid(scope, "导出为 Excel",
+                                             "门店账号不导出，要看明细就在页面上看"), 403)
+                body = self._read_json() or {}
+                q = {"start": [str(body.get("start") or "")],
+                     "end": [str(body.get("end") or "")]}
+                res = app.dist_export(
+                    q, who=scope.get("who") or scope.get("account") or "",
+                    name=str(body.get("name") or ""))
+                if not res.get("ok"):
+                    res = dict(res, error=res.get("why") or "导出失败")
+                return self._json(res, 200 if res.get("ok") else 400)
+            return self._json({"error": "没有这个分销接口"}, 404)
         if path == "/api/plan" and method == "GET":
             return self._json(app.plan())
         if path == "/api/plan/export" and method == "POST":

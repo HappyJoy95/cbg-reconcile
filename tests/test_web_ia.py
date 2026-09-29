@@ -109,8 +109,12 @@ class Test一级页签(unittest.TestCase):
         #   用户：「设计一个新模块，叫做月度生意计划」。它排在「周度重点产品」**后面**
         #   （注册表里 `order=15`：这两个是同一族，都是"看门店卖得怎么样"）。
         # ⭐ 2026-09-22：**小工具**（价签 / 工牌）—— 用户：「左边栏下面做个小标签叫小工具」。
+        # ⭐ 2026-09-29（2.3.0）：**分销** —— 渠道分销部四张看板（区域/机型/销售员/明细），
+        #   注册表 `order=45` 排在小工具后面；可见性 `types="multi"`（区长/平台）
+        #   归 `tests/test_roles.py` 管，这里只钉**顺序和名字**。
         self.assertEqual(NAV_IDS,
-                         ["sales", "plan", "compliance", "inventory", "valueadd", "tools"])
+                         ["sales", "plan", "compliance", "inventory", "valueadd",
+                          "tools", "distribution"])
 
     def test_每个都有对应的_panel(self):
         for tab in NAV_IDS:

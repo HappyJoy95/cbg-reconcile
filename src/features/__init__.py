@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from . import compliance, inventory, plan, sales, tools, valueadd
+from . import compliance, distribution, inventory, plan, sales, tools, valueadd
 
 #: 全部一级功能模块。**顺序无所谓**（`Feature.order` 说了算）。
 ALL = [
@@ -34,4 +34,7 @@ ALL = [
     valueadd.FEATURE,
     # 小工具（2026-09-22）：价签 / 工牌 / **权益领取** / **串号追踪** —— 无定时步骤。
     tools.FEATURE,
+    # 分销（2.3.0，2026-09-29）：渠道分销部四张看板 —— **手动选时间段现拉**，
+    # 无定时步骤；`types="multi"` 只给区长/平台（见 `distribution/__init__.py`）。
+    distribution.FEATURE,
 ]
