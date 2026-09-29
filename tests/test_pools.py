@@ -400,5 +400,71 @@ class Test导出Excel真的能跑(unittest.TestCase):
         self.assertEqual(head, [label for _, label in DETAIL_COLS])
 
 
+class Test强制刷新整表重写(unittest.TestCase):
+    """**强制刷新**（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
+    按照新规则全部重写数据库」）—— `pools.replace_sales`。
+
+    要钉的是三种"看着成功、数没了"的失败：
+    * 老口径留下的行**必须真的被删掉**（`INSERT OR REPLACE` 删不掉它们 ——
+      这正是"重写"和"再写一遍"的差别）；
+    * 抓到 **0 行 ⇒ 拒绝清库**；
+    * 写到一半抛异常 ⇒ **回滚**，旧数据一行不少。
+    """
+
+    def test重写会删掉旧口径留下的行(self):
+        conn = mem()
+        pools.save_sales(conn, "erp-sales",
+                         [{"单号": "OLD1", "串号": "A1234567", "金额": 9}])
+        # 旧规则写进去、新规则不会再产生的"幽灵行"（REPLACE 永远删不掉它）
+        conn.execute("INSERT INTO erp_sales (sn, document_no, 金额) "
+                     "VALUES ('nosn:OLDGHOST:1', 'OLDGHOST', 5)")
+        conn.commit()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM erp_sales").fetchone()[0], 2)
+
+        w, _sns, _nosn = pools.replace_sales(
+            conn, "erp-sales", [{"单号": "NEW1", "串号": "B7654321", "金额": 3}])
+        got = {(r[0], r[1]) for r in conn.execute("SELECT sn, document_no FROM erp_sales")}
+        self.assertEqual(w, 1)
+        self.assertEqual(got, {("B7654321", "NEW1")},
+                         "旧行必须一张不剩 —— 这正是 save_sales（REPLACE）做不到的")
+
+    def test_抓到0行拒绝清库(self):
+        conn = mem()
+        pools.save_sales(conn, "erp-sales", [{"单号": "D1", "串号": "A1234567"}])
+        with self.assertRaises(pools.PoolError) as cm:
+            pools.replace_sales(conn, "erp-sales", [])
+        self.assertIn("0 行", str(cm.exception))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM erp_sales").fetchone()[0], 1,
+                         "空结果不许清库 —— 那是「看着成功、数没了」")
+
+    def test_写到一半失败要回滚_旧数据还在(self):
+        from unittest import mock
+        from src.features.compliance.comparison import store as _st
+        conn = mem()
+        pools.save_sales(conn, "erp-sales", [{"单号": "D1", "串号": "A1234567", "金额": 1}])
+        real_put = _st.put
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("模拟写到一半断了")
+            return real_put(*a, **k)
+
+        with mock.patch.object(_st, "put", boom):
+            with self.assertRaises(RuntimeError):
+                pools.replace_sales(conn, "erp-sales",
+                                    [{"单号": "N1", "串号": "B1111111"},
+                                     {"单号": "N2", "串号": "C2222222"}])
+        got = [r[0] for r in conn.execute("SELECT sn FROM erp_sales")]
+        self.assertEqual(got, ["A1234567"],
+                         "删了没写完必须回滚 —— 旧数据一行都不能少")
+
+    def test_快照池拒绝重写(self):
+        conn = mem()
+        with self.assertRaises(pools.PoolError):
+            pools.replace_sales(conn, "lg-stock", [{"单号": "D1", "串号": "A1234567"}])
+
+
 if __name__ == "__main__":
     unittest.main()

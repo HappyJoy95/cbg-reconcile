@@ -2040,6 +2040,13 @@ def _fetch_erp_sales(conn, args) -> int:
         empty = True
     if args.start or args.end:
         start = datetime.date.fromisoformat(args.start) if args.start else today.replace(day=1)
+    elif getattr(args, "rewrite", False):
+        # ⭐ **强制刷新**（2026-09-29 用户：「按新规则全部重写数据库」）：
+        #   老月份要按当前口径整表重落 —— 典型是 2026-09-22 起无串号的贴膜/礼包
+        #   行才入库，1–8 月一条都没有，只看日期窗口会看到"上月全是 0"。
+        start = datetime.date(today.year, 1, 1)
+        print("  ⚠ 强制刷新：按**当前口径**重抓本年度（%s ~ %s）→ 抓全后**整表重写**"
+              % (start, today), flush=True)
     elif empty:
         start = datetime.date(today.year, 1, 1)
         print("  ⚠ 池C 还是空的 —— 第一次建库，拉本年度（%s ~ %s），会分几段，稍等" % (start, today))
@@ -2064,7 +2071,18 @@ def _fetch_erp_sales(conn, args) -> int:
     except ErpError as e:
         print("❌ 云商销售拉取失败：%s" % e, file=sys.stderr)
         return EXIT_FETCH
-    w, sns, nosn = P.save_sales(conn, "erp-sales", rows)
+    try:
+        if getattr(args, "rewrite", False):
+            # ⭐ **强制刷新**：抓全了才动手，`replace_sales` 内部
+            #   DELETE + 写入同事务（失败回滚）；0 行会抛 PoolError 拒绝清库。
+            w, sns, nosn = P.replace_sales(conn, "erp-sales", rows)
+            print("  ⛔ 整表重写完成：旧表已清空，按**当前口径**写入 %d 行"
+                  "（拆串 %d · 无串号 %d）" % (w, sns, nosn), flush=True)
+        else:
+            w, sns, nosn = P.save_sales(conn, "erp-sales", rows)
+    except P.PoolError as e:
+        print("❌ 强制刷新没做成，旧数据一行没动：%s" % e, file=sys.stderr)
+        return EXIT_FETCH
     print("池C 云商销售 %s ~ %s：明细 %d 行 → 落库 %d 行"
           "（拆出串号 %d，无串号行 %d —— 贴膜/配件等，合成 nosn: 键落库，不进串号对账）"
           % (start, end, len(rows), w, sns, nosn))
@@ -2293,6 +2311,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "**不给就只显示状态**")
     p.add_argument("--start", default="", help="erp-sales 起始日 YYYY-MM-DD，默认当月 1 号")
     p.add_argument("--end", default="", help="erp-sales 结束日 YYYY-MM-DD，默认今天")
+    p.add_argument("--rewrite", action="store_true",
+                   help="**强制刷新**（2026-09-29 用户）：不给 --start 就从本年 1 月 1 日起，"
+                        "抓全之后**整表重写**（按当前口径把老月份重新落一遍）。"
+                        "⚠ 抓失败/抓到 0 行都不动旧数据。")
     p.add_argument("--date", default="", help="快照日 YYYY-MM-DD，默认今天")
     p.add_argument("--days-ago", type=int, default=0, help="快照日 = 今天往前 N 天")
     p.add_argument("--no-refresh", action="store_true", help="会话失效时别开浏览器静默续期")

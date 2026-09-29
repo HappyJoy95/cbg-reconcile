@@ -205,6 +205,38 @@ def save_sales(conn: sqlite3.Connection, pool: str, rows: list[dict], *,
     conn.commit()
     return written, sns, nosn
 
+def replace_sales(conn: sqlite3.Connection, pool: str, rows: list[dict], *,
+                  sn_field: str = "串号", doc_field: str = "单号") -> tuple:
+    """**整表重写**（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
+    按照新规则全部重写数据库」）。
+
+    为什么光 `save_sales`（`INSERT OR REPLACE`）不够：老口径写进去的行**删不掉** ——
+    比如 2026-09-22 之前无串号的贴膜/礼包行压根没入库，之后的改法也只会"补新的"，
+    旧规则留下的行会一直躺在表里。要"按新规则全部重写"就得**先清后写**。
+
+    ⚠ **顺序是安全的关键**：
+      1. 调用方**先抓全**（`rows` 已经在手上）才走到这儿 —— 抓失败时旧数据一行不动；
+      2. **0 行直接拒绝**：抓了个空还去清库 = 把门店的数清没了；
+      3. `DELETE` 和写入在**同一个事务**里（`save_sales` 末尾 commit），
+         写到一半抛异常就 `rollback()` —— 不会留下"删了没写完"的空表。
+
+    返回 `(写入行数, 拆出的串号数, 无串号行数)`（同 `save_sales`）。
+    """
+    table, is_snap = POOLS[pool]
+    if is_snap:
+        raise PoolError(f"{pool} 是快照池，整表重写请用 save_snapshot")
+    if not rows:
+        # 别拿一次空结果去清库 —— 那是"看着成功、数没了"最坏的一种失败
+        raise PoolError(f"{pool} 这次抓到 0 行，拒绝清空旧表（旧数据一行没动）")
+    conn.commit()                      # 收掉可能开着的隐式事务，别把 DELETE 混进去
+    try:
+        conn.execute('DELETE FROM "%s"' % table)
+        res = save_sales(conn, pool, rows, sn_field=sn_field, doc_field=doc_field)
+    except Exception:
+        conn.rollback()                # 删了没写完 → 回滚，旧数据还在
+        raise
+    return res
+
 def purge_snapshots(conn: sqlite3.Connection, *, keep_days: int = SNAP_KEEP_DAYS) -> dict:
     """删掉超过 `keep_days` 天的快照。返回 `{池名: 删了几行}`。"""
     cut = (datetime.date.today() - datetime.timedelta(days=keep_days)).isoformat()

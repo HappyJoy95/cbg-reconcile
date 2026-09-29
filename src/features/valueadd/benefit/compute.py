@@ -190,14 +190,16 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
 
     orphan = 0
     orphan_names: Dict[str, int] = {}
-    dropped = 0                     # 备注点名别家门店、整行剔除的台数（note 里报出来）
+    #: 备注点名别家门店的行 —— **2026-09-29 拍板：算转出店**，不再剔。
+    #: 只记台账、在 note 里报出来（不漏不重要看得见，别静默改数）。
+    transfer = 0
     fidx: Dict = {}
     as_of = ""
     src = "missing"
     db = find_db(root)
     if db and db.exists():
         src = "erp_sales"
-        # 倒排索引只建一次（读 config/stores.yaml）；名单读不到 = 空 = 一个不剔
+        # 倒排索引只建一次（读 config/stores.yaml）；名单读不到 = 空 = 一个都不认
         fidx = foreign_mod.name_index(root)
         # 送 **Care+** 的机型（折叠屏金秋礼遇活动）不算新机 ——
         # 用户 2026-09-26 拍板；机型表**跟着权益领取活动目录走**（换月随版本更新）。
@@ -217,12 +219,14 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
             if a is None:
                 # 店不在赛道/区域表（联想店、已关店）—— 整行跳过
                 continue
-            # ⚠ 备注点名**别家门店**（转单/代下单）→ 整行不算本店，
-            #   在 orphan/累加**之前**剔，店、人、利润一处都不留
-            #   （用户 2026-09-26：「备注其他门店的需要排除，不止针对麦凯乐和丽达茂」）
+            # ⚠ 备注点名**别家门店**（转单/转线上）→ **算转出店**（行上的门店）。
+            #   用户 2026-09-29 覆盖 2026-09-26 的「整行剔」：
+            #   「算转出店的，因为这个是转出店没有这个线上平台，通过别的店走的量，
+            #    增值业务肯定要算是原门店的销售」—— 整行剔会两边都算不着
+            #   （9 月实测：报表内门店 29 行 / 净 27 台 / 8499 元）。
+            #   判据仍走 foreign（识别 + 台账），只是不再 continue。
             if foreign_mod.other_store_in(store, r.get("note"), fidx):
-                dropped += 1
-                continue
+                transfer += 1
             if pa is None and r["who"]:
                 # 有单但不在人店表：**计入店、不进人榜**（note 里报笔数）
                 orphan += 1
@@ -345,9 +349,9 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
         note = "找不到订单库（out/cbg-*.db）—— 先跑「抓数据」"
     if orphan:
         note += " · 名册外有单 %d 笔（已计入店、未进人榜）" % orphan
-    if dropped:
-        # ⚠ 必须报出来 —— 否则门店只会发现"数变小了"，以为系统算错（坑13 同类）
-        note += " · 备注点名别家门店，剔除 %d 台" % dropped
+    if transfer:
+        # ⚠ 必须报出来 —— 转单行**计入本店**这件事要看得见（不漏不重的台账，坑13 同类）
+        note += " · 备注点名别家门店 %d 行（已计入本店=转出店）" % transfer
 
     return {
         "ok": src != "missing",
@@ -355,12 +359,12 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
         "start": start,
         "end": end,
         "day": d.day,
-        "progress": round((d.day - 1) / metric.DAYS_IN_MONTH, 4),
+        "progress": round(min(1.0, d.day / metric.DAYS_IN_MONTH), 4),
         "as_of": as_of,
         "src": src,
         "note": note,
         "orphan": orphan,
-        "foreign_dropped": dropped,
+        "transfer_rows": transfer,
         "roster_source": roster_src,
         "roster_why": roster_why,
         "stores": store_rows,
@@ -402,8 +406,8 @@ def load(root=None, stores: Optional[List[str]] = None, day=None, force: bool = 
         db, start, end,
         root / "config" / "valueadd-benefit.yaml",
         root / _staff_mod.ROSTER_REL,
-        # 剔除判据读门店名单（foreign.name_index）—— 改了名单必须重算，
-        # 否则新店/改名后的转单行会继续被算进本店（陈旧剔除表）
+        # 转单识别/台账读门店名单（foreign.name_index）—— 改了名单必须重算，
+        # 否则 note 里那句「备注点名别家门店 N 行」会陈旧（**只影响台账，不影响台量**）
         root / "config" / "stores.yaml",
     )
     if not force and _FINGER.get(key) == fp and key in _CACHE:

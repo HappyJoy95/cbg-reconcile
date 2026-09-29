@@ -29,7 +29,8 @@ from .features.compliance.comparison.store import (POOLS, POOL_RENAME, SCHEMA,  
                                         _reported_sns, _sold_sns, _table_cols,
                                         details, ensure, latest, pool_colname,
                                         pool_row_from, purge_snapshots,
-                                        quadrants, save_sales, save_snapshot,
+                                        quadrants, replace_sales, save_sales,
+                                        save_snapshot,
                                         snapshots, today)
 from .features.compliance.comparison.text import (POOL_LABELS, notify_lines,       # noqa: F401
                                        status)
@@ -37,6 +38,7 @@ from .features.compliance.comparison.text import (POOL_LABELS, notify_lines,    
 __all__ = [
     "POOLS", "POOL_LABELS", "POOL_RENAME", "SCHEMA", "SNAP_KEEP_DAYS", "PoolError",
     "pool_colname", "pool_row_from", "ensure", "today", "save_snapshot", "save_sales",
+    "replace_sales",
     "purge_snapshots", "snapshots", "latest", "quadrants", "details",
     "is_sample_marker", "combine", "SAMPLE_MARK", "RETURN_BILL_TYPES", "CLOSED_STATUS",
     "QUADRANT_LABELS", "DETAIL_COLS", "export_xlsx", "notify_lines", "status",

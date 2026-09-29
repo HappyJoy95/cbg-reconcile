@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""备注点名别家门店的行不算本店 —— 2.2.1 bug #4②（通用判据 + 两页接入）。
+"""识别「备注点名别家门店」的行（转单/转线上）—— 判据 + 两页接入。
 
-用户 2026-09-26：麦凯乐 40 vs 手算 39，差的是 9-11 一条分销（备注「丽达茂美团」）；
-拍板「备注其他门店的需要排除，不止针对麦凯乐和丽达茂」⇒ 通用判据，不写死店名。
+⚠ **归属口径 2026-09-29 翻了**：这些行**算转出店**（行上的门店），不再剔。
+用户：「算转出店的，因为这个是转出店没有这个线上平台，通过别的店走的量，
+**增值业务肯定要算是原门店的销售**」。
+（历史：2026-09-26 拍的是「整行剔」，麦凯乐 40 vs 手算 39 那台引出的通用判据；
+ 判据本身一条没改，改的是**调用处**——从 continue 变成记台账。）
 
 三层钉：
-* `foreign.py` 判据单测（短名 / 自己不算 / 撞名放过 / 平台岗不参与）；
+* `foreign.py` 判据单测（短名 / 自己不算 / 撞名放过 / 平台岗不参与）—— **保持原样**；
 * **权益页集成**：临时库 + monkeypatch `find_db`（与 film 夹具同套路）——
-  剔除必须发生在**累加之前**，店与人都不能算；
-* **防护膜页集成**：同源同口径，一台都不能漏。
+  转单行必须**计入本店**（店行、人行、利润都算），note 报出台账；
+* **防护膜页集成**：同源同口径，两页一台都不能少。
 """
 
 from __future__ import annotations
@@ -144,25 +147,27 @@ class _BenefitDbCase(unittest.TestCase):
 
 
 class Test权益页接入(_BenefitDbCase):
-    """`benefit/compute` 必须在**累加之前**剔除「备注点名别家门店」的行 ——
-    店行、人行、利润都不能算进去（bug #4②：麦凯乐 40 vs 手算 39 的那台）。"""
+    """`benefit/compute`：转单行（备注点名别家）**计入本店 = 转出店** ——
+    2026-09-29 拍板；店行、人行、利润都要算上，note 报出台账（不许静默）。"""
 
-    def test转单行不算本店(self):
+    def test转单行算转出店(self):
         rows = [
             self._sale(备注=""),                                   # 正常 1 台
             self._sale(备注="丽达茂美团", 单据类型="分销",
-                       支付时间="2026-09-11 20:34:00"),             # 转单 → 剔
+                       支付时间="2026-09-11 20:34:00"),             # 转单 → **算本店**
             self._sale(备注="麦凯乐自提", 支付时间="2026-09-12 10:00:00"),  # 提自己 → 留
         ]
         self._patch(self._db(rows))
         from src.features.valueadd.benefit import compute as bcomp
         d = bcomp.compute(stores=[MAIKAILER], day=datetime.date(2026, 9, 26))
         st = d["stores"][0]
-        self.assertEqual(st["new"], 2,
-                         "转单行（备注=丽达茂美团）不该算进本店，应剩2台")
-        self.assertEqual(st["new_retail"] + st["new_online"], 2)
-        # 剔除要可见（note 里报出来），否则门店只会发现"数变小了"
-        self.assertIn("剔", d.get("note", ""), "note 要报出剔除台数，别静默改数")
+        self.assertEqual(st["new"], 3,
+                         "转单行算转出店 → 2 零售 + 1 美团分销 = 3（修前剔成 2）")
+        self.assertEqual(st["new_retail"] + st["new_online"], 3)
+        self.assertEqual(d.get("transfer_rows"), 1,
+                         "麦凯乐自提是本店名、不算转单；只有「丽达茂美团」那行记台账")
+        self.assertIn("已计入本店", d.get("note", ""),
+                      "note 要报出台账，否则以后没人知道口径变过（坑13 同类）")
 
     def test空备注店一个不剔(self):
         rows = [self._sale(备注=""), self._sale(备注="京东比价")]
@@ -170,12 +175,13 @@ class Test权益页接入(_BenefitDbCase):
         from src.features.valueadd.benefit import compute as bcomp
         d = bcomp.compute(stores=[MAIKAILER], day=datetime.date(2026, 9, 26))
         self.assertEqual(d["stores"][0]["new"], 2)
+        self.assertEqual(d.get("transfer_rows"), 0)
 
 
 class Test防护膜页接入(unittest.TestCase):
-    """`film/compute` 同源同口径 —— 转单行也要剔（否则两页对不上）。"""
+    """`film/compute` 同源同口径 —— 转单行也算转出店（两页必须一致，否则对不上）。"""
 
-    def test转单行不算本店(self):
+    def test转单行算转出店(self):
         import tempfile
         from src.features.valueadd.film import compute as fcomp
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -211,9 +217,11 @@ class Test防护膜页接入(unittest.TestCase):
         self.addCleanup(fcomp._CACHE.clear)
         d = fcomp.compute(stores=[MAIKAILER], day=datetime.date(2026, 9, 26))
         st = d["rows"][0]
-        # 正常零售1台 + 转单分销1台 → 剔转单后 =1 台（×0.9 = 0.9）
-        self.assertAlmostEqual(st["new"], 1 * 0.9, places=6,
-                               msg="转单行不该算进防护膜页新机")
+        # 正常零售1台 + 转单分销1台（美团）→ **都算转出店** = 2 台（×0.9 = 1.8）
+        self.assertAlmostEqual(st["new"], 2 * 0.9, places=6,
+                               msg="转单行该算进防护膜页新机（修前剔成 0.9）")
+        self.assertEqual(d.get("transfer_rows"), 1, "转单行数要记台账")
+        self.assertIn("已计入本店", d.get("note", ""), "note 要报出台账，别静默")
 
 
 if __name__ == "__main__":

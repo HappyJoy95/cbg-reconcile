@@ -2638,6 +2638,93 @@ function renderPlan(d) {
   }
 }
 
+/* ═══════════ 增值两页的日期窗口（2026-09-29）═══════════
+   形态 = **月份 select + 该月内截止日 select**（用户三选一里选的这个；**不跨月**），
+   窗口 = 该月 1 号 ～ 所选那天；默认 = 今天（页面原行为一点不变）。
+   用例：每月 1 号点「上月」→ 上月最后一天 = 看上月全月；月中把截止日选到 28 号。
+⚠ 后端契约：`GET /api/film?end=YYYY-MM-DD` / `GET /api/benefit?end=…`；
+   不给 = 今天，给了非法值后端回 400 + error（前端能显示原因）。
+⚠ 导出 body 也带同一个 `end` —— 否则「页面看 8 月、导出 9 月」会静默对不上。 */
+const _win = {};
+const _pad2 = (n) => (n < 10 ? '0' : '') + n;
+function _ymd(d) {
+  return d.getFullYear() + '-' + _pad2(d.getMonth() + 1) + '-' + _pad2(d.getDate());
+}
+function _todayYm() {
+  const t = new Date();
+  return t.getFullYear() + '-' + _pad2(t.getMonth() + 1);
+}
+/** 当月往前 12 个月（含本月）—— 库是一年一个，够用了。 */
+function _monthOpts() {
+  const t = new Date(), out = [];
+  for (let i = 0; i < 13; i++) {
+    const d = new Date(t.getFullYear(), t.getMonth() - i, 1);
+    out.push(d.getFullYear() + '-' + _pad2(d.getMonth() + 1));
+  }
+  return out;
+}
+function _daysIn(ym) {
+  const p = String(ym).split('-');
+  return new Date(Number(p[0]), Number(p[1]), 0).getDate();
+}
+/** 填「月份 + 截止日」两个 select（幂等：填过就跳过，`force` 才重建）。 */
+function winInit(prefix, force) {
+  const mSel = $('#' + prefix + '-month'), dSel = $('#' + prefix + '-day');
+  if (!mSel || !dSel) return;
+  if (!_win[prefix]) {
+    _win[prefix] = { month: '', day: 0 };
+    mSel.addEventListener('change', () => { winFillDays(prefix, 0); winReload(prefix); });
+    dSel.addEventListener('change', () => {
+      _win[prefix].day = Number(dSel.value);
+      winReload(prefix);
+    });
+    $('#' + prefix + '-today')?.addEventListener('click', () => {
+      _win[prefix] = { month: _todayYm(), day: new Date().getDate() };
+      winInit(prefix, true);
+      winReload(prefix);
+    });
+    $('#' + prefix + '-prev')?.addEventListener('click', () => {
+      const t = new Date();
+      const d = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+      const ym = d.getFullYear() + '-' + _pad2(d.getMonth() + 1);
+      // 上月**最后一天** = 整月（进度封顶 100%、台量进度 = 整月目标）
+      _win[prefix] = { month: ym, day: _daysIn(ym) };
+      winInit(prefix, true);
+      winReload(prefix);
+    });
+  }
+  const st = _win[prefix];
+  if (!force && mSel.options.length && st.month) return;
+  const months = _monthOpts();
+  mSel.innerHTML = months.map((m) => '<option value="' + m + '">'
+    + m.slice(0, 4) + '年' + Number(m.slice(5)) + '月</option>').join('');
+  mSel.value = months.indexOf(st.month) >= 0 ? st.month : _todayYm();
+  winFillDays(prefix, st.day);
+}
+/** 按当前月份重填「几号」：`keepDay` 合法才沿用；过去月份默认**最后一天**、本月默认今天。 */
+function winFillDays(prefix, keepDay) {
+  const mSel = $('#' + prefix + '-month'), dSel = $('#' + prefix + '-day');
+  if (!mSel || !dSel || !mSel.value) return;
+  const ym = mSel.value, n = _daysIn(ym);
+  const day = (keepDay >= 1 && keepDay <= n) ? keepDay
+    : (ym === _todayYm() ? new Date().getDate() : n);
+  let html = '';
+  for (let i = 1; i <= n; i++) html += '<option value="' + i + '">' + i + ' 日</option>';
+  dSel.innerHTML = html;
+  dSel.value = String(day);
+  _win[prefix] = { month: ym, day: day };
+}
+/** 当前窗口的截止日 `YYYY-MM-DD`（还没填好 = 今天）。 */
+function winEnd(prefix) {
+  const st = _win[prefix];
+  if (!st || !st.month || !st.day) return _ymd(new Date());
+  return st.month + '-' + _pad2(st.day);
+}
+function winReload(prefix) {
+  if (prefix === 'film') loadFilm();
+  else loadBenefit();
+}
+
 /* ═══════════ 增值 · 防护膜达成情况（2026-09-22）═══════════
    只读 `/api/film`（后端本地库现算）。 */
 function filmPct(x, digits) {
@@ -2858,9 +2945,10 @@ function renderFilm(d) {
 }
 
 async function loadFilm() {
+  winInit('film');                      // 日期窗口（默认今天；改了选择会重进这里）
   filmLoading();
   try {
-    renderFilm(await api('/api/film'));
+    renderFilm(await api('/api/film?end=' + encodeURIComponent(winEnd('film'))));
   } catch (e) {
     renderFilm({ ok: false, why: '读取防护膜达成失败：' + e.message });
   }
@@ -3689,9 +3777,10 @@ function bindClaimActions(rootEl) {
 }
 
 async function loadBenefit() {
+  winInit('benefit');                   // 日期窗口（默认今天；改了选择会重进这里）
   benefitLoading();
   try {
-    renderBenefit(await api('/api/benefit'));
+    renderBenefit(await api('/api/benefit?end=' + encodeURIComponent(winEnd('benefit'))));
   } catch (e) {
     renderBenefit({ ok: false, why: '读取无忧会员权益失败：' + e.message });
   }
@@ -3714,7 +3803,7 @@ $('#btn-export-benefit')?.addEventListener('click', async (e) => {
   const old = btn.textContent;
   btn.textContent = '导出中…';
   try {
-    const r = await api('/api/benefit/export', { method: 'POST', body: {} });
+    const r = await api('/api/benefit/export', { method: 'POST', body: { end: winEnd('benefit') } });
     const url = '/api/export/download?name=' + encodeURIComponent(r.file);
     triggerDownload(url, r.file);
     if (box) {
@@ -3983,7 +4072,7 @@ $('#btn-export-film')?.addEventListener('click', async (e) => {
   const old = btn.textContent;
   btn.textContent = '导出中…';
   try {
-    const r = await api('/api/film/export', { method: 'POST', body: {} });
+    const r = await api('/api/film/export', { method: 'POST', body: { end: winEnd('film') } });
     const url = '/api/export/download?name=' + encodeURIComponent(r.file);
     triggerDownload(url, r.file);
     if (box) {
@@ -5285,6 +5374,40 @@ async function refreshWithFetch(page, btn, reload) {
     await reload();
   }
 }
+
+/** 设置 · **强制刷新**（2026-09-29 用户：「加个强制刷新按钮吧，
+ *  按照新规则全部重写数据库」）—— 按当前口径重抓本年度销售明细、**整表重写**。
+ *
+ *  ⚠ 危险动作 ⇒ 二次确认（文案里说清"什么时候需要它 / 会不会丢数据"）；
+ *  ⚠ 起后台任务 + 打开日志抽屉（跟「刷新」同一条 runner 路，同一把锁）；
+ *  ⚠ 后端**不过 30 分钟冷却**（"强制"就是这个意思），但已经在跑会回 409。
+ */
+$('#btn-sales-rewrite')?.addEventListener('click', async () => {
+  const btn = $('#btn-sales-rewrite');
+  const msg = $('#rewrite-msg');
+  const ok = confirm('按当前口径重抓本年度销售明细、整表重写数据库？\n\n'
+    + '· 历史月份按现在的规则重新落库（比如 9-22 起才入库的贴膜/礼包）\n'
+    + '· 要几分钟，进度在右下角「运行日志」抽屉里\n'
+    + '· 抓失败或抓到 0 行，旧数据一行不动');
+  if (!ok) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/sales-rewrite', { method: 'POST', body: {} });
+    toast(r.message || '开始重写…');
+    if (msg) msg.textContent = r.message || '';
+    setRunDrawer(true);
+    await watchJob((r.job || {}).id || '');
+    if (msg) msg.textContent += '（跑完了，看上面日志的退出码）';
+  } catch (e) {
+    // ⚠ 409 = 已经有一趟在跑 —— 说人话，别弹红的吓人
+    //   （后端文案是「已经有一趟在跑了」，别去匹配「已经在跑」—— 匹不上就一直是红的）
+    const busy = e.message.indexOf('有一趟') >= 0 || e.message.indexOf('已经在跑') >= 0;
+    toast(e.message, busy ? '' : 'bad');
+    if (msg) msg.textContent = e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
 
 /** 盯着一个后台任务直到结束（把日志贴进抽屉）。返回退出码，出错给 -1。 */
 async function watchJob(jobId) {

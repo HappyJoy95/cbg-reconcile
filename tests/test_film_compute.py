@@ -205,5 +205,29 @@ class Test前端拆到人(unittest.TestCase):
         self.assertIn("拆到个人", self.HTML)
 
 
+class Test日期窗口(unittest.TestCase):
+    """日期窗口（2026-09-29 用户：「加个日期选择窗口吧，每个月 1 号可以手动
+    拉取上个月全月数据」）。
+
+    形态 = **月份 + 该月内截止日**（不跨月）；窗口 = 该月 1 号 ～ 这天；
+    时间进度 = 已过天数 ÷ 30，**封顶 100%**（旧式 `(day-1)/30` 到 30 号只有 96.7%）。
+    """
+
+    def test窗口是该月1号到截止日(self):
+        self.assertEqual(film_compute.month_window(datetime.date(2026, 8, 31)),
+                         ("2026-08-01", "2026-08-31"))
+        self.assertEqual(film_compute.month_window(datetime.date(2026, 9, 28)),
+                         ("2026-09-01", "2026-09-28"))
+
+    def test时间进度按已过天数且封顶(self):
+        self.assertAlmostEqual(film_compute.time_progress(datetime.date(2026, 9, 28)),
+                               28 / 30.0, places=6,
+                               msg="截止 28 日 = 93.3%（源表右上角实写 93.3%）")
+        self.assertAlmostEqual(film_compute.time_progress(datetime.date(2026, 9, 30)),
+                               1.0, places=6, msg="30 号要 100%，旧式永远 96.7%")
+        self.assertAlmostEqual(film_compute.time_progress(datetime.date(2026, 8, 31)),
+                               1.0, places=6, msg="上月最后一天 = 100%，不能 31/30")
+
+
 if __name__ == "__main__":
     unittest.main()

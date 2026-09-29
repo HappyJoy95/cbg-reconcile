@@ -9,11 +9,13 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import mimetypes
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -1573,18 +1575,22 @@ class App:
         d["store_filter"] = "、".join(sorted(str(x) for x in stores if x))
         return d
 
-    def film(self) -> dict:
-        """「增值 · 防护膜达成情况」—— 本地销售明细**现算**；范围先按身份收窄再滤。"""
+    def film(self, day=None) -> dict:
+        """「增值 · 防护膜达成情况」—— 本地销售明细**现算**；范围先按身份收窄再滤。
+
+        `day` = **日期窗口的截止日**（2026-09-29 加）：`None` = 今天；
+        给了就看「该月 1 号 ～ 这天」（每月 1 号拉上月全月用）。
+        """
         from .features.valueadd.film import compute as film_compute
         sc = role_scope(self)
         # stores=None（平台）= 全部；门店/区长只算自己看得见的那些店
-        d = film_compute.load(self.root, stores=sc.get("stores"))
+        d = film_compute.load(self.root, stores=sc.get("stores"), day=day)
         return self.filter_film_rows(d)
 
-    def film_export(self, who: str = "", name: str = "") -> dict:
-        """导出防护膜达成 Excel —— 走的就是 `self.film()`（已按身份过滤）。"""
+    def film_export(self, who: str = "", name: str = "", day=None) -> dict:
+        """导出防护膜达成 Excel —— 走的就是 `self.film(day)`（**同一个窗口** + 已按身份过滤）。"""
         from .features.valueadd.film import export as film_export_mod
-        return film_export_mod.export(self.root, self.film(), who=who, name=name)
+        return film_export_mod.export(self.root, self.film(day=day), who=who, name=name)
 
     def filter_benefit_rows(self, d: dict) -> dict:
         """无忧会员权益按身份滤店 —— 店 / 区域 / 人员三块都滤，合计重算。
@@ -1634,21 +1640,26 @@ class App:
         d["store_filter"] = "、".join(sorted(str(x) for x in stores if x))
         return d
 
-    def benefit(self) -> dict:
-        """「增值 · 无忧会员权益」—— 本地 erp_sales 现算；名册走**系统人店表**。"""
+    def benefit(self, day=None) -> dict:
+        """「增值 · 无忧会员权益」—— 本地 erp_sales 现算；名册走**系统人店表**。
+
+        `day` = **日期窗口的截止日**（2026-09-29 加）：`None` = 今天；
+        给了就看「该月 1 号 ～ 这天」。
+        """
         from .features.valueadd.benefit import compute as benefit_compute
         sc = role_scope(self)
         d = benefit_compute.load(
             self.root,
             stores=sc.get("stores"),
+            day=day,
             config_path=self.config_path,
             env_file=self.erp_env_file(),
         )
         return self.filter_benefit_rows(d)
 
-    def benefit_export(self, who: str = "", name: str = "") -> dict:
+    def benefit_export(self, who: str = "", name: str = "", day=None) -> dict:
         from .features.valueadd.benefit import export as benefit_export_mod
-        return benefit_export_mod.export(self.root, self.benefit(), who=who, name=name)
+        return benefit_export_mod.export(self.root, self.benefit(day=day), who=who, name=name)
 
     def claim_activities(self) -> dict:
         """「小工具 · 权益领取 · 活动一览」—— 只读配置，零网络。
@@ -2675,6 +2686,25 @@ class App:
         }
 
 
+def parse_end_day(raw) -> "datetime.date | None":
+    """`?end=YYYY-MM-DD` → `date`；**不给 = `None`（= 今天）**，给非法值 → `ValueError`。
+
+    增值两页的「日期窗口」（2026-09-29，用户选的形态：月份 + 该月内截止日）：
+    窗口永远 = **该月 1 号 ～ 这天** —— `compute.month_window(day)` 天然就是这个语义，
+    所以后端只要拿到「截止到哪天」即可，**不接受跨月**（本版不做，见开发目标）。
+
+    ⚠ 抛 `ValueError` 就够了：`_dispatch` 顶层把它转成 **400 + `error` 文案**，
+      前端 `api()` 读 `data.error`，用户看得到"为什么失败"而不是干巴巴一个 400。
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError:
+        raise ValueError("截止日期要写成 YYYY-MM-DD（如 2026-08-31），收到 %r" % s)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "cbg-reconcile"
     app: App = None            # 由 serve() 注入
@@ -3103,24 +3133,31 @@ class Handler(BaseHTTPRequestHandler):
         # **月度生意计划**（M22，2026-09-21）—— 纯读盘；范围在 `App.plan()` 里按身份滤。
         # ⚠ 每个接口都要有一行 `forbid`（坑 18）：导出的判据跟达成同一个（`not is_store`）。
         # **增值 · 防护膜达成情况**（2026-09-22）—— 本地库现算；范围在 `App.film()` 里按身份滤。
+        # ⚠ `?end=YYYY-MM-DD` = **日期窗口截止日**（2026-09-29 加，每月 1 号看上月全月用）
         if path == "/api/film" and method == "GET":
-            return self._json(app.film())
+            end = parse_end_day((query.get("end") or [""])[0])
+            return self._json(app.film(day=end))
         if path == "/api/film/export" and method == "POST":
             if not scope["can"].get("film.export"):
                 return self._json(forbid(scope, "导出为 Excel",
                                          "门店账号不导出，要看明细就在页面上看"), 403)
+            body = self._read_json() or {}
             res = app.film_export(who=scope.get("who") or scope.get("account") or "",
-                                  name=(self._read_json() or {}).get("name") or "")
+                                  name=body.get("name") or "",
+                                  day=parse_end_day(body.get("end")))
             return self._json(res)
         # **增值 · 无忧会员权益**（2026-09-22）—— 本地库现算；范围在 App.benefit() 滤。
         if path == "/api/benefit" and method == "GET":
-            return self._json(app.benefit())
+            end = parse_end_day((query.get("end") or [""])[0])
+            return self._json(app.benefit(day=end))
         if path == "/api/benefit/export" and method == "POST":
             if not scope["can"].get("benefit.export"):
                 return self._json(forbid(scope, "导出为 Excel",
                                          "门店账号不导出，要看明细就在页面上看"), 403)
+            body = self._read_json() or {}
             res = app.benefit_export(who=scope.get("who") or scope.get("account") or "",
-                                     name=(self._read_json() or {}).get("name") or "")
+                                     name=body.get("name") or "",
+                                     day=parse_end_day(body.get("end")))
             return self._json(res)
         # **小工具 · 权益领取**（2026-09-22）—— 活动只读配置；待领滤店；状态写本机。
         if path == "/api/claim/activities" and method == "GET":
@@ -4065,6 +4102,35 @@ class Handler(BaseHTTPRequestHandler):
                                # ⚠ 说清**抓的是哪几步**（别只写"抓新数据"）——
                                #   用户要看得出"刷达成只抓云商，不碰玲珑"。
                                "message": msg})
+
+        # ⭐ **设置 · 强制刷新**（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
+        #   按照新规则全部重写数据库」）—— 起一趟
+        #   `pools --fetch erp-sales --start 年初 --end 今天 --rewrite`。
+        #   ⚠ **不过 30 分钟冷却**（"强制"就是这个意思），但**共用同一把运行锁**：
+        #     已经有一趟在跑就 409，绝不并行写同一个库。
+        #   ⚠ 起的是后台进程、日志进右下角抽屉（跟「刷新」同一条 runner 路），
+        #     不在这儿同步跑：本年度约 11 万行，抓要几分钟。
+        if path == "/api/sales-rewrite" and method == "POST":
+            if manager.current():
+                return self._json({"ok": False, "running": True,
+                                   "error": "已经有一趟在跑了，等它结束再刷新"}, 409)
+            today = datetime.date.today()
+            start = datetime.date(today.year, 1, 1)
+            argv = [sys.executable or "python", "-u", "-m", "src.cli", "-c", app.config,
+                    "-v", "pools", "--fetch", "erp-sales",
+                    "--start", start.isoformat(), "--end", today.isoformat(),
+                    "--rewrite", "--no-refresh", "--no-push", "--no-mail"]
+            try:
+                job = manager.start_argv(app.root, argv, what="rewrite",
+                                         what_label="强制刷新（整表重写销售明细）")
+            except RuntimeError as e:               # runner 自己也会挡一道
+                return self._json({"ok": False, "running": True, "error": str(e)}, 409)
+            return self._json({
+                "ok": True, "job": job.snapshot(0),
+                "start": start.isoformat(), "end": today.isoformat(),
+                "message": "正在重抓本年度（%s ~ %s）销售明细、按当前口径整表重写 —— "
+                           "日志在右下角抽屉里看；抓失败或抓到 0 行都不会动旧数据"
+                           % (start.isoformat(), today.isoformat())})
 
         if path == "/api/run" and method == "POST":
             # ⚠⚠ 2026-09-21 晚（用户：「现在不需要 run daily 吧，按定时器运行就行了」）——

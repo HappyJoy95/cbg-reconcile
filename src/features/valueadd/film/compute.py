@@ -37,9 +37,15 @@ def month_window(day=None) -> Tuple[str, str]:
 
 
 def time_progress(day=None) -> float:
-    """时间进度 —— 跟源表 `T1 =(DAY(TODAY())-1)/30` 同一口径。"""
+    """时间进度 = **已过天数 ÷ 30**，封顶 100%。
+
+    ⚠ 2026-09-29 从 `(day-1)/30` 改成 `day/30`（用户点头「问题不大」）：
+      * 「截止到 28 日」= 已过 28 天 = **93.3%** —— 源表右上角实写 93.3%（= 28/30）；
+      * `(day-1)/30` 到 30 号那天只有 96.7%，**永远到不了 100%**；
+      * 选**上月最后一天**看全月时要 = 100%（31 号 → 31/30 封顶）。
+    """
     d = day or datetime.date.today()
-    return max(0.0, min(1.0, (d.day - 1) / 30.0))
+    return max(0.0, min(1.0, d.day / 30.0))
 
 
 def find_db(root) -> Optional[Path]:
@@ -76,7 +82,7 @@ def _load_rows_sqlite(db: Path, start: str, end: str, stores=None):
                 continue
             note = " ".join(str(r[k] or "") for k in ("备注", "单行备注",
                                                      "客户/顾客", "付款方式"))
-            # 「备注点名别家门店」的剔除判据只认**备注/单行备注**（用户口径），
+            # 「备注点名别家门店」的**识别**只认备注/单行备注（用户口径），
             # 不能拿 note 全量判 —— 客户/付款方式里出现店名会误伤
             xnote = " ".join(str(r[k] or "") for k in ("备注", "单行备注"))
             yield {
@@ -159,7 +165,9 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
             warn = "本月库里还没有贴膜行（可能刚修过无串号落库，等下一次 erp-dump）"
 
     as_of = ""
-    dropped = 0        # 备注点名别家门店、整行剔除（note 里报出来，别静默改数）
+    #: 备注点名别家门店的行 —— **2026-09-29 拍板：算转出店**，不再剔。
+    #: 只记台账、在 note 里报出来（不漏不重要看得见，别静默改数）。
+    transfer = 0
     fidx = foreign_mod.name_index(root) if src == "erp_sales" else {}
     for r in stream:
         if r.get("ts") and r["ts"] > as_of:
@@ -168,11 +176,12 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         a = acc.get(store)
         if a is None:
             continue
-        # ⚠ 备注点名**别家门店**（转单/代下单）→ 整行不算本店
-        #   （用户 2026-09-26 通用规则，与权益页同口径）
+        # ⚠ 备注点名**别家门店**（转单/转线上）→ **算转出店**（行上的门店）。
+        #   用户 2026-09-29 覆盖 2026-09-26 的「整行剔」：转出店没有那个线上平台、
+        #   是通过别的店走的量，增值业绩归原门店（与权益页同口径）。
+        #   判据仍走 foreign（识别 + 台账），只是不再 continue。
         if foreign_mod.other_store_in(store, r.get("xnote"), fidx):
-            dropped += 1
-            continue
+            transfer += 1
         pa = pacc.setdefault((store, r.get("谁") or ""), _blank_acc())
         qty, profit, typ = r["数量"], r["毛利"], r["类型"]
         c1, c2, name, note = r["c1"], r["c2"], r["名称"], r["note"]
@@ -211,8 +220,8 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         rows.append(r)
     note = ("新机=(零售净+美团分销净)×0.9；京东分销不算。台均基线内置 25/30/35/40。"
             "源：仅 erp_sales（SQLite）。")
-    if dropped:
-        note += " · 备注点名别家门店，剔除 %d 台" % dropped
+    if transfer:
+        note += " · 备注点名别家门店 %d 行（已计入本店=转出店）" % transfer
     if warn:
         note += " · " + warn
     return {
@@ -225,7 +234,7 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         "rows": rows,
         "summary": metric.summarize(rows),
         "source": src,
-        "foreign_dropped": dropped,
+        "transfer_rows": transfer,
         "note": note,
     }
 
@@ -244,7 +253,8 @@ def _fp(root: Path, start: str, end: str) -> tuple:
             pass
     return (("db", "missing"), _stores_fp(root))
 def _stores_fp(root: Path) -> tuple:
-    """门店名单指纹 —— 剔除判据（foreign.name_index）读它，改名单必须重算。"""
+    """门店名单指纹 —— 转单识别/台账（foreign.name_index）读它，改名单必须重算
+    （只影响 note 里那句台账，**不影响台量归属**）。"""
     p = Path(root) / "config" / "stores.yaml"
     try:
         st = p.stat()

@@ -2812,3 +2812,136 @@ class Test壁纸接口(unittest.TestCase):
         # 路由源码里也不该出现这个 path 分支
         src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
         self.assertNotIn('path == "/api/theme"', src)
+
+
+class Test增值日期窗口(unittest.TestCase):
+    """日期窗口（2026-09-29）—— 用户：「加个日期选择窗口吧，
+    每个月 1 号可以手动拉取上个月全月数据」。
+
+    形态（用户三选一里选的）：**月份 select + 该月内截止日**，**不跨月**；
+    契约 `?end=YYYY-MM-DD`，窗口 = **该月 1 号 ～ 这天**；不给 = 今天（原行为不变）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_parse_end_day_合法与非法(self):
+        self.assertIsNone(web.parse_end_day(""))
+        self.assertIsNone(web.parse_end_day(None))
+        self.assertIsNone(web.parse_end_day("   "))
+        self.assertEqual(web.parse_end_day("2026-08-31"), datetime.date(2026, 8, 31))
+        for bad in ("2026/08/31", "08-31", "2026-13-01", "昨天"):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                web.parse_end_day(bad)
+            self.assertIn("YYYY-MM-DD", str(cm.exception),
+                          "报错要写清格式，别只说 invalid date")
+
+    def test_窗口是该月1号到截止日(self):
+        code, d = self.srv.request("GET", "/api/film?end=2026-08-31")
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d.get("start"), "2026-08-01")
+        self.assertEqual(d.get("end"), "2026-08-31")
+
+    def test_不给end就是今天(self):
+        code, d = self.srv.request("GET", "/api/film")
+        self.assertEqual(code, 200, d)
+        today = datetime.date.today()
+        self.assertEqual(d.get("start"), today.replace(day=1).isoformat())
+        self.assertEqual(d.get("end"), today.isoformat())
+
+    def test_权益页也吃同一个end(self):
+        from src.features.valueadd.benefit import compute as bcomp
+        # 名册走系统人店表（会联网）—— 集成测试一律 patch 掉（同 test_foreign_note）
+        with mock.patch.object(bcomp, "load_people",
+                               lambda *a, **k: ({}, "empty", "")):
+            code, d = self.srv.request("GET", "/api/benefit?end=2026-08-31")
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d.get("start"), "2026-08-01")
+        self.assertEqual(d.get("end"), "2026-08-31")
+
+    def test_非法end回400带error(self):
+        """前端读的是 `error` —— 只回 400 的话用户看不到「为什么失败」。"""
+        code, d = self.srv.request("GET", "/api/film?end=2026%2F08%2F31")
+        self.assertEqual(code, 400, d)
+        self.assertIn("error", d)
+        self.assertIn("YYYY-MM-DD", d["error"])
+
+    def test_前端两页都有窗口控件且带end(self):
+        for i in ("film-month", "film-day", "film-prev", "film-today",
+                  "benefit-month", "benefit-day", "benefit-prev", "benefit-today"):
+            self.assertIn('id="%s"' % i, INDEX_HTML, "index.html 缺 id=" + i)
+        self.assertIn("/api/film?end=", APP_JS)
+        self.assertIn("/api/benefit?end=", APP_JS)
+        self.assertIn("winEnd('film')", APP_JS)
+        self.assertIn("winEnd('benefit')", APP_JS)
+        # 导出必须带同一个 end —— 否则「页面看 8 月、导出 9 月」会静默对不上
+        self.assertIn("body: { end: winEnd('film') }", APP_JS)
+        self.assertIn("body: { end: winEnd('benefit') }", APP_JS)
+
+
+class Test设置强制刷新(unittest.TestCase):
+    """设置 · 强制刷新（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
+    按照新规则全部重写数据库」）—— 起一趟
+    `pools --fetch erp-sales --start 年初 --end 今天 --rewrite`。
+
+    钉三件事：
+    * **argv 必须带 `--rewrite` + 年初窗口**（不带就退化成"又写一遍"，
+      老口径的行永远删不掉 —— 那正是这次要修的东西）；
+    * **已经在跑 ⇒ 409**（同一把运行锁，绝不并行写同一个库）；
+    * 按钮 / 接口的接线在（漏了就是"点了没反应"，这个项目最怕的失败）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    @staticmethod
+    def _job():
+        class _Job:
+            def snapshot(self, _n):
+                return {"id": "job-rewrite", "running": True}
+        return _Job()
+
+    def test_起跑的命令带_rewrite和年初窗口(self):
+        seen = {}
+
+        def fake_start(root, argv, what="", what_label=""):
+            seen.update(argv=list(argv), what=what, label=what_label)
+            return self._job()
+
+        with mock.patch.object(web.manager, "current", lambda: None), \
+             mock.patch.object(web.manager, "start_argv", fake_start):
+            code, d = self.srv.request("POST", "/api/sales-rewrite", {})
+        self.assertEqual(code, 200, d)
+        self.assertTrue(d.get("ok"))
+        argv = seen["argv"]
+        self.assertIn("--rewrite", argv, "没有 --rewrite 就不是重写，是又写一遍")
+        self.assertIn("erp-sales", argv)
+        y = datetime.date.today().year
+        self.assertIn("%d-01-01" % y, argv, "本年度窗口的起点要写死到年初")
+        self.assertIn(datetime.date.today().isoformat(), argv)
+        self.assertIn("--no-push", argv, "强制刷新不许顺手推送")
+        self.assertEqual(seen["what"], "rewrite")
+
+    def test_已经在跑回409(self):
+        with mock.patch.object(web.manager, "current", lambda: object()):
+            code, d = self.srv.request("POST", "/api/sales-rewrite", {})
+        self.assertEqual(code, 409, d)
+        self.assertIn("已经有一趟在跑", d.get("error", ""))
+
+    def test_按钮和接口接线在且有二次确认(self):
+        self.assertIn('id="btn-sales-rewrite"', INDEX_HTML)
+        self.assertIn('id="rewrite-msg"', INDEX_HTML)
+        self.assertIn("/api/sales-rewrite", APP_JS)
+        # 危险动作必须二次确认（点了就跑 = 手一抖清库）
+        i = APP_JS.index("/api/sales-rewrite")
+        self.assertIn("confirm(", APP_JS[max(0, i - 700):i])

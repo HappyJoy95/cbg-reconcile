@@ -595,7 +595,18 @@
     <div class="card">
       <div class="card-head">
         <h2 id="film-title">防护膜达成情况 <span class="hint" id="film-meta"></span></h2>
-        <div class="form-row" style="margin:0">
+        <!-- 日期窗口（2026-09-29）：月份 + 该月内截止日 → 窗口 = 该月 1 号 ～ 这天。
+             用例：每月 1 号点「上月」看上月全月；月中选到 28 号看「截止到 28 日」。
+             ⚠ label 的 min-width:150px 是全局规则，这里必须 inline 压掉，否则按钮会被挤换行。 -->
+        <div class="form-row" style="margin:0;gap:6px">
+          <label class="hint" for="film-month" style="min-width:0">月份</label>
+          <select id="film-month" aria-label="选择月份" style="min-width:98px;padding:5px 8px"></select>
+          <label class="hint" for="film-day" style="min-width:0">截止</label>
+          <select id="film-day" aria-label="选择截止到几号" style="min-width:76px;padding:5px 8px"></select>
+          <button class="btn ghost small" id="film-prev" type="button"
+                  title="跳到上个月最后一天 —— 看上月全月">上月</button>
+          <button class="btn ghost small" id="film-today" type="button"
+                  title="回到本月今天">今天</button>
           <button class="btn ghost small" id="btn-refresh-film"
                   title="重新从本地销售明细计算"
                   aria-label="刷新">刷新</button>
@@ -626,7 +637,16 @@
     <div class="card">
       <div class="card-head">
         <h2>无忧会员权益 <span class="hint" id="benefit-meta"></span></h2>
-        <div class="form-row" style="margin:0">
+        <!-- 日期窗口（2026-09-29）：同防护膜页 —— 月份 + 该月内截止日。 -->
+        <div class="form-row" style="margin:0;gap:6px">
+          <label class="hint" for="benefit-month" style="min-width:0">月份</label>
+          <select id="benefit-month" aria-label="选择月份" style="min-width:98px;padding:5px 8px"></select>
+          <label class="hint" for="benefit-day" style="min-width:0">截止</label>
+          <select id="benefit-day" aria-label="选择截止到几号" style="min-width:76px;padding:5px 8px"></select>
+          <button class="btn ghost small" id="benefit-prev" type="button"
+                  title="跳到上个月最后一天 —— 看上月全月">上月</button>
+          <button class="btn ghost small" id="benefit-today" type="button"
+                  title="回到本月今天">今天</button>
           <button class="btn ghost small" id="btn-refresh-benefit"
                   title="重新从本地销售明细计算"
                   aria-label="刷新">刷新</button>
@@ -1032,6 +1052,27 @@
          左边「账号设置」那一页也看得到身份 —— 三处说同一件事。
          ⚠ 删的时候把 JS 那两处（`renderProfile` 里的 `#store-summary`、
          `#btn-open-setup` 的接线）一起清了：只删 HTML 会变成静默空转。 -->
+
+    <!-- 数据强制刷新（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
+         按照新规则全部重写数据库」）。
+         ⚠ 为什么需要它：无串号的贴膜/礼包行 **2026-09-22 才开始落库**，
+           1–8 月库里一条贴膜都没有 —— 只加日期窗口去看上月会是**一片 0**（静默错数）。
+           要按当前口径把老月份整表重落，才对得上。 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>数据强制刷新 <span class="hint" id="rewrite-status"></span></h2>
+        <button class="btn ghost small" id="btn-sales-rewrite"
+                title="按当前口径重抓本年度全部销售明细并整表重写（要几分钟，日志在右下角抽屉）">强制刷新</button>
+      </div>
+      <div class="hint" style="margin:-4px 0 10px 0">
+        把<b>本年度（1 月 1 日 ～ 今天）</b>的云商销售明细整个重抓一遍、
+        按<b>现在的口径整表重写</b> —— 让老月份也跟新月份同一套规则
+        （典型：2026-09-22 起无串号的贴膜/礼包行才入库，历史月要补回来）。<br>
+        ⚠ 抓取要<b>几分钟</b>，跑在后台（右下角日志抽屉看进度）；
+        <b>抓失败 / 抓到 0 行不会动旧数据</b>（先抓全，再在一个事务里删旧写新）。
+      </div>
+      <div class="hint" id="rewrite-msg"></div>
+    </div>
 
     <div class="card">
       <div class="card-head">

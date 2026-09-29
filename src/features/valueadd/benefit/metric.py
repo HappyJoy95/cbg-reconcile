@@ -226,11 +226,14 @@ def store_row(
     care_profit: float = 0.0,
     day: Optional[int] = None,
 ) -> Dict:
-    """门店一行。`tiers` = {档key: 净件数}；`day`=今天几号（缺省 1 ⇒ 进度 0）。"""
+    """门店一行。`tiers` = {档key: 净件数}；`day`=截止到几号（缺省 1 ⇒ 进度 1/30）。"""
     tiers = tiers or {}
     new = new_retail + new_online
     progress_days = float(day if day is not None else 1)
-    time_progress = max(0.0, min(1.0, (progress_days - 1) / DAYS_IN_MONTH))
+    # ⚠ 2026-09-29：`(d-1)/30` → `d/30`（用户点头「问题不大」）——
+    #   截止 28 日 = 93.3%（源表右上角同值）；30 号 = 100%（旧式永远 96.7%）；
+    #   看上月全月时封顶 100%，台量进度 = 整月目标。
+    time_progress = max(0.0, min(1.0, progress_days / DAYS_IN_MONTH))
     slot_progress = day_target * time_progress
     new_rate = _div(new, slot_progress)
     wuyou = float(sum(tiers.get(k, 0.0) for k, _l, _f, _p in TIERS))

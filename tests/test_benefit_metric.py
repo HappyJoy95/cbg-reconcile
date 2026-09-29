@@ -54,9 +54,21 @@ class Test门店行(unittest.TestCase):
 
     def test台量进度与目标(self):
         r = self._row()
-        # day=22 → (22-1)/30 = 0.7；224.4*0.7=157.08（源表 21 日是同公式）
-        self.assertAlmostEqual(r["slot_progress"], 224.4 * 21 / 30.0, places=3)
+        # day=22 → **22**/30 = 0.7333；224.4*22/30 = 164.48
+        # ⚠ 2026-09-29 从 `(day-1)/30` 改成 `day/30`（用户：「2 问题不大」）：
+        #   截止 28 日 = 93.3%（源表右上角实写 93.3%），30 号 = 100%（旧式永远 96.7%）。
+        self.assertAlmostEqual(r["slot_progress"], 224.4 * 22 / 30.0, places=3)
         self.assertAlmostEqual(r["goal"], r["slot_progress"] * 0.2, places=4)
+
+    def test进度封顶一百_看上月全月不越界(self):
+        """**日期窗口**（2026-09-29）：选上月最后一天（day=31）时
+        进度封顶 100%、台量进度 = 整月目标，不能冲到 31/30。"""
+        self.assertAlmostEqual(self._row(day=30)["slot_progress"], 224.4, places=3)
+        self.assertAlmostEqual(self._row(day=31)["slot_progress"], 224.4, places=3,
+                               msg="31 号（8 月最后一天）不能超过整月目标")
+        self.assertAlmostEqual(self._row(day=1)["slot_progress"],
+                               224.4 / 30.0, places=3,
+                               msg="1 号 = 1/30（不再是 0）")
 
     def test后返与台均不含后返(self):
         r = self._row()
@@ -251,12 +263,13 @@ class Test新机口径(unittest.TestCase):
 
     STORE = "青岛城阳万达店"
 
-    def _compute(self, rows):
+    def _compute(self, rows, day=None):
         import datetime
         import sqlite3
         import tempfile
         from pathlib import Path
         from src.features.valueadd.benefit import compute as bcomp
+        day = day or datetime.date(2026, 9, 26)
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         path = Path(tmp.name)
@@ -289,7 +302,23 @@ class Test新机口径(unittest.TestCase):
         self.addCleanup(lambda: [setattr(mm, nn, o) for mm, nn, o in olds])
         bcomp._CACHE.clear()
         self.addCleanup(bcomp._CACHE.clear)
-        return bcomp.compute(stores=[self.STORE], day=datetime.date(2026, 9, 26))
+        return bcomp.compute(stores=[self.STORE], day=day)
+
+    def test日期窗口_看上月全月(self):
+        """**日期窗口**（2026-09-29 用户：「每月 1 号手动拉上个月全月」）——
+        `day=8/31` → 窗口 `8/1 ～ 8/31`、进度封顶 **100%**、`day` 回传 31。"""
+        import datetime
+        d = self._compute([{}], day=datetime.date(2026, 8, 31))
+        self.assertEqual(d["start"], "2026-08-01")
+        self.assertEqual(d["end"], "2026-08-31")
+        self.assertEqual(d["day"], 31)
+        self.assertEqual(d["progress"], 1.0, "8/31 = 整月，进度必须 100%")
+
+    def test进度_截止28日是九三三(self):
+        """源表右上角实写 93.3%（= 28/30）—— 旧式 `(day-1)/30` 给的是 90%。"""
+        import datetime
+        d = self._compute([{}], day=datetime.date(2026, 9, 28))
+        self.assertAlmostEqual(d["progress"], 28 / 30.0, places=4)
 
     def test普通分销不算新机(self):
         d = self._compute([
@@ -344,10 +373,10 @@ class Test新机口径(unittest.TestCase):
         st = d["stores"][0]
         self.assertEqual(st["new"], 1,
                          "X Max / X7 是 care-fold 送 Care+ 机型应剔；View 要留（修前=3）")
-        self.assertEqual(d.get("foreign_dropped"), 0, "Care+机型是口径剔除，不算转单")
+        self.assertEqual(d.get("transfer_rows"), 0, "Care+机型是口径剔除，不算转单行")
 
     def test备注含美团也算(self):
-        # ⚠ 备注别写别家店名（如"顺和汇"）—— 那会先被 foreign 整行剔除
+        # 备注里就算写了别家店名也不再剔（2026-09-29：转单算转出店）
         d = self._compute([
             {"单据类型": "分销", "备注": "美团线上下单",
              "客户/顾客": "", "支付时间": "2026-09-17 10:00:00"},
@@ -355,15 +384,23 @@ class Test新机口径(unittest.TestCase):
         self.assertEqual(d["stores"][0]["new_online"], 1,
                          "备注含美团也要认（老口径不倒退）")
 
-    def test备注点名别家店的转单不计(self):
-        """与 foreign 规则的联动：转单行整行剔，不进新机。"""
+    def test备注点名别家店的转单算本店(self):
+        """2026-09-29 拍板：转单行**算转出店**（原门店），不再整行剔。
+
+        用户：「算转出店的，因为这个是转出店没有这个线上平台，通过别的店走的量，
+        增值业务肯定要算是原门店的销售」—— 剔了会两边都算不着。
+        """
         d = self._compute([
             {},
             {"单据类型": "分销", "备注": "顺和汇美团下单",
              "客户/顾客": "美团外卖", "支付时间": "2026-09-18 10:00:00"},
         ])
-        self.assertEqual(d["stores"][0]["new"], 1,
-                         "备注点名顺和汇 → 整行剔，只剩本店零售1台")
+        st = d["stores"][0]
+        self.assertEqual(st["new"], 2,
+                         "转单行算转出店 → 零售1 + 转线上1 = 2（修前剔成 1）")
+        self.assertEqual(d.get("transfer_rows"), 1, "转单行数要记台账")
+        self.assertIn("已计入本店", d.get("note", ""),
+                      "note 必须报出台账，别静默（坑13 同类）")
 
     def test_Care利润只算含Care且含华为路径的行(self):
         """Care+ **利润**只算「商品名称含 `Care+` 且含 `/华为/` 路径」的行
