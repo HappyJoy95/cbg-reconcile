@@ -73,7 +73,7 @@ class Test从会话认店(_LifehallCase):
         from src import config_io, store_identity
         old = self._sess_file("default")
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN328987", "ok")):
+                               return_value=("SCN328987", "ok", "")):
             res = store_identity.identify(self.root, self.cfg_path)
         self.assertTrue(res["ok"])
         v = config_io.pick(config_io.load_raw(self.cfg_path))
@@ -86,7 +86,7 @@ class Test从会话认店(_LifehallCase):
     def test_名单里没有_只写店码不留空名(self):
         from src import store_identity
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN9999999", "ok")):
+                               return_value=("SCN9999999", "ok", "")):
             res = store_identity.identify(self.root, self.cfg_path)
         self.assertTrue(res["ok"])
         v = self._raw()
@@ -97,7 +97,7 @@ class Test从会话认店(_LifehallCase):
     def test_查不出店码_不写配置不抛(self):
         from src import store_identity
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("", "authfail")):
+                               return_value=("", "authfail", "HTTP 403")):
             res = store_identity.identify(self.root, self.cfg_path)
         self.assertFalse(res["ok"])
         self.assertIn("why", res)
@@ -141,6 +141,95 @@ class Test从会话认店(_LifehallCase):
         self.assertIn("接口 500", res["why"])
 
 
+class Test手输店码(_LifehallCase):
+    """用户追加的生活馆入口：店码由门店人员填写，认店探测因此不再必需。"""
+
+    def test_名单命中时规范化并写全店名和标识(self):
+        from src import config_io, store_identity
+        res = store_identity.set_store_code(self.root, self.cfg_path, " scn328987 ")
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["found"])
+        self.assertEqual(res["store_code"], "SCN328987")
+        v = config_io.pick(config_io.load_raw(self.cfg_path))
+        self.assertEqual(v["store_code"], "SCN328987")
+        self.assertEqual(v["erp_store_name"], "青岛CBD万达店")
+        self.assertEqual(v["marker"], "C")
+
+    def test_名单未命中时清空上一家店名和标识(self):
+        from src import config_io, store_identity
+        self.cfg_path.write_text(
+            'erp_store_name: "青岛CBD万达店"\nstore_code: SCN328987\nmarker: C\n',
+            encoding="utf-8")
+        res = store_identity.set_store_code(self.root, self.cfg_path, "SCN999999")
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["found"])
+        v = config_io.pick(config_io.load_raw(self.cfg_path))
+        self.assertEqual(v["store_code"], "SCN999999")
+        self.assertEqual(v["erp_store_name"], "")
+        self.assertEqual(v["marker"], "")
+
+    def test_非法格式拒绝且配置字节不变(self):
+        from src import store_identity
+        before = self.cfg_path.read_bytes()
+        for code in ("", "店名", "A B", "A" * 40):
+            with self.subTest(code=code):
+                res = store_identity.set_store_code(self.root, self.cfg_path, code)
+                self.assertFalse(res["ok"], code)
+                self.assertEqual(self.cfg_path.read_bytes(), before, code)
+
+    def test_默认会话存在时按店码挪名(self):
+        from src import store_identity
+        old = self._sess_file("default")
+        original = old.read_bytes()
+        res = store_identity.set_store_code(self.root, self.cfg_path, "SCN328987")
+        new = self.root / ".secrets" / "cbg-SCN328987.json"
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["moved"])
+        self.assertFalse(old.exists())
+        self.assertEqual(new.read_bytes(), original)
+
+    def test_挪会话失败时不改店码配置(self):
+        from src import config_io, store_identity
+        old = self._sess_file("default")
+        original = old.read_bytes()
+        before = self.cfg_path.read_bytes()
+        with mock.patch.object(store_identity.os, "replace",
+                               side_effect=OSError("改名失败")):
+            res = store_identity.set_store_code(
+                self.root, self.cfg_path, "SCN328987")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self.cfg_path.read_bytes(), before)
+        self.assertTrue(old.exists())
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse((self.root / ".secrets" / "cbg-SCN328987.json").exists())
+        self.assertIsNone(config_io.load_raw(self.cfg_path)["store_code"])
+
+    def test_配置写入失败时会话文件回滚(self):
+        from src import config_io, store_identity
+        old = self._sess_file("default")
+        original = old.read_bytes()
+        before = self.cfg_path.read_bytes()
+        with mock.patch.object(config_io, "update",
+                               side_effect=OSError("写配置失败")):
+            res = store_identity.set_store_code(
+                self.root, self.cfg_path, "SCN328987")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self.cfg_path.read_bytes(), before)
+        self.assertTrue(old.exists())
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse((self.root / ".secrets" / "cbg-SCN328987.json").exists())
+
+    def test_写入后identify跳过认店探测(self):
+        from src import store_identity
+        res = store_identity.set_store_code(self.root, self.cfg_path, "SCN328987")
+        self.assertTrue(res["ok"])
+        with mock.patch.object(store_identity, "_probe_store_code") as probe:
+            identified = store_identity.identify(self.root, self.cfg_path)
+        self.assertTrue(identified["ok"])
+        self.assertEqual(identified["store_code"], "SCN328987")
+        probe.assert_not_called()
+
+
 class Test探测三态(unittest.TestCase):
     """Task 6 硬验收：`_probe_store_code` 的三态 —— 折成 bool 就地红。"""
 
@@ -162,24 +251,27 @@ class Test探测三态(unittest.TestCase):
     def test_ok_拿到店码(self):
         self.assertEqual(self._probe(rows=[{"storeCode": " SCN328987 "},
                                            {"storeCode": ""}]),
-                         ("SCN328987", "ok"))
+                         ("SCN328987", "ok", ""))
 
     def test_empty_零行(self):
         # 新店 30 天没卖货：会话是真的，只是没有店码 —— 不能跟假会话混
-        self.assertEqual(self._probe(rows=[]), ("", "empty"))
+        self.assertEqual(self._probe(rows=[]), ("", "empty", ""))
 
     def test_empty_行里没店码(self):
-        self.assertEqual(self._probe(rows=[{"orderNo": "X1"}]), ("", "empty"))
+        self.assertEqual(self._probe(rows=[{"orderNo": "X1"}]), ("", "empty", ""))
 
     def test_authfail_假会话(self):
+        # ⚠ 第三段必须是 **CbgAuthError 原文** —— 吞掉它就没法分
+        #   403 / 权限错 / 登录页 HTML（2026-09-27 抓取超时排查的教训）
         from src import cbg
         self.assertEqual(
             self._probe(exc=cbg.CbgAuthError("会话已失效（HTTP 401）")),
-            ("", "authfail"))
+            ("", "authfail", "会话已失效（HTTP 401）"))
 
     def test_没会话也按authfail(self):
         from src import store_identity
-        self.assertEqual(store_identity._probe_store_code(None), ("", "authfail"))
+        self.assertEqual(store_identity._probe_store_code(None),
+                         ("", "authfail", "手上没有会话文件"))
 
     def test_接口异常不折进三态(self):
         # "没验成"≠"验出来是假的" —— CbgError 原样抛，由 identify 兜成 error
@@ -194,17 +286,20 @@ class Test三态拦放(_LifehallCase):
     def test_假会话拦在verify(self):
         from src import store_identity
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("", "authfail")):
+                               return_value=("", "authfail",
+                                             "会话/权限问题：没有门店或数据范围 SCN9 的权限")):
             ok, why = store_identity.verify_with_identity(
                 object(), self.root, self.cfg_path)
         self.assertFalse(ok, "假会话必须死在 verify")
         self.assertIn("会话没验过", why)
+        # 2026-09-27：底层报错必须透出来，否则 403/权限错/HTML 分不开
+        self.assertIn("没有门店或数据范围 SCN9 的权限", why)
         self.assertFalse(self._raw().get("store_code"))
 
     def test_零行的新店放行但说清(self):
         from src import store_identity
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("", "empty")):
+                               return_value=("", "empty", "")):
             ok, why = store_identity.verify_with_identity(
                 object(), self.root, self.cfg_path)
         self.assertTrue(ok, "0 行是新店不是坏会话 —— 放行")
@@ -223,7 +318,7 @@ class Test三态拦放(_LifehallCase):
                 return True, "SCN328987 青岛CBD万达店"
 
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN328987", "ok")), \
+                               return_value=("SCN328987", "ok", "")), \
                 mock.patch.object(cbg, "CbgClient", _PingOk):
             ok, why = store_identity.verify_with_identity(
                 object(), self.root, self.cfg_path)
@@ -245,7 +340,7 @@ class Test三态拦放(_LifehallCase):
                 return False, "会话失效：会话已失效（HTTP 401）"
 
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN328987", "ok")), \
+                               return_value=("SCN328987", "ok", "")), \
                 mock.patch.object(cbg, "CbgClient", _PingBad):
             ok, why = store_identity.verify_with_identity(
                 object(), self.root, self.cfg_path)
@@ -277,7 +372,7 @@ class Test会话文件挪名(_LifehallCase):
         tgt.write_text('{"cookies": "OLD=1", "csrf": "oldcsrf1234"}',
                        encoding="utf-8")
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN328987", "ok")):
+                               return_value=("SCN328987", "ok", "")):
             res = store_identity.identify(self.root, self.cfg_path)
         self.assertTrue(res["ok"])
         self.assertTrue(old.exists(), "没挪动就不该动 default")
@@ -293,12 +388,47 @@ class Test会话文件挪名(_LifehallCase):
             "session:\n  file: .secrets/nested/cbg-custom.json\n",
             encoding="utf-8")
         with mock.patch.object(store_identity, "_probe_store_code",
-                               return_value=("SCN328987", "ok")):
+                               return_value=("SCN328987", "ok", "")):
             res = store_identity.identify(self.root, self.cfg_path)
         self.assertTrue(res["ok"])
         new = self.root / ".secrets" / "nested" / "cbg-custom.json"
         self.assertTrue(new.exists(), "目标目录要先建出来")
         self.assertFalse(old.exists())
+
+
+class Test保存点自检(_LifehallCase):
+    """0 订单新店（还没认出店码）时，保存点**不许 ping**。
+
+    `store_detail` 没有 storeCode 必报「接口异常：没给 storeCode」——
+    界面会把「已保存」显示成「自检没过」（2026-09-27 抓取超时排查顺出来的毛刺）。
+    """
+
+    def test_没店码_放行并说清不ping(self):
+        from src import cbg, store_identity
+
+        class _Boom:
+            def __init__(self, *a, **k):
+                raise AssertionError("没店码时不该造 ping 客户端")
+
+        with mock.patch.object(cbg, "CbgClient", _Boom):
+            ok, msg = store_identity.check_after_save(object(), "")
+        self.assertTrue(ok, "探明是真会话（empty）—— 不该被 ping 打成失败")
+        self.assertIn("店码还没认出来", msg)
+
+    def test_有店码_正经ping(self):
+        from src import cbg, store_identity
+
+        class _PingOk:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self):
+                return True, "SCN328987 青岛CBD万达店"
+
+        with mock.patch.object(cbg, "CbgClient", _PingOk):
+            ok, msg = store_identity.check_after_save(object(), "SCN328987")
+        self.assertTrue(ok)
+        self.assertIn("SCN328987", msg)
 
 
 class TestCLI认店(_LifehallCase):
@@ -401,6 +531,13 @@ class Test三个保存点接线(unittest.TestCase):
         fn = self._func(self.cli, "cmd_auth")
         self.assertIn("store_identity.identify", fn)
         self.assertIn("认店：", fn)
+
+    def test_cli保存点走check_after_save(self):
+        # 「没店码别 ping」的判据只许有一份 —— cli 另写一套必漂（AGENTS 坑 12）
+        self.assertIn("check_after_save", self._func(self.cli, "cmd_auth"))
+
+    def test_web保存点走check_after_save(self):
+        self.assertIn("check_after_save", self._func(self.web, "_capture_worker"))
 
 
 if __name__ == "__main__":

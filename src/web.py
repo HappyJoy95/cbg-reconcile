@@ -457,6 +457,17 @@ def lifehall_gone(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in LIFEHALL_GONE)
 
 
+def _notify_preferences(root=None) -> dict:
+    """返回设置页可见的推送偏好；生活馆仅列已接入推送的功能和通道。"""
+    from .modules.notify import prefs as push_prefs
+    values = push_prefs.all_prefs(root)
+    if not _edition.is_lifehall():
+        return values
+    allowed = set(_edition.LIFEHALL_PUSH_FEATURES)
+    allowed.update("plat:" + key for key in push_prefs.PLATFORMS)
+    return {key: value for key, value in values.items() if key in allowed}
+
+
 #: 「预览模式」标记 —— `.secrets/preview.json`（**这台机器自己的**，自更新不碰）。
 #:
 #: 用户 2026-09-21：「先把**体验店登录需要玲珑**这个跳过一下，我测试电脑上没有玲珑，
@@ -1152,7 +1163,11 @@ def _capture_worker(app: "App", headless: bool):
             store = info.get("store_code") or store       # 下面那次自检按店码打
             job.say(("认店：%s" % info.get("store_name")) if info.get("store_name")
                     else info.get("why") or ("店码 %s" % info.get("store_code", "")))
-        ok, msg = CbgClient(sess, store_code=store).ping()
+            # ⚠ 没店码时**别 ping**（store_detail 必报"没给 storeCode"）——
+            #   0 订单新店会被显示成"自检没过"。判据见 check_after_save。
+            ok, msg = store_identity.check_after_save(sess, store)
+        else:
+            ok, msg = CbgClient(sess, store_code=store).ping()
         app.record_check(sess, ok, msg)                   # 记下这次自检，界面要显示时间
         job.say(f"已保存 → {p.name}")
         job.state = "ok" if ok else "saved"
@@ -2005,6 +2020,83 @@ class App:
             # 已领取时把 ok 提成 true？ —— 不：前端要能区分文案。
             # 只加 already_claimed + local_marked，失败态仍走 else 分支渲染。
         return res
+
+    # ────────────────────────── 收银（生活馆利润核算录入端，2026-09-29）────
+    # 开发目标：`.dsh/docs/2026-09-29-生活馆收银界面-开发目标.md`
+    # ⚠ 身份门禁在 **dispatch 那一侧整块做**（`/api/cashier` 前缀 + role != store
+    #   → 403，见下面路由块）—— 收银是**门店本机**的操作，区长/平台没有
+    #   "替门店记一笔"这回事；这里只管业务，不重复判身份。
+
+    #: 政策刷新互斥锁（类属性）：这条会**阻塞到人工登录完成**（最长 10 分钟），
+    #  双击开两个登录窗是最坏的体验 —— 第二次直接回"正在更新"。
+    _cashier_policy_lock = threading.Lock()
+
+    def cashier_entries(self, day: str = "") -> dict:
+        """当日流水 + 销售员历史 + 政策新鲜度 —— 页面初始化一次 GET 全带回。"""
+        from .features.cashier import store as cashier_store
+        try:
+            return {"ok": True, "day": str(day or ""),
+                    "rows": cashier_store.list_entries(self.root, day=day),
+                    "sellers": cashier_store.sellers(self.root),
+                    "policy": cashier_store.policy_meta(self.root)}
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_entry_save(self, body: dict) -> dict:
+        """录/改一笔（`body.id` 有值 = 改那条）。业务校验的 why 原样传给界面。"""
+        from .features.cashier import store as cashier_store
+        body = body or {}
+        try:
+            return cashier_store.save_entry(self.root, body, entry_id=body.get("id"))
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_entry_delete(self, entry_id) -> dict:
+        from .features.cashier import store as cashier_store
+        try:
+            return cashier_store.delete_entry(self.root, entry_id)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_lookup(self, code: str) -> dict:
+        """按商品编码反查政策 —— `found=false` **不是错误**（政策表可能还没刷新）。"""
+        from .features.cashier import store as cashier_store
+        try:
+            row = cashier_store.lookup(self.root, code)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+        return {"ok": True, "found": row is not None, "row": row}
+
+    def cashier_policy_refresh(self) -> dict:
+        """从 pmall 拉最新「价格与返利政策」落库 —— **手动触发**（用户定：不做定时）。
+
+        会话走 A 案（`pmall.ensure_session`）：活窗 → jar → **弹窗人工登录**
+        （uniportal 有短信二次验证，必要时人来一次）。所以这条会**阻塞到登录
+        完成**（最长 10 分钟）—— 前端按钮禁用 + 文案说清，后端类锁互斥。
+        """
+        log = []
+        if not self._cashier_policy_lock.acquire(blocking=False):
+            return {"ok": False,
+                    "why": "政策表正在更新（可能在等登录窗），等它跑完再点"}
+        try:
+            from . import pmall
+            from .features.cashier import store as cashier_store
+            sess = pmall.ensure_session(self.root, say=log.append)
+            data, rec = pmall.fetch_policy(sess, say=log.append)
+            rows = pmall.parse_policy(data)
+            res = cashier_store.save_policy(self.root, rows)
+            if not res.get("ok"):
+                return {"ok": False, "why": res.get("why") or "落库失败", "log": log}
+            return {"ok": True, "rows": res.get("rows"),
+                    "fetched_at": res.get("fetched_at"),
+                    "file": rec.get("fileName") or "", "log": log}
+        except Exception as e:                                     # noqa: BLE001
+            # `PmallError` 的文案就是给人看的（含"请人工登录"那类），原样出去
+            return {"ok": False,
+                    "why": str(e) or ("%s: %s" % (type(e).__name__, e)),
+                    "log": log}
+        finally:
+            self._cashier_policy_lock.release()
 
     def plan(self) -> dict:
         """「月度生意计划」的数据 —— **纯读盘，一个网络请求都不发**。
@@ -3189,21 +3281,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(res, 200 if res.get("ok") else 404)
 
         if path == "/api/notify-pref" and method == "GET":
-            from .modules.notify import prefs as push_prefs
-            return self._json({"ok": True, "prefs": push_prefs.all_prefs(app.root)})
+            return self._json({"ok": True, "prefs": _notify_preferences(app.root)})
 
         if path == "/api/notify-pref" and method == "PUT":
             from .modules.notify import prefs as push_prefs
             body = self._read_json() or {}
             key = str(body.get("key") or "").strip()
             on = bool(body.get("enabled"))
+            if (_edition.is_lifehall() and not key.startswith("plat:")
+                    and key not in _edition.LIFEHALL_PUSH_FEATURES):
+                return self._json({"ok": False,
+                                   "error": "生活馆版没有这个业务推送项"}, 400)
             try:
                 if key.startswith("plat:"):
-                    prefs = push_prefs.set_platform(key[5:], on, app.root)
+                    push_prefs.set_platform(key[5:], on, app.root)
                 else:
-                    prefs = push_prefs.set_enabled(key, on, app.root)
+                    push_prefs.set_enabled(key, on, app.root)
             except ValueError as e:
                 return self._json({"ok": False, "error": str(e)}, 400)
+            prefs = _notify_preferences(app.root)
             return self._json({"ok": True, "prefs": prefs,
                                "message": "%s：推送已%s"
                                           % (prefs[key]["label"],
@@ -3302,6 +3398,43 @@ class Handler(BaseHTTPRequestHandler):
                 code = 403 if res.get("forbidden") else 400
                 return self._json(res, code)
             return self._json(res)
+        # **收银**（生活馆利润核算录入端，2026-09-29）—— 流水 CRUD + 编码反查 +
+        # 政策手动刷新。
+        # ⚠ **整块一个门禁**：收银是**门店本机**的操作 —— 区长/平台一律 403
+        #   （跟 `staff.write` 同一档；M17 红线：每个接口都要有 `forbid` 那一行，
+        #   这里用前缀块一次覆盖 `/api/cashier/*`，漏不掉任何子路径）。
+        # ⚠ 前面已经过了「生活馆 404」和「登录 403」两道，这里只管身份。
+        if path.startswith("/api/cashier"):
+            if scope.get("role") != "store":
+                return self._json(
+                    forbid(scope, "用收银", "收银是门店本机的操作"), 403)
+            if path == "/api/cashier/entries" and method == "GET":
+                res = app.cashier_entries((query.get("day") or [""])[0])
+                if not res.get("ok"):
+                    return self._json({"error": res.get("why") or "读取失败"}, 400)
+                return self._json(res)
+            if path == "/api/cashier/entry-save" and method == "POST":
+                res = app.cashier_entry_save(self._read_json() or {})
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "保存失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/entry-delete" and method == "POST":
+                res = app.cashier_entry_delete((self._read_json() or {}).get("id"))
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "删除失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/lookup" and method == "GET":
+                res = app.cashier_lookup((query.get("code") or [""])[0])
+                if not res.get("ok"):
+                    return self._json({"error": res.get("why") or "反查失败"}, 400)
+                return self._json(res)
+            if path == "/api/cashier/policy-refresh" and method == "POST":
+                res = app.cashier_policy_refresh()
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "更新失败"), 400)
+                return self._json(res)
+            # 块内没登记的子路径 —— fail closed（别落到下面当普通 404 糊过去）
+            return self._json({"error": "接口不存在"}, 404)
         # **小工具 · 串号追踪**（2026-09-23）—— 86码/SN → 库存+销售全程
         if path == "/api/sn-trace" and method == "GET":
             code = (query.get("code") or [""])[0]
@@ -3480,6 +3613,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/session/ping" and method == "POST":
             return self._json(self._ping_result(app))
+
+        # 手输门店编码（用户 2026-09-27）：认店探测在这台机器上一直 403，
+        # 抓取卡死在 verify —— 人把店码给了，identify 就跳过探测直接 ping。
+        # ⚠ 在 `/api/session` 前缀下 ⇒ **登录前也能调**（登录页上那个输入框要能用，
+        #   SETUP_ALLOW 是前缀匹配）。判据只在 store_identity.set_store_code 一份。
+        if path == "/api/session/store-code" and method in ("PUT", "POST"):
+            if not _edition.is_lifehall():
+                return self._json({"error": "当前版本不支持手输门店编码"}, 404)
+            body = self._read_json()
+            from . import store_identity
+            res = store_identity.set_store_code(
+                app.root, app.config_path, body.get("store_code"))
+            if not res.get("ok"):
+                return self._json({"error": res.get("error") or "写不进去"}, 400)
+            # 认店/挪名已经做完了，顺手把会话状态带上 —— 前端一次刷新到位
+            res["session"] = app.session_info()
+            return self._json(res)
 
         if path == "/api/session" and method == "DELETE":
             p = app.session_path()

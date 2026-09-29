@@ -230,6 +230,18 @@
   <div class="nav-item nav-lifehall" data-tab="tools">
     <button class="tab" data-tab="tools" data-direct-subtab="claim-pending">权益领取</button>
   </div>
+  <!-- 收银（2026-09-29 生活馆利润核算录入端）—— 第三个平级入口。
+       ⚠ `data-subtab` 挂在 **div** 上，不挂按钮：按钮同时带 direct+subtab 会被
+         绑两次点击（loader 跑两遍）；div 自身属性不会被
+         `querySelectorAll('[data-subtab]')` 绑到（那只扫子孙）。
+       ⚠ 属性顺序有讲究：`data-tab` 必须在 `data-subtab` **前面** ——
+         `test_web_ia._nav_item` 按 `data-tab="cashier"` 切片结束，
+         它排后面的话 tools 那段会把 cashier 的 subtab 扫进去，同步测试当场红。
+       ⚠ key 两版都在注册表（roles 的 HTML↔PAGE_RULES 双向对照按 full 版跑），
+         full 版只是被 `.nav-lifehall{display:none}` 藏掉。 -->
+  <div class="nav-item nav-lifehall" data-tab="cashier" data-subtab="cashier">
+    <button class="tab" data-tab="cashier" data-direct-subtab="cashier">收银</button>
+  </div>
 </nav>
 
     <!-- 左下角：这台电脑是谁、现在什么状态。
@@ -915,6 +927,54 @@
      ⚠ **没上报的店也要有卡**（写着"从来没收到过"）—— 不然"哪几家没报"就看不出来，
        而那正是这个页面最该回答的问题。 -->
 
+<!-- ──────────────────────── 收银（利润核算录入端） ────────────────────────
+     2026-09-29 用户拍板：目前**没有生活馆的玲珑数据** ⇒ 先做单独的收银录入；
+     「拉玲珑 + 过滤备注1/2/3 + 改金额/销售员」等有数据再接（开发目标·七）。
+     ⚠ 编码是主输入：华为侧有商品编码 —— 识别编码 → `price_policy` 反查商品名，
+       成本/返利显示在下面那行 hint；政策表点「刷新政策数据」从 pmall 拉
+       （会话走 A 案：活窗 → jar → 弹窗人工登录，可能要短信）。 -->
+<section class="panel" id="panel-cashier">
+<div class="subpanel" id="subpanel-cashier">
+  <div class="card">
+    <div class="card-head">
+      <h2>收银录入 <span class="hint" id="cashier-meta">政策表：读取中…</span></h2>
+      <div class="form-row" style="margin:0">
+        <button class="btn ghost small" id="cashier-refresh"
+                title="从华为 pmall 拉最新「价格与返利政策」；会话掉了会弹窗要人工登录">刷新政策数据</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>销售时间 <input type="datetime-local" id="cashier-sold-at"></label>
+      <label>商品编码 <input id="cashier-code" placeholder="扫码或手输，离开即反查"></label>
+      <label>商品名称 <input id="cashier-name" placeholder="编码查不到就手输"></label>
+    </div>
+    <div class="form-row">
+      <label>数量 <input type="number" id="cashier-qty" value="1" min="0.01" step="any"
+                    style="width:5.5em"></label>
+      <label>实收金额 <input type="number" id="cashier-amount" step="0.01"
+                      placeholder="手动匹配" style="width:8em"></label>
+      <label>销售员 <input id="cashier-seller" list="cashier-sellers"
+                      placeholder="选一个或新输">
+        <datalist id="cashier-sellers"></datalist></label>
+      <label>备注 <input id="cashier-note" placeholder="可空" style="width:11em"></label>
+      <button class="btn primary" id="cashier-save">保存</button>
+      <button class="btn ghost" id="cashier-cancel" hidden>取消修改</button>
+    </div>
+    <p class="hint" id="cashier-lookup" style="margin:4px 0 0 0">政策表没刷新过时，编码反查不到商品名 —— 手输名称也能存。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>当日流水 <span class="hint" id="cashier-day-meta"></span></h2>
+      <div class="form-row" style="margin:0">
+        <input type="date" id="cashier-day" title="看哪天的流水">
+      </div>
+    </div>
+    <div id="cashier-table"><p class="hint">加载中…</p></div>
+  </div>
+</div>
+</section>
+
 
 <!-- ──────────────────────── 通用设置 ────────────────────────
      ⚠ 2026-09-19（用户）：「把左边儿一级标签的设置去掉吧，给它弄成鼠标移动到
@@ -1022,17 +1082,24 @@
   </div>
 
   <div class="subpanel" id="subpanel-general">
+    <!-- ⚠ 门店编码卡**不在这一档**了（2026-09-29 用户：「把门店编码设置放到
+         玲珑授权里面吧」）—— 它管的是"认哪家店、抓会话怎么自检"，跟会话同去向，
+         挪进 `#subpanel-linglong`（下面「玲珑授权」那块）。 -->
+
     <!-- 功能推送总览（2026-09-22）：和各模块「设置」里是**同一套开关**（notify.prefs）。
          默认全关 —— 门店每天开控制台，日常达成不必推。 -->
-    <div class="card">
+    <div class="card" id="notify-pref-card">
       <div class="card-head">
-        <h2>功能推送</h2>
-        <span class="hint">默认关闭 · 与各模块 › 设置同步</span>
+        <h2 id="notify-pref-title">功能推送</h2>
+        <span class="hint" id="notify-pref-summary">默认关闭 · 与各模块 › 设置同步</span>
       </div>
       <div id="notify-pref-list">加载中…</div>
-      <p class="hint" style="margin:8px 0 0 0">
+      <p class="hint" id="notify-pref-full-note" style="margin:8px 0 0 0">
         这里能开/关<b>每条业务</b>推不推；邮件/企微通道在下面两张卡里配。
         各一级模块的「设置」页也能改同一套开关。
+      </p>
+      <p class="hint" id="notify-pref-lifehall-note" style="margin:8px 0 0 0" hidden>
+        只显示生活馆实际支持的业务推送项；邮件和企微通道在下面配置。
       </p>
     </div>
     <!-- ⚠ 2026-09-21（用户：「通用设置里第一块门店去掉」）—— 这块整块删了。
@@ -1078,7 +1145,7 @@
       <div class="hint" id="wecom-warn"></div>
     </div>
 
-    <div class="card">
+    <div class="card" id="service-settings-card">
       <div class="card-head">
         <h2>后台服务</h2>
         <span class="hint" id="svc-status"></span>
@@ -1118,7 +1185,7 @@
     <!-- ⚠ 2026-09-21：「出问题了？/ 清除推送记忆」已经不在这儿了 ——
          它挪进了「**报量查询 › 设置**」（那是这条推送自己的模块，
          合作店也看不到那一页）；「上报 bug」在右下角状态抽屉里。 -->
-    <p class="hint">
+    <p class="hint" id="general-settings-full-note">
       定时执行、检查更新、主题风格都在<b>左下角菜单</b>里单独成页
       （定时器设置 / 检查更新 / 主题设置），不在本页。
     </p>
@@ -1519,6 +1586,21 @@
         <div id="session-box"></div>
       </div>
 
+      <!-- 门店编码（2026-09-29 从「通用设置」挪进来 —— 用户：「把门店编码设置
+           放到玲珑授权里面吧」）：它管的是"认哪家店、抓会话怎么自检"，跟会话同去向。
+           ⚠ 只在生活馆显示（`hidden` 由 `renderStoreCodeForms()` 按版开关，
+             full 版的店码由云商登录匹配出来，手输会盖掉那个判据）。
+           ⚠ 放在 `#ll-home` **外面** —— 那块会被 `mountLinglong()` 整块搬去
+             登录页，卡跟着搬会把"设置页的入口"搬没（登录页另有自己的宿主
+             `#setup-store-code-host`）。 -->
+      <div class="card" id="store-code-settings-card" hidden>
+        <div class="card-head">
+          <h2>门店编码</h2>
+          <span class="hint">仅生活馆版</span>
+        </div>
+        <div id="store-code-settings"></div>
+      </div>
+
       <!-- ⚠ 玲珑那套抓取控件的**家在这儿**。
            用户 2026-09-19：「玲珑授权页面显示不全，输入账密和打开浏览器登录和静默登录那个没了」——
            做登录门禁时把这些控件**只搬去了登录页**，这一页就只剩一句状态。
@@ -1740,11 +1822,15 @@
         <b>登录玲珑</b>
         <span class="hint" id="setup-linglong-why">等待…</span>
       </div>
-      <p class="hint">
+      <p class="hint" id="setup-linglong-full-note">
         这家店在名单里<b>有串号标识</b> —— 报量查询和 POS 合规读的都是玲珑数据，
         所以要先登录一次。<br>
         ⚠ 会话过期了也会回到这一页：<b>那是故意的</b>，过期了后面全是错的数。
       </p>
+      <p class="hint" id="setup-linglong-lifehall-note" hidden>
+        先登录玲珑并抓到会话，就能进入生活馆版使用页面上的工具。
+      </p>
+      <div id="setup-store-code-host" hidden></div>
       <!-- ⚠ 这几件控件**平时住在「通用设置 › 玲珑授权」页**里，
            走到这一步时由 `mountLinglong()` 整块搬进来 ——
            这里只是它临时的住处，别在这儿再抄一份（id 会重复）。 -->

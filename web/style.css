@@ -1743,3 +1743,25 @@ main.tools-frame-mode .subpanel.active {
   text-decoration: line-through;
   opacity: 0.65;
 }
+
+/* lifehall：手输门店编码（登录页与玲珑授权页共用 #session-box 里这一块） */
+.store-code-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.store-code-box b { white-space: nowrap; }
+.store-code-box input {
+  width: 150px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.store-code-box .hint { flex: 1 1 220px; }

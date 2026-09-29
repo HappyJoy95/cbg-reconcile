@@ -64,6 +64,30 @@ class Test幂等(unittest.TestCase):
         self.assertIn("fetch_attempt", names)
         self.assertIn("meta", names)
 
+    def test_老库只有schema键时按它补账(self):
+        """**升级路径的命门**：门店库只有 `meta.schema=3`（老记账法），
+        没有 `migrations` 键 —— 必须把 1..3 当已跑，只补新账；
+        要是当成"没跑过"重跑一遍倒也无害（都幂等），但**记账会漂**。"""
+        conn = _mem()
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('schema', '3')")
+        conn.execute("CREATE TABLE erp_sales (sn TEXT, 制单时间 TEXT)")
+        res = migrate.run(conn)
+        self.assertEqual([x["n"] for x in res["applied"]], [4, 5, 6],
+                         "1..3 当已跑（按 schema 补账），只补新账")
+        self.assertEqual(migrate.applied(conn), {1, 2, 3, 4, 5, 6})
+        self.assertEqual(migrate.current(conn), 6)
+
+    def test_纯手动新建库一路到最新(self):
+        """收银机可能**永远不跑抓取**：空库直接迁移，除了 003 全都要建出来
+        （利润/流水/政策三张表当场可用）。"""
+        conn = _mem()
+        migrate.run(conn)
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for t in ("profit_result", "sale_entries", "price_policy"):
+            self.assertIn(t, names, "纯手动店等不到抓取，%s 必须当场建" % t)
+        self.assertEqual(migrate.run(conn)["applied"], [], "幂等：再跑一遍什么都不做")
+
 
 class Test前置条件(unittest.TestCase):
     def test_条件不满足就_skipped_而且下次还会再来(self):
@@ -73,12 +97,24 @@ class Test前置条件(unittest.TestCase):
         skipped = [x for x in res["skipped"] if x["n"] == 3]
         self.assertEqual(len(skipped), 1, "erp_sales 还没建，3 号该被跳过")
         self.assertIn("erp_sales", skipped[0]["why"])
-        self.assertLess(migrate.current(conn), 3, "跳过的不能算进编号")
+        # ⚠ 2026-09-29 改：老断言是 `current(conn) < 3` —— 005/006 起无条件建表，
+        #   跑完 schema 会是 6，但 3 **一条都没跑**。判据从"编号大小"换成
+        #   "在不在已跑集合里"（语义没变：跳过的不算做完）。
+        self.assertNotIn(3, [x["n"] for x in res["applied"]],
+                         "跳过的不能算进已跑集合")
+        self.assertNotIn(3, migrate.applied(conn))
 
     def test_条件满足之后自己就跑了(self):
+        """⚠ 这条现在**同时钉迁移记账的新语义**（2026-09-29 收银那轮）：
+
+        第一遍 005/006 已经把 `meta.schema` 顶到 6 —— 老实现
+        （`n <= schema 就跳过`）会让 3 号**永远补不上**，此测试当場红。
+        新实现按编号逐条记账：前面跳过的，条件到了照样来。
+        """
         conn = _mem()
         migrate.run(conn)
-        self.assertLess(migrate.current(conn), 3)
+        self.assertGreaterEqual(migrate.current(conn), 5,
+                                "005/006 无条件建表，编号至少到 5")
         conn.execute("CREATE TABLE erp_sales (sn TEXT, 制单时间 TEXT)")
         res = migrate.run(conn)
         self.assertEqual([x["n"] for x in res["applied"]], [3])
@@ -149,6 +185,9 @@ class Test状态与文案(unittest.TestCase):
     def test_跑完之后说已是最新(self):
         conn = _mem()
         conn.execute("CREATE TABLE erp_sales (sn TEXT, 制单时间 TEXT)")
+        # 004（利润结果表）的前置是 `orders` —— 真实库里 dump.SCHEMA 必建它，
+        # 这里没有的话它会一直"等条件"，文案就不是"已是最新"了。
+        conn.execute("CREATE TABLE orders (document_no TEXT PRIMARY KEY)")
         migrate.run(conn)
         self.assertIn("已是最新", migrate.describe(migrate.status(conn)))
 

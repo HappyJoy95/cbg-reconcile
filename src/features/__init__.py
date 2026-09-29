@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import List
 
 from .. import edition as _edition
-from . import tools
+from . import cashier, tools
 
 
 def build_all() -> List["Feature"]:  # noqa: F821 —— 类型只是文档，运行期不求值
@@ -37,10 +37,13 @@ def build_all() -> List["Feature"]:  # noqa: F821 —— 类型只是文档，�
     ⚠ `tools` 那条**每次现建**（`tools.build_feature()`，不直接拿 `tools.FEATURE`）：
       它的 children 是按版组装的，而 `tools.FEATURE` 在**模块导入那一刻**就定格了 ——
       同一个进程里先按 full 导入、再切 env 验生活馆（测试就是这么干的）会拿到旧的那份。
+    ⚠ `cashier` **两版都注册**（2026-09-29 收银界面）：入口形态是生活馆的
+      （`nav-lifehall` 直连块，full 版 CSS 藏），但 key 两版必须一致 ——
+      `roles` 的 HTML↔`PAGE_RULES` 双向对照按 full 版跑，少一边就红。
     """
     # ⚠ tools 每次现建（children 按版组装，见上）；其余各目录没有版本分支，用常量即可。
     if _edition.is_lifehall():
-        return [tools.build_feature()]
+        return [tools.build_feature(), cashier.FEATURE]
     from . import compliance, inventory, plan, sales, valueadd
     return [
         compliance.FEATURE,
@@ -55,6 +58,8 @@ def build_all() -> List["Feature"]:  # noqa: F821 —— 类型只是文档，�
         valueadd.FEATURE,
         # 小工具（2026-09-22）：价签 / 工牌 / **权益领取** / **串号追踪** —— 无定时步骤。
         tools.build_feature(),
+        # 收银（2026-09-29）：生活馆利润核算的录入端，**没有定时步骤**（人一笔笔录）。
+        cashier.FEATURE,
     ]
 
 

@@ -57,6 +57,7 @@ class Test接口404(unittest.TestCase):
 
     def test_保留接口不拦(self):
         for p in ("/api/setup", "/api/session", "/api/session/ping",
+                  "/api/session/store-code",
                   "/api/hwlogin", "/api/refresh", "/api/claim-pending",
                   "/api/health", "/api/boot", "/api/store-account/logout",
                   "/api/report-bug"):

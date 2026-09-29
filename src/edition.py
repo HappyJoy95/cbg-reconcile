@@ -30,8 +30,13 @@ VALID = ("full", "lifehall")
 #: ⚠ 不在这张表里的页面在生活馆包里**连接口一起 404**（见 `web.LIFEHALL_GONE`）。
 LIFEHALL_PAGES = (
     "tools", "pricetag", "claim-pending",                 # 价签 / 权益领取
-    "theme", "linglong",                                   # 左下角保留外观与玲珑授权
+    "cashier",                                            # 收银（2026-09-29 利润核算录入端）
+    "general", "theme", "linglong",                       # 设置 / 外观 / 玲珑授权
 )
+
+#: 生活馆版实际接入 `notify.send` 的业务开关。当前保留的工具没有业务推送调用，
+#: 所以为空；新增生活馆推送时，必须先确认功能确实调用 notify，再把 key 加在这儿。
+LIFEHALL_PUSH_FEATURES = ()
 
 #: 生活馆版保留的**能力层步骤**：抓玲珑（待领清单的数据源）+ 自动更新。
 #: `dump` 的 `whens` 会被剥成 `()`（用户定：不建计划任务，手动刷）。

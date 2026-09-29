@@ -215,13 +215,39 @@ class CbgClient:
         return j.get("result") or {}
 
     def ping(self) -> tuple[bool, str]:
-        """连通 + 会话自检。返回 (是否可用, 说明)。"""
+        """连通 + 会话自检。返回 (是否可用, 说明)。
+
+        ⚠ **store-detail 是按角色挑人的**（2026-09-29 测试机定案，用户原话：
+        「不需要店长角色啊，其他角色也可以看到的」）：请求头默认
+        `role-code: Store_Manager`，账号不是店长时服务端直接拒 ——
+        实测 cndl0205028 回「用户没有对应的角色 店长」，于是**明明登录成功、
+        自检却一直不过**，90 秒后抓取报超时。
+
+        ⇒ 详情失败就**回退拿订单接口验**（`list_orders` 就是认店探测用的那条，
+        同账号实测通、也是这条产线真正要干活的端点）。自检的判据是
+        **"会话能不能干活"**，不是"store-detail 给不给面子"。
+
+        * 会话真死（`CbgAuthError`）**不回退** —— 退了也是白退，直接说失效；
+        * 没给 storeCode 的老契约**保持原样**（参数没给是使用错误，
+          回退会把"配置没填"藏成"通过"）；
+        * 回退也失败 ⇒ 两个错误**都**写进说明（真因不许吞）。
+        """
         try:
             r = self.store_detail()
         except CbgAuthError as e:
             return False, f"会话失效：{e}"
         except CbgError as e:
-            return False, f"接口异常：{e}"
+            if not self.store_code:
+                return False, f"接口异常：{e}"
+            now = int(time.time())
+            try:
+                rows = self.list_orders(now - 30 * 86400, now, page_size=5)
+            except CbgAuthError as e2:
+                return False, f"会话失效：{e2}"
+            except CbgError as e2:
+                return False, f"接口异常：{e}（订单接口回退也失败：{e2}）"
+            return True, ("订单接口自检通过（近 30 天 %d 单）——"
+                          "门店详情这个账号用不了：%s") % (len(rows or []), e)
         name = r.get("storeName") or r.get("abbreviation") or "?"
         return True, f"{r.get('storeNo')} {name}"
 

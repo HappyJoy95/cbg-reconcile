@@ -315,8 +315,12 @@ def cmd_auth(args) -> int:
             print(f"认店：店码 {info['store_code']}（名单里没这家店，店名留空）")
         if info.get("store_code"):
             cfg["store_code"] = info["store_code"]   # 下面那次自检按店码打
-    client = CbgClient(sess, store_code=cfg.get("store_code") or None)
-    ok, msg = client.ping()
+        # ⚠ 没店码时别 ping —— store_detail 必报「没给 storeCode」，0 订单
+        #   新店会被打成「❌ 会话不可用」。判据和 web 保存点同一份（check_after_save）
+        ok, msg = store_identity.check_after_save(sess, cfg.get("store_code") or "")
+    else:
+        client = CbgClient(sess, store_code=cfg.get("store_code") or None)
+        ok, msg = client.ping()
     print(("✅ 会话可用：" if ok else "❌ 会话不可用：") + msg)
     return EXIT_OK if ok else EXIT_AUTH
 

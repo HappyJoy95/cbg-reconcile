@@ -92,6 +92,7 @@ class Test清单(unittest.TestCase):
         self.assertNotIn("stores", edition.LIFEHALL_PAGES)
         self.assertIn("theme", edition.LIFEHALL_PAGES)
         self.assertIn("linglong", edition.LIFEHALL_PAGES)
+        self.assertIn("general", edition.LIFEHALL_PAGES)
         self.assertNotIn("badge", edition.LIFEHALL_PAGES)
         self.assertEqual(set(edition.LIFEHALL_BUILTIN_STEPS),
                          {"dump", "autoupdate"})

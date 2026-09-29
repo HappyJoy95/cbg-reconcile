@@ -143,6 +143,10 @@ const SUBTABS = {
   // ⚠ 小工具（2026-09-22）：价签 / 工牌 —— 各一格 iframe，无定时步骤。
   //   2026-09-23 加 **串号追踪**（sn-trace）。
   tools: ['pricetag', 'badge', 'claim-pending', 'sn-trace'],
+  // ⚠ 收银（2026-09-29 生活馆利润核算录入端）：**独立一级 tab**（不是 tools 子页），
+  //   入口是 nav 里那个 `nav-lifehall` 直连块（full 版 CSS 藏）。
+  //   tab / subtab 同 key —— `inventory` 先例。
+  cashier: ['cashier'],
   // ⚠ 顺序 = 左下角浮层里的顺序（`linglong` 排头 —— 门店来这儿最常干的就是抓会话）
   // ⚠ 顺序 = 左下角那几行里的顺序（`FOOT_GO`）。
   //   ⚠ 这两项**现在都是独立二级页**（2026-09-20 定时器 / 2026-09-21 检查更新，
@@ -185,6 +189,8 @@ const SUBTAB_LOADERS = {
   badge: () => mountTools('badge'),
   'claim-pending': () => loadClaimPending(),
   'sn-trace': () => { /* 查询页：等用户输入，不自动打接口 */ },
+  // 收银：一次 GET 带回当日流水 + 政策新鲜度 + 销售员历史
+  cashier: () => loadCashier(),
   general: () => { loadConfig(); loadNotifyPrefs(); },
   // 主题设置**独立一页**（2026-09-22）—— 选中态刷到卡片 + 拉壁纸列表
   theme: () => { syncThemeUi(); loadWallpapers(); },
@@ -193,7 +199,10 @@ const SUBTAB_LOADERS = {
   // ⚠ 「定时器设置」是**独立一页**（用户 2026-09-20），通用页不再顺带拉它
   timer: () => { loadTimer(); loadSchedulerBits(); },
   // 玲珑授权 = 原来的「会话」页（抓登录态那三件事）
-  linglong: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); },
+  // 玲珑授权页 = 会话状态 + 抓取控件 + **门店编码**（2026-09-29 挪进来，
+  // 用户：「把门店编码设置放到玲珑授权里面吧」）—— 切到这页顺手重画店码框
+  // （拿最新 setupState 里的当前值，别显示上次编辑前的旧值）。
+  linglong: () => { renderSession(); loadBrowserInfo(); loadHwLogin(); renderStoreCodeForms(); },
   // 每店一张卡（M20）—— 数据全部来自收信库（各店发来的邮件）
   stores: () => loadStores(),
 };
@@ -336,6 +345,254 @@ $$('.nav-item').forEach((item) => {
   Array.from(item.querySelectorAll('[data-subtab]')).forEach((b) =>
     b.addEventListener('click', () => switchTab(item.dataset.tab, b.dataset.subtab)));
 });
+
+/* ─────────────── 收银（生活馆利润核算录入端，2026-09-29）───────────────
+
+   用户拍板（同日）：目前**没有生活馆的玲珑数据** ⇒ 先做单独录入；
+   「拉玲珑 + 过滤备注1/2/3 + 改金额/销售员」等有数据再接（开发目标·七）。
+   ⚠ 编码是主输入：识别编码 → `price_policy` 反查商品名（成本/返利顺带显示）；
+     金额、销售员**手动匹配**（没有现成名单，销售员下拉靠历史积累）。
+   ⚠ 政策刷新走 pmall A 案（活窗 → jar → 弹窗人工登录），接口会**阻塞到登录
+     完成（最长 10 分钟）** —— 按钮必须禁用并说清，别让人以为卡死了狂点。 */
+
+let _cashierEditing = 0;      // 正在改的流水 id（0 = 新录）
+let _cashierAutoName = '';    // 最近一次反查自动带出的名 —— 用户手改过就不再覆盖
+let _cashierBound = false;    // 事件只绑一次（loadCashier 每次进来都调）
+let _cashierRows = {};        // id → 行（表格按钮回填表单用）
+
+function cashierPad(n) { return String(n).padStart(2, '0'); }
+
+function cashierNow() {
+  // `datetime-local` 要 `YYYY-MM-DDTHH:MM` —— **本地时区**（门店机器 = 北京时间，
+  // 跟 dump 按 CST 算年份同一条道理：别用 toISOString 那个 UTC，午夜会串天）
+  const d = new Date();
+  return `${d.getFullYear()}-${cashierPad(d.getMonth() + 1)}-${cashierPad(d.getDate())}`
+    + `T${cashierPad(d.getHours())}:${cashierPad(d.getMinutes())}`;
+}
+
+function cashierToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${cashierPad(d.getMonth() + 1)}-${cashierPad(d.getDate())}`;
+}
+
+function cashierResetForm() {
+  _cashierEditing = 0;
+  _cashierAutoName = '';
+  const sold = $('#cashier-sold-at');
+  if (sold) sold.value = cashierNow();
+  for (const id of ['cashier-code', 'cashier-amount', 'cashier-note']) {
+    const el = $('#' + id);
+    if (el) el.value = '';
+  }
+  const qty = $('#cashier-qty');
+  if (qty) qty.value = '1';
+  const name = $('#cashier-name');
+  if (name) name.value = '';
+  const cancel = $('#cashier-cancel');
+  if (cancel) cancel.hidden = true;
+  const hint = $('#cashier-lookup');
+  if (hint) hint.textContent =
+    '政策表没刷新过时，编码反查不到商品名 —— 手输名称也能存。';
+}
+
+function cashierFill(r) {
+  _cashierEditing = r.id;
+  _cashierAutoName = '';          // 回填的是人写的名 —— 反查不许再覆盖它
+  $('#cashier-sold-at').value = String(r.sold_at || '').slice(0, 16).replace(' ', 'T');
+  $('#cashier-code').value = r.goods_code || '';
+  $('#cashier-name').value = r.goods_name || '';
+  $('#cashier-qty').value = r.quantity != null ? r.quantity : 1;
+  $('#cashier-amount').value = r.amount != null ? r.amount : '';
+  $('#cashier-seller').value = r.seller || '';
+  $('#cashier-note').value = r.note || '';
+  $('#cashier-cancel').hidden = false;
+  $('#cashier-sold-at').focus();
+}
+
+async function cashierLookup(focusAmount) {
+  const codeEl = $('#cashier-code');
+  const hint = $('#cashier-lookup');
+  const code = (codeEl.value || '').trim();
+  if (!code) return;
+  try {
+    const d = await api('/api/cashier/lookup?code=' + encodeURIComponent(code));
+    if (!d.found || !d.row) {
+      hint.textContent = `✗ 编码 ${code} 不在政策表 —— 先「刷新政策数据」，或手输商品名。`;
+      return;
+    }
+    const row = d.row;
+    const name = String(row['商品名称'] || '');
+    const nameEl = $('#cashier-name');
+    if (name && (!nameEl.value || nameEl.value === _cashierAutoName)) {
+      nameEl.value = name;
+      _cashierAutoName = name;
+    }
+    const bits = [];
+    if (row['基准提货价*'] != null && row['基准提货价*'] !== '') {
+      bits.push('基准提货价 ' + row['基准提货价*']);
+    }
+    if (row['无条件单台返利金额'] != null && row['无条件单台返利金额'] !== '') {
+      bits.push('无条件返利 ' + row['无条件单台返利金额']);
+    }
+    if (row['有条件最高单台返利金额'] != null && row['有条件最高单台返利金额'] !== '') {
+      bits.push('有条件最高 ' + row['有条件最高单台返利金额']);
+    }
+    hint.textContent = `✓ ${name || code}（商品编码 ${code}）`
+      + (bits.length ? ' · ' + bits.join(' · ') : '')
+      + (row['价格生效日期'] ? ' · 生效 ' + row['价格生效日期'] : '');
+    if (focusAmount) $('#cashier-amount').focus();
+  } catch (e) {
+    hint.textContent = '反查失败：' + e.message;
+  }
+}
+
+async function cashierSave() {
+  const body = {
+    sold_at: $('#cashier-sold-at').value,
+    goods_code: ($('#cashier-code').value || '').trim(),
+    goods_name: ($('#cashier-name').value || '').trim(),
+    quantity: $('#cashier-qty').value,
+    amount: $('#cashier-amount').value,
+    seller: ($('#cashier-seller').value || '').trim(),
+    note: ($('#cashier-note').value || '').trim(),
+  };
+  if (_cashierEditing) body.id = _cashierEditing;
+  if (!String(body.amount).trim()) {
+    toast('实收金额还没填（金额是手动匹配的那项）', 'bad');
+    $('#cashier-amount').focus();
+    return;
+  }
+  try {
+    await api('/api/cashier/entry-save', { method: 'POST', body });
+    toast(_cashierEditing ? '已修改' : '已保存一笔', 'good');
+    cashierResetForm();
+    await loadCashier();
+  } catch (e) {
+    toast('保存失败：' + e.message, 'bad');
+  }
+}
+
+async function cashierRemove(id) {
+  if (!window.confirm('删除这笔流水？删了不能恢复。')) return;
+  try {
+    await api('/api/cashier/entry-delete', { method: 'POST', body: { id } });
+    toast('已删除', 'good');
+    if (_cashierEditing === id) cashierResetForm();
+    await loadCashier();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'bad');
+  }
+}
+
+function renderCashierTable(rows) {
+  const host = $('#cashier-table');
+  const meta = $('#cashier-day-meta');
+  _cashierRows = {};
+  (rows || []).forEach((r) => { _cashierRows[r.id] = r; });
+  if (!rows || !rows.length) {
+    host.innerHTML = '<div class="empty">这天还没有流水</div>';
+    if (meta) meta.textContent = '';
+    return;
+  }
+  const sum = rows.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+  if (meta) {
+    meta.textContent = `共 ${rows.length} 笔 · 合计 ¥${Math.round(sum * 100) / 100}`;
+  }
+  host.innerHTML = table(
+    ['时间', '编码', '商品', '数量', '金额', '销售员', '备注', '操作'],
+    rows.map((r) => [
+      String(r.sold_at || '').slice(5, 16),
+      r.goods_code || '',
+      r.goods_name || '',
+      r.quantity,
+      { html: '<b>¥' + esc(Number(r.amount).toFixed(2)) + '</b>' },
+      r.seller || '',
+      r.note || '',
+      { html: `<button class="btn ghost small" data-edit="${esc(r.id)}">改</button> `
+        + `<button class="btn ghost small" data-del="${esc(r.id)}">删</button>` },
+    ]));
+}
+
+async function loadCashier() {
+  bindCashierEvents();
+  const dayEl = $('#cashier-day');
+  if (dayEl && !dayEl.value) dayEl.value = cashierToday();
+  const soldEl = $('#cashier-sold-at');
+  if (soldEl && !soldEl.value) soldEl.value = cashierNow();
+  try {
+    const d = await api('/api/cashier/entries?day='
+      + encodeURIComponent(cashierDayValue()));
+    const meta = $('#cashier-meta');
+    if (meta) {
+      const p = d.policy || {};
+      meta.textContent = p.rows
+        ? `政策表 ${p.rows} 行 · ${p.fetched_at || '时间未知'} 更新`
+        : '政策表还没刷新过（编码反查用）';
+    }
+    const dl = $('#cashier-sellers');
+    if (dl) {
+      dl.innerHTML = (d.sellers || [])
+        .map((s) => `<option value="${esc(s)}"></option>`).join('');
+    }
+    renderCashierTable(d.rows || []);
+  } catch (e) {
+    const host = $('#cashier-table');
+    if (host) host.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
+    toast('读取流水失败：' + e.message, 'bad');
+  }
+}
+
+function cashierDayValue() {
+  const el = $('#cashier-day');
+  return (el && el.value) || cashierToday();
+}
+
+async function cashierRefreshPolicy() {
+  const btn = $('#cashier-refresh');
+  if (!btn || btn.disabled) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '更新中…（会话掉了会弹登录窗，最长 10 分钟）';
+  try {
+    const d = await api('/api/cashier/policy-refresh', { method: 'POST', body: {} });
+    const last = (d.log && d.log.length) ? d.log[d.log.length - 1] : '';
+    toast(`政策表已更新：${d.rows} 行` + (last ? `（${last}）` : ''), 'good');
+    await loadCashier();
+  } catch (e) {
+    toast('政策更新失败：' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+function bindCashierEvents() {
+  if (_cashierBound) return;
+  _cashierBound = true;
+  // 扫码枪 = 键盘：输完编码回车 → 立刻反查并把光标送进「实收金额」
+  $('#cashier-code').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      cashierLookup(true);
+    }
+  });
+  $('#cashier-code').addEventListener('blur', () => cashierLookup(false));
+  $('#cashier-save').addEventListener('click', cashierSave);
+  $('#cashier-cancel').addEventListener('click', cashierResetForm);
+  $('#cashier-day').addEventListener('change', loadCashier);
+  $('#cashier-refresh').addEventListener('click', cashierRefreshPolicy);
+  // 表格按钮走事件委托（每次重画都会换掉节点，绑死的监听会跟着丢）
+  $('#cashier-table').addEventListener('click', (e) => {
+    const t = e.target.closest('[data-edit]');
+    if (t) {
+      const r = _cashierRows[t.dataset.edit];
+      if (r) { cashierFill(r); }
+      return;
+    }
+    const d = e.target.closest('[data-del]');
+    if (d) cashierRemove(Number(d.dataset.del));
+  });
+}
 
 /* ─────────────── 库存盘点：已拆 iframe、并进同文档（2026-09-22）───────────────
 
@@ -691,6 +948,8 @@ function showSetup(st) {
   setupState = st || setupState;
   const mask = $('#setup-mask');
   if (!mask) return;
+  syncLifehallSettings();
+  renderStoreCodeForms();
   const p = (setupState && setupState.profile) || {};
   $('#setup-sub').textContent = p.erp_name
     ? `${p.erp_name}${p.marker ? ' · 标识 ' + p.marker : ''}`
@@ -714,6 +973,10 @@ function showSetup(st) {
   const needLL = LH || (p.type || '') === 'experience';
   $('#setup-step-erp').hidden = LH;
   $('#setup-step-linglong').hidden = !needLL;
+  const llFullNote = $('#setup-linglong-full-note');
+  const llLifehallNote = $('#setup-linglong-lifehall-note');
+  if (llFullNote) llFullNote.hidden = LH;
+  if (llLifehallNote) llLifehallNote.hidden = !LH;
   // 这一步要露脸 ⇒ 把玲珑那套控件搬进来（不露脸就让它待在玲珑授权页）
   mountLinglong(needLL);
   $('#setup-linglong-num').textContent = LH ? '1' : (needLL ? '2' : '');
@@ -830,6 +1093,8 @@ async function checkSetup() {
   try { st = await api('/api/setup'); } catch (e) { return true; }  // 读不到就别拦着人
   if (st) setupState = st;
   document.body.classList.toggle('lifehall-edition', !!(st && st.lifehall));
+  syncLifehallSettings();
+  renderStoreCodeForms();
   if (st && st.ready) { hideSetup(); return true; }
   showSetup(st);
   return false;
@@ -4340,6 +4605,18 @@ async function loadAttainSettings() {
 async function loadNotifyPrefs(boxSel, only) {
   const box = $(boxSel || '#notify-pref-list');
   if (!box) return;
+  const isLifehall = !!(setupState && setupState.lifehall);
+  if (box.id === 'notify-pref-list') {
+    const title = $('#notify-pref-title');
+    const summary = $('#notify-pref-summary');
+    const fullNote = $('#notify-pref-full-note');
+    const lifehallNote = $('#notify-pref-lifehall-note');
+    if (title) title.textContent = isLifehall ? '业务推送' : '功能推送';
+    if (summary) summary.textContent = isLifehall
+      ? '仅显示生活馆实际可推送项' : '默认关闭 · 与各模块 › 设置同步';
+    if (fullNote) fullNote.hidden = isLifehall;
+    if (lifehallNote) lifehallNote.hidden = !isLifehall;
+  }
   let d = {};
   try { d = await api('/api/notify-pref'); } catch (e) {
     box.innerHTML = '<div class="hint">读不到：' + esc(e.message) + '</div>';
@@ -4349,7 +4626,9 @@ async function loadNotifyPrefs(boxSel, only) {
   let keys = Object.keys(prefs).filter((k) => prefs[k].kind === 'feature');
   if (only && only.length) keys = keys.filter((k) => only.indexOf(k) >= 0);
   if (!keys.length) {
-    box.innerHTML = '<div class="hint">（这个模块还没有可推的内容）</div>';
+    box.innerHTML = isLifehall
+      ? '<div class="hint">生活馆版当前没有单独配置的业务推送项。</div>'
+      : '<div class="hint">（这个模块还没有可推的内容）</div>';
     return;
   }
   box.innerHTML = keys.map(function (k) {
@@ -5433,11 +5712,80 @@ $('#btn-auto-refresh').addEventListener('click', () => startAuto('refresh'));
 
 /* ───────────────────────────── 会话 ───────────────────────────── */
 
+/* 生活馆：手输门店编码（用户 2026-09-27：「加一个手动输入门店编码吧，
+ * 现在匹配不起来拉不到会话」）。
+ * ⚠ 只在生活馆显示 —— full 版的店码由云商登录匹配出来，手输会盖掉那个判据
+ *   （README 坑：一个账号看多个店时，店码填错不报错、只会静默算错）。
+ * ⚠ 校验和写入只有后端一份（store_identity.set_store_code），前端只管展示。 */
+function storeCodeBox() {
+  if (!(setupState && setupState.lifehall)) return '';
+  const cur = ((setupState && setupState.profile) || {}).huawei_code || '';
+  return `<div class="store-code-box">
+    <b>门店编码</b>
+    <input class="mono" data-store-code-input spellcheck="false"
+           placeholder="如 SCN328987" value="${esc(cur)}">
+    <button type="button" class="btn small" data-save-store-code>保存</button>
+    <span class="hint">认不出店就手填 —— 保存后抓会话会<b>跳过认店</b>，
+      直接按这家店自检；名单里有会自动带出店名。</span>
+  </div>`;
+}
+
+function bindStoreCodeBtn() {
+  document.querySelectorAll('[data-save-store-code]').forEach((btn) => {
+    btn.onclick = async () => {
+      const box = btn.closest('.store-code-box');
+      const input = box && box.querySelector('[data-store-code-input]');
+      const code = ((input && input.value) || '').trim();
+      if (!code) return toast('先填门店编码', 'bad');
+      btn.disabled = true;
+      try {
+        const r = await api('/api/session/store-code',
+                            { method: 'PUT', body: { store_code: code } });
+        toast(r.found
+            ? `已保存：${r.store_code}（${r.store_name}）`
+            : `已保存店码 ${r.store_code}（名单里没这家店，店名留空）`, 'ok');
+        if (r.moved) toast('会话文件已按新店码改名', 'ok');
+        try { setupState = (await api('/api/setup')) || setupState; } catch (e) { /* 照旧显示 */ }
+        renderStoreCodeForms();
+        if (setupState && setupState.ready) loadOverview();
+      } catch (e) {
+        toast('保存失败：' + e.message, 'bad');
+      } finally { btn.disabled = false; }
+    };
+  });
+}
+
+function renderStoreCodeForms() {
+  const lifehall = !!(setupState && setupState.lifehall);
+  const markup = lifehall ? storeCodeBox() : '';
+  const loginHost = $('#setup-store-code-host');
+  const settingsHost = $('#store-code-settings');
+  const settingsCard = $('#store-code-settings-card');
+  if (loginHost) {
+    loginHost.innerHTML = markup;
+    loginHost.hidden = !lifehall;
+  }
+  if (settingsHost) settingsHost.innerHTML = markup;
+  if (settingsCard) settingsCard.hidden = !lifehall;
+  bindStoreCodeBtn();
+}
+
+function syncLifehallSettings() {
+  const lifehall = !!(setupState && setupState.lifehall);
+  const label = document.querySelector('[data-foot="general"] .foot-label');
+  const service = $('#service-settings-card');
+  const fullNote = $('#general-settings-full-note');
+  if (label) label.textContent = lifehall ? '设置' : '推送设置';
+  if (service) service.hidden = lifehall;
+  if (fullNote) fullNote.hidden = lifehall;
+}
+
 function renderSession() {
+  const box = $('#session-box');
+  if (!box) return;                 // 模板里没有这块 —— 别让它炸在启动路径上
   const s = (state.overview && state.overview.session) || {};
   if (!s.exists) {
-    $('#session-box').innerHTML =
-      '<div class="banner bad">还没有会话。照下面的步骤抓一份 curl 导入。</div>';
+    box.innerHTML = '<div class="banner bad">还没有会话。照下面的步骤抓一份 curl 导入。</div>';
     return;
   }
   // 三种状态，**别混成一个**：
@@ -5462,7 +5810,7 @@ function renderSession() {
              + ' —— 点右上「会话自检」</div>';
   }
 
-  $('#session-box').innerHTML = banner + `
+  box.innerHTML = banner + `
     <table><tbody>
       <tr><th>文件</th><td class="mono">${esc(s.path)}</td></tr>
       <tr><th>保存时间</th><td class="mono">${fmtTs(s.saved_at)}</td></tr>
@@ -6381,6 +6729,9 @@ $('#btn-update-apply') && $('#btn-update-apply').addEventListener('click', async
 async function loadConfig() {
   let v;
   try { v = await api('/api/config'); } catch (e) { return toast(e.message, 'bad'); }
+  const lifehall = !!(setupState && setupState.lifehall);
+  syncLifehallSettings();
+  renderStoreCodeForms();
   CONFIG_FIELDS.forEach(([key, id]) => {
     const el = $('#' + id);
     if (el) el.value = v[key] == null ? '' : v[key];
@@ -6390,10 +6741,10 @@ async function loadConfig() {
   if (state.overview) renderWhatsNew(state.overview.whatsnew);
   if (state.overview) renderLegacyPrompt(state.overview.legacy_prompt);
   if (state.overview) renderUpgrades(state.overview.upgrades);
-  loadStoreAccount();
+  if (!lifehall) loadStoreAccount();
   loadMail();
   loadWecom();
-  loadService();
+  if (!lifehall) loadService();
 }
 
 // 收集设置页所有可改字段 → 提交。门店卡片和页面底部各有一个按钮，共用这段。

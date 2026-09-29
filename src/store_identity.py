@@ -18,10 +18,14 @@
 
 ⚠ `_probe_store_code` 是**三态**（Task 6 的验收点，别折成 bool）：
 
-    ("店码", "ok")     拿到店码 —— 会话真、店也真有单
-    ("", "empty")      接口通了但 0 行 —— 会话是真的，只是这 30 天没卖货
-                       （新店常见）→ verify **放行**，但 why 要把话说清
-    ("", "authfail")   CbgAuthError —— 会话是假的 / 已失效 → verify **必须拦**
+    ("店码", "ok", "")       拿到店码 —— 会话真、店也真有单
+    ("", "empty", "")        接口通了但 0 行 —— 会话是真的，只是这 30 天没卖货
+                             （新店常见）→ verify **放行**，但 why 要把话说清
+    ("", "authfail", "底层") CbgAuthError —— 会话是假的 / 已失效 → verify **必须拦**
+
+  第三段是 **底层报错原文**（HTTP 403？「没有门店或数据范围」？返回的是登录页
+  HTML？）—— 2026-09-27 排查生活馆抓取超时时发现它被吞掉过：日志只剩
+  「会话没验过」，四个候选假设一个都分不开。**别再把第三段扔了。**
 
   网络、接口 5xx 这类失败（CbgError）**不折进上面三态**：那是"没验成"，
   不是"验出来是假的"，文案不该冤枉会话 —— 让它原样抛，`identify` 兜住
@@ -31,6 +35,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Tuple
 
 from . import config_io
@@ -49,7 +54,7 @@ def _lookup_store(root, code):
     return None
 
 
-def _move_session_file(root, config_path) -> bool:
+def _move_session_file(root, config_path, target_config=None) -> bool:
     """`cbg-default.json` → `cbg-<店码>.json`（幂等）—— 真挪了返回 True。
 
     ⚠ **先 mkdir 再 os.replace**：目标目录不一定在（换过 `session.file` 配置时
@@ -58,7 +63,9 @@ def _move_session_file(root, config_path) -> bool:
       来历不明（多半是上次没挪完的），盖上去等于把真会话弄丢。
     """
     old = auth.session_path({"store_code": ""}, root)
-    new = auth.session_path(config_io.load_raw(config_path) or {}, root)
+    cfg = (target_config if target_config is not None
+           else config_io.load_raw(config_path) or {})
+    new = auth.session_path(cfg, root)
     if old == new or not old.exists() or new.exists():
         return False
     new.parent.mkdir(parents=True, exist_ok=True)
@@ -66,8 +73,83 @@ def _move_session_file(root, config_path) -> bool:
     return True
 
 
-def _probe_store_code(sess, window_days: int = 30) -> Tuple[str, str]:
-    """**不带 storeCode** 查一次订单，从返回行里拿店码 → `(店码, 状态)`。
+def set_store_code(root, config_path, code) -> dict:
+    """**手输店码**（用户 2026-09-27：「加一个手动输入门店编码吧，
+    现在匹配不起来拉不到会话」）—— 写配置 + 挪会话文件，返回结果说明。
+
+    为什么需要它：认店的探测（不带 storeCode 查订单）在那台机器上**一直 403**，
+    抓取流程卡死在 verify —— 而 `identify` 见配置里已有店码就**跳过探测**、
+    直接拿店码正经 ping（见 `_identify` 开头那段）。人把店码给了，
+    就不用再问接口"你是哪家店"。
+
+    * 店码：去空格、转大写；格式 `[A-Za-z0-9][A-Za-z0-9-]{3,31}`
+      （名单里是 `SCN328987` / `CNSCN162188` 这种）—— 格式不对直接拒，
+      不许把「店名」「编码」这类输入写进配置（半截写比不写糟）。
+    * 名单里有 → 店名/标识一起写；**没有 → 店码照写、店名留空**
+      （写空是"这家店确实没名字"，别留上一家店的旧值 —— 坑 12 同款；
+      边界：名单没这家店照样放行，菜单由 edition 决定、不依赖认店）。
+    * 会话文件已存在就补挪 `cbg-default.json` → `cbg-<店码>.json`
+      （换店 = 换会话的规矩不破）。
+    * **绝不往外抛**：写配置失败折成 `{"ok": False, "error": ...}`。
+    """
+    code = str(code or "").strip().upper()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{3,31}", code):
+        return {"ok": False,
+                "error": "店码看着不对（例：SCN328987）"
+                         " —— 只能是 4~32 位字母 / 数字 / 横杠"}
+    hit = _lookup_store(root, code)
+    path = os.fspath(config_path)
+    old_session = auth.session_path({"store_code": ""}, root)
+    original_config = None
+    config_backed_up = False
+    new_session = None
+    should_move = False
+    try:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                original_config = f.read()
+        config_backed_up = True
+        current_config = config_io.load_raw(config_path) or {}
+        target_config = dict(current_config)
+        target_config["store_code"] = code
+        new_session = auth.session_path(target_config, root)
+        should_move = (old_session != new_session and old_session.exists()
+                       and not new_session.exists())
+        # 先挪会话，再写店码；重命名失败时配置仍保持原样。
+        moved = _move_session_file(root, config_path, target_config)
+        config_io.update(config_path, {
+            "store_code": code,
+            "erp_store_name": str((hit or {}).get("erp_name") or ""),
+            "marker": str((hit or {}).get("marker") or "")})
+    except Exception as e:                              # noqa: BLE001
+        rollback_errors = []
+        # 即使文件移动之后配置写入失败，也尽量把两边恢复到调用前。
+        if should_move and new_session.exists() and not old_session.exists():
+            try:
+                os.replace(str(new_session), str(old_session))
+            except Exception as rollback_error:          # noqa: BLE001
+                rollback_errors.append("会话回滚失败：%s" % rollback_error)
+        if config_backed_up:
+            try:
+                if original_config is None:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                else:
+                    with open(path, "wb") as f:
+                        f.write(original_config)
+            except Exception as rollback_error:          # noqa: BLE001
+                rollback_errors.append("配置回滚失败：%s" % rollback_error)
+        detail = "保存失败（%s）：%s" % (type(e).__name__, e)
+        if rollback_errors:
+            detail += "；" + "；".join(rollback_errors)
+        return {"ok": False, "error": detail}
+    return {"ok": True, "store_code": code, "found": bool(hit),
+            "store_name": str((hit or {}).get("erp_name") or ""),
+            "moved": moved}
+
+
+def _probe_store_code(sess, window_days: int = 30) -> Tuple[str, str, str]:
+    """**不带 storeCode** 查一次订单，从返回行里拿店码 → `(店码, 状态, 底层报错)`。
 
     ⚠ `cbg.list_orders` 不传 storeCode 时按会话所属门店查（cbg.py:240）——
       这正是"会话自带身份"的依据。
@@ -77,6 +159,10 @@ def _probe_store_code(sess, window_days: int = 30) -> Tuple[str, str]:
       `"empty"`    接口通了但 0 行 —— 会话是真的，只是这 30 天没卖货
       `"authfail"` `CbgAuthError` —— 会话是假的 / 已失效，**verify 必须拦**
 
+    第三段：authfail 时带 **CbgAuthError 原文**（其余状态空串）。
+    2026-09-27 实测教训：生活馆抓取超时，日志只有「会话没验过」，
+    403 / 权限错 / HTML 分不开 —— 原文必须一路带到 verify 与超时报错里。
+
     ⚠ 其他失败（网络、接口异常的 CbgError）**原样抛**，不许折进三态 ——
       "没验成"和"验出来是假的"是两回事（由 identify 兜住成 `probe="error"`）。
     ⚠ 手上没会话（sess=None）按 authfail：没有登录态，本来就没得验。
@@ -84,18 +170,18 @@ def _probe_store_code(sess, window_days: int = 30) -> Tuple[str, str]:
     import time
     from .cbg import CbgAuthError, CbgClient
     if sess is None:
-        return "", "authfail"
+        return "", "authfail", "手上没有会话文件"
     now = int(time.time())
     try:
         client = CbgClient(sess, store_code=None, timeout=25)
         rows = client.list_orders(now - window_days * 86400, now, page_size=20)
-    except CbgAuthError:
-        return "", "authfail"
+    except CbgAuthError as e:
+        return "", "authfail", str(e)
     for r in rows or []:
         code = str((r or {}).get("storeCode") or "").strip()
         if code:
-            return code, "ok"
-    return "", "empty"
+            return code, "ok", ""
+    return "", "empty", ""
 
 
 #: 三态文案 —— "0 行"和"假会话"必须分开说（合并了 verify 就没法一个放一个拦）
@@ -143,7 +229,7 @@ def _identify(root, config_path, sess=None) -> dict:
         except Exception:                               # noqa: BLE001
             sess = None
     try:
-        code, status = _probe_store_code(sess)
+        code, status, detail = _probe_store_code(sess)
     except Exception as e:                              # noqa: BLE001
         # 网络 / 接口异常（CbgError）从探测里抛出来走这儿：
         # 没验成 ≠ 假会话，文案分开说；verify 拦，但不说成会话是假的
@@ -173,10 +259,28 @@ def _identify(root, config_path, sess=None) -> dict:
     if status == "empty":
         why = _WHY_EMPTY
     elif status == "authfail":
-        why = _WHY_AUTHFAIL
+        # ⚠ 底层报错原文必须带上 —— 2026-09-27 排查超时时它被吞掉过：
+        #   只说「会话没验过」，403 / 权限错 / 登录页 HTML 一个都分不开。
+        why = _WHY_AUTHFAIL + ("（底层：%s）" % detail if detail else "")
     else:
         why = "认店探测没通过（%s）" % status
     return {"ok": False, "probe": status, "why": why}
+
+
+def check_after_save(sess, store_code: str) -> Tuple[bool, str]:
+    """抓取**保存点**的自检（生活馆）：没店码时别拿去 ping。
+
+    ⚠ 为什么单开一条：`CbgClient.ping()` 走 `store_detail`，没有 storeCode
+      必报「接口异常：没给 storeCode，无法查门店详情」—— 对 0 订单的新店
+      （probe=empty，店码还没认出来）那不是会话坏了，却会把界面显示成
+      「已保存，但自检没过」（2026-09-27 抓取超时排查时顺出来的毛刺）。
+    ⚠ 有店码就正经 ping —— 那时的失败是真失败，照旧拦。
+    """
+    from .cbg import CbgClient
+    if not str(store_code or "").strip():
+        return True, ("会话已保存（这 30 天没订单，店码还没认出来"
+                      " —— 抓到销售后自动补上）")
+    return CbgClient(sess, store_code=store_code).ping()
 
 
 def verify_with_identity(sess, root, config_path, emit=None) -> Tuple[bool, str]:

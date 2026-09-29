@@ -10,10 +10,20 @@ M15 / 阶段 3.6。以前没有这套东西：
 
 | | |
 |---|---|
-| **编号** | 连续、只增不改；跑过的最大编号写进 `meta.schema` |
+| **编号** | 连续、只增不改；**已跑过的编号逐条记在 `meta.migrations`**（逗号分隔），`meta.schema` 仍是"已跑最大编号"（给显示/老代码看） |
 | **前置条件** | `need(db)` 返回 `(能不能跑, 为什么)`。**不满足 ⇒ 记成 skipped，下次再来**（不是"跳过就算完"） |
-| **幂等记录** | 每跑完一条**立刻**更新 `meta.schema`（一条一提交）⇒ 中断了也知道走到哪 |
-| **失败处理** | 抛 `MigrationError(哪一条、什么错)`，**不吞**；库停在上一条的编号上 |
+| **幂等记录** | 每跑完一条**立刻**记账 + 更新编号（一条一提交）⇒ 中断了也知道走到哪 |
+| **失败处理** | 抛 `MigrationError(哪一条、什么错)`，**不吞**；库停在上一条的账上 |
+
+⚠⚠ **为什么 2026-09-29 从"按编号截断"改成"逐条记账"**（收银界面那轮）：
+老实现 `if m.n <= meta.schema: continue` —— 一旦**后面的编号**跑过
+（005/006 无条件建表），前面被 `need` 跳过的 003/004 就**永远不跑了**，
+`meta.schema` 却显示"已到 6"。这正是本模块自己要防的
+「**跳过 ≠ 做完**」：索引/表再也建不出来，而状态页一片绿。
+`tests/test_migrate.py::test_条件满足之后自己就跑了` 就是这条的回归钉子
+（先跑后面的、再补前面的，老实现当场红）。
+老库兼容：`meta.migrations` 缺失时按 `meta.schema` 补账
+（当年的语义 = 1..schema 真都跑过，两条键的写入始终同步）。
 
 ⚠ **不负责"改库名"那类动作**：`dbmigrate` 的改名重建保留它自己的门槛
 （beta 包不许动门店的库 —— 那条红线不动），这里只管**结构**。
@@ -95,6 +105,81 @@ def _m003(conn) -> None:
     conn.execute('CREATE INDEX IF NOT EXISTS ix_erp_sales_made ON erp_sales("制单时间")')
 
 
+def _m004(conn) -> None:
+    """**利润核算结果表**（生活馆，2026-09-29）—— 开发目标见
+    `.dsh/docs/2026-09-29-生活馆利润核算-数据表-开发目标.md`。
+
+    形状跟「四池」那两张同理（`comparison/store.py` 顶部那段）：
+
+    * **只钉核心列** —— 单据/行号（挂回 `orders`/`order_lines` 的键）
+      + 四个金额列（销售/成本/返利/利润）；
+    * **政策与接口给的列不写死** —— pmall「价格及返利政策」导出的
+      「基准提货价」「无条件单台返利金额」这类字段由 `ensure_columns`
+      按返回**当场补**（项目口径：接口多给什么，库里就多一列）。
+      写死在迁移里的后果是接口一改名就得动编号迁移 —— 那是白给自己挖坑。
+
+    ⚠ 主键 `(document_no, line_no)`：利润**重算要覆盖同一行**，
+      没主键就会越积越多（同一单据行算一次留一条，界面上翻一倍）。
+    ⚠ 加列/建表是**向前兼容**的动作，不设发布门槛（beta 包也能跑，
+      同 `_m002` 的注释）。
+    ⚠ 2026-09-29 **去掉了 `orders` 前置**：收银界面（利润核算第三步）允许
+      **纯手动店**建库 —— 那种机器永远不跑 dump，表等 orders 就等于永远建不出来。
+      （原来挂 orders 只是为了保住"空库 applied 只有 1、2"的老钉子，那条已改。）
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS profit_result (
+        document_no   TEXT NOT NULL,
+        line_no       INTEGER NOT NULL,
+        sn            TEXT,
+        sku           TEXT,
+        item_name     TEXT,
+        quantity      REAL,
+        sale_amount   REAL,
+        cost_amount   REAL,
+        rebate_amount REAL,
+        profit        REAL,
+        calc_at       TEXT,
+        source        TEXT,
+        PRIMARY KEY (document_no, line_no))""")
+
+
+def _m005(conn) -> None:
+    """**收银流水**（收银界面 v1，2026-09-29）—— 人工录的销售事实。
+
+    ⚠ 跟 `profit_result` **分两张表**（用户拍的字段方案里"来源=manual"就是它）：
+      流水是**事实**（人工改/删），利润是**派生**（以后重算覆盖）——
+      混一张表会让"改一笔流水"和"重算利润"互相踩。
+    ⚠ 无前置（同 `_m004` 去前置的理由）：收银机可能不跑抓取，表要当场能建。
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS sale_entries (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        sold_at     TEXT NOT NULL,
+        goods_code  TEXT,
+        goods_name  TEXT,
+        quantity    REAL NOT NULL DEFAULT 1,
+        amount      REAL NOT NULL,
+        seller      TEXT,
+        note        TEXT,
+        source      TEXT NOT NULL DEFAULT 'manual',
+        created_at  TEXT,
+        updated_at  TEXT)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_sale_entries_day ON sale_entries(sold_at)")
+
+
+def _m006(conn) -> None:
+    """**政策快照**（pmall 价格与返利政策，整表覆盖）。
+
+    ⚠ 只钉键列 + `fetched_at`：政策那 9 列（`基准提货价*` 带星号那种表头）
+      由 `ensure_columns` 按导出**原样**长 —— 接口改名不用动编号迁移
+      （跟 `_m004` 的动态列同一口径）。
+    ⚠ 不设主键去重：整表快照"先清后写"（同四池快照的道理）；
+      `goods_code` 上建索引给收银界面的编码反查用。
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS price_policy (
+        fetched_at  TEXT NOT NULL,
+        goods_code  TEXT NOT NULL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_price_policy_code ON price_policy(goods_code)")
+
+
 MIGRATIONS: List[Migration] = [
     Migration(n=1, name="结构基线", apply=_m001),
     Migration(n=2, name="采集尝试表 fetch_attempt", apply=_m002),
@@ -103,6 +188,9 @@ MIGRATIONS: List[Migration] = [
               #   而不是"跳过就算完"（那会让索引永远建不出来）
               need=lambda db: (_table_exists(db, "erp_sales"),
                                "还没有 erp_sales 表（先跑一次抓取）")),
+    Migration(n=4, name="利润结果表 profit_result", apply=_m004),
+    Migration(n=5, name="收银流水 sale_entries", apply=_m005),
+    Migration(n=6, name="政策快照 price_policy", apply=_m006),
 ]
 
 
@@ -136,20 +224,59 @@ def _set_current(conn, n: int) -> None:
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)", (str(n),))
 
 
+#: 已跑编号的**记账键**（逗号分隔，如 `"1,2,4,5,6"`）。
+#: `meta.schema` 仍记"已跑最大编号"（显示 + 老代码认它），但**判跑没跑只认这个集合**。
+APPLIED_KEY = "migrations"
+
+
+def applied(conn) -> set:
+    """**已跑过哪些编号** —— "跳过没跳过"只认这个集合，不认 `schema` 的大小。
+
+    ⚠ 只读：`meta` 表不在 / 连接是只读的（健康自检第二阶段就是 `mode=ro`）
+      ⇒ 当空集合，再按 `schema` 补账（老库语义：1..schema 真都跑过）。
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?",
+                           (APPLIED_KEY,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row and str(row[0]).strip():
+        out = set()
+        for part in str(row[0]).split(","):
+            try:
+                out.add(int(part.strip()))
+            except ValueError:
+                continue
+        if out:
+            return out
+    return set(range(1, current(conn) + 1))
+
+
+def _mark(conn, done: set) -> None:
+    """记账（一条一提交的前半步）：集合 + max 编号一起写。"""
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                 (APPLIED_KEY, ",".join(str(n) for n in sorted(done))))
+    if done:
+        _set_current(conn, max(done))
+
+
 # ------------------------------------------------------------------ 跑
 def run(conn, *, migrations: Optional[List[Migration]] = None) -> dict:
-    """把 `n > 当前` 的迁移按顺序跑一遍。
+    """把**没跑过**的迁移按编号顺序跑一遍。
 
     返回 `{"from", "to", "applied", "skipped"}`；失败抛 `MigrationError`。
 
-    ⚠ **一条一提交**：中断时库里停在**上一条**的编号上，下次从那儿接着跑。
+    ⚠ **一条一提交**：中断时库里停在**上一条**的账上，下次从那儿接着跑。
+    ⚠ 判"跑没跑"看 `applied()` 集合（**不是** `n > schema`）——
+      后者会让"先跑后面的、前面还欠着"的那条永远补不上（见文件头）。
     """
     todo = sorted(migrations if migrations is not None else MIGRATIONS, key=lambda m: m.n)
     _ensure_meta(conn)
     start = current(conn)
-    applied, skipped = [], []
+    done = applied(conn)
+    ran, skipped = [], []
     for m in todo:
-        if m.n <= start:
+        if m.n in done:
             continue
         ok, why = m.need(conn)
         if not ok:
@@ -160,18 +287,20 @@ def run(conn, *, migrations: Optional[List[Migration]] = None) -> dict:
         except Exception as e:                                 # noqa: BLE001
             conn.rollback()
             raise MigrationError(m.n, m.name, e) from e
-        _set_current(conn, m.n)
+        done.add(m.n)
+        _mark(conn, done)
         conn.commit()                                          # ⚠ 一条一提交
-        applied.append({"n": m.n, "name": m.name})
-    return {"from": start, "to": current(conn), "applied": applied, "skipped": skipped}
+        ran.append({"n": m.n, "name": m.name})
+    return {"from": start, "to": current(conn), "applied": ran, "skipped": skipped}
 
 
 def status(conn) -> dict:
     """现在第几版、还欠几条 —— **只读**，`selftest` 和看板都调它。"""
     now = current(conn)
+    done = applied(conn)
     out = {"schema": now, "pending": [], "skipped": []}
     for m in sorted(MIGRATIONS, key=lambda x: x.n):
-        if m.n <= now:
+        if m.n in done:
             continue
         ok, why = m.need(conn)
         (out["pending"] if ok else out["skipped"]).append({"n": m.n, "name": m.name, "why": why})

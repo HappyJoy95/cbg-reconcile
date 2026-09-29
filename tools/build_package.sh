@@ -163,12 +163,14 @@ rsync -a \
   --exclude 'run-now.sh' \
   --exclude 'run-now.bat' \
   --exclude '.gitignore' \
+  --exclude '.venv/' \
   --exclude 'README.md' \
   --exclude 'AGENTS.md' \
   --exclude 'agent.md' \
   --exclude '设计文档.md' \
   --exclude 'packaging/' \
   --exclude '运维手册.md' \
+  --exclude '/docs/' \
   --exclude '/.playwright-cli/' \
   --exclude '/claim-guide-preview.html' \
   --exclude '/claim-guide.css' \
@@ -486,7 +488,9 @@ fi
 #   而 AGENTS.md 正文里写着"rsync 排除 + 反查断言，两道"，等于文档承诺了、
 #   代码没做。2026-09-16 补上，顺便加 `agent.md`。
 #   名单要和 `--exclude` 那一段**一一对上**，对不上就是下次踩坑的开始。
-for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md; do
+#   2026-09-29 加 `docs`：根目录那份是开发计划笔记（superpowers 会话产物），
+#   跟 README 一个待遇 —— rsync 排除 + 这里反查，两道。
+for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md docs; do
   if [ -e "${STAGE}/${_doc}" ]; then
     echo "    ✗ 包里混进了不给门店看的文档：${_doc}（门店只看 门店操作手册.md）"
     fail=1
@@ -499,7 +503,9 @@ if grep -rIl "/Users/ashui" "${STAGE}" 2>/dev/null | head -3 | grep -q .; then
 fi
 # 开发垃圾不能进包（门店同事会打开这个目录，看到缓存文件会困惑）
 # ⚠ `*.xlsx` 也是垃圾：开发期源表（rsync 已排，这里再钉一道）。
-for junk in '.pytest_cache' '__pycache__' 'dist' 'tools' 'packaging' \
+# ⚠ `.venv` 2026-09-29 加：开发机在仓库根建的 venv —— `.gitignore` 挡得住 git、
+#   挡不住 rsync（打包拷的是工作区），不排就整包被"本机绝对路径"那条闸拦死。
+for junk in '.pytest_cache' '__pycache__' 'dist' 'tools' 'packaging' '.venv' \
             'run.sh' 'run.bat' 'run-now.sh' 'run-now.bat' '.gitignore' \
             '.playwright-cli' 'claim-guide-preview.html' 'claim-guide.css' \
             'claim-guide.js'; do

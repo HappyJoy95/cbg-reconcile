@@ -16,7 +16,8 @@ from unittest import mock
 from contextlib import redirect_stderr
 import io
 
-from src.cbg import DETAIL_PATH, LIST_PATH, CbgClient, CbgError, ReportedOrder
+from src.cbg import (DETAIL_PATH, LIST_PATH, STORE_PATH, CbgClient, CbgError,
+                     ReportedOrder)
 
 STORE_A = "SCN231409"
 STORE_B = "SCN231410"
@@ -155,3 +156,123 @@ class TestOrderSnsForeignOrders(unittest.TestCase):
         with redirect_stderr(buf):
             self.assertEqual(c.order_sns("D1").sns, ["123456789012345"])
         self.assertEqual(buf.getvalue(), "")
+
+
+class Test自检按角色回退(unittest.TestCase):
+    """⭐ 2026-09-29 测试机定案（用户原话：「不需要店长角色啊，其他角色也可以看到的」）：
+
+    `role-code: Store_Manager` 写死在请求头里 —— 非店长账号（cndl0205028）被
+    `store-detail` 拒（「用户没有对应的角色 店长」）→ **登录成功却自检不过**、
+    90 秒后抓取报超时；而同一账号的**订单接口是通的**（认店探测走的就是它）。
+
+    ⇒ `ping()` 的判据是"会话能不能干活"：详情失败 → 回退拿订单接口验。
+    """
+
+    ROLE_ERR = ("/isrp/sms/store-info/store-detail 返回失败："
+                "用户没有对应的角色 店长")
+
+    def _ping_client(self, detail_exc=None, orders=None, orders_exc=None,
+                     store_code=STORE_A):
+        c = CbgClient(session=mock.Mock(), store_code=store_code)
+        if detail_exc is not None:
+            c.store_detail = mock.Mock(side_effect=detail_exc)
+        else:
+            c.store_detail = mock.Mock(return_value={
+                "storeNo": STORE_A, "storeName": "测试店"})
+        c.list_orders = (mock.Mock(side_effect=orders_exc) if orders_exc is not None
+                         else mock.Mock(return_value=orders if orders is not None else []))
+        return c
+
+    def test_详情正常就不回退(self):
+        c = self._ping_client()
+        ok, msg = c.ping()
+        self.assertTrue(ok)
+        self.assertIn("测试店", msg)
+        c.list_orders.assert_not_called()
+
+    def test_角色被拒回退订单接口_真因带出来(self):
+        c = self._ping_client(detail_exc=CbgError(self.ROLE_ERR),
+                              orders=[{"storeCode": STORE_A},
+                                      {"storeCode": STORE_A}])
+        ok, msg = c.ping()
+        self.assertTrue(ok, "订单接口通 = 会话能干活 = 自检该过")
+        self.assertIn("订单接口自检通过", msg)
+        self.assertIn("用户没有对应的角色 店长", msg,
+                      "真因不许吞 —— 界面要能看出为什么详情用不了")
+
+    def test_回退时订单也业务失败_两个错误都留着(self):
+        c = self._ping_client(detail_exc=CbgError(self.ROLE_ERR),
+                              orders_exc=CbgError("paged-list 返回失败：炸"))
+        ok, msg = c.ping()
+        self.assertFalse(ok)
+        self.assertIn("用户没有对应的角色 店长", msg)
+        self.assertIn("炸", msg)
+
+    def test_详情会话失效不回退(self):
+        """会话真死就直说失效 —— 退了也是白退，别多打一次注定失败的请求。"""
+        from src.session import CbgAuthError
+        c = self._ping_client(detail_exc=CbgAuthError("HTTP 401"))
+        ok, msg = c.ping()
+        self.assertFalse(ok)
+        self.assertIn("会话失效", msg)
+        c.list_orders.assert_not_called()
+
+    def test_回退时会话失效说失效(self):
+        from src.session import CbgAuthError
+        c = self._ping_client(detail_exc=CbgError(self.ROLE_ERR),
+                              orders_exc=CbgAuthError("HTTP 401"))
+        ok, msg = c.ping()
+        self.assertFalse(ok)
+        self.assertIn("会话失效", msg)
+
+    def test_没店码的老契约原样保留(self):
+        """参数没给是**使用错误** —— 回退会把"配置没填"藏成"通过"。"""
+        c = self._ping_client(detail_exc=CbgError(
+            STORE_PATH + " 返回失败：没给 storeCode，无法查门店详情"),
+            store_code=None)
+        ok, msg = c.ping()
+        self.assertFalse(ok)
+        self.assertIn("接口异常", msg)
+        c.list_orders.assert_not_called()
+
+
+class Test门店档案非致命(unittest.TestCase):
+    """`dump.load_store` 抓不到就跳过 —— 档案是锦上添花，不许把每日抓取掐死
+    （非店长账号必踩）；会话真死由**下一步抓订单**以 `CbgAuthError` 报出来。"""
+
+    def _conn(self):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE stores (store_code TEXT)")
+        return conn
+
+    def test_角色被拒返回空且不抛(self):
+        from contextlib import redirect_stdout
+        from src import dump
+        client = mock.Mock()
+        client.store_detail.side_effect = CbgError("用户没有对应的角色 店长")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            d = dump.load_store(self._conn(), client, STORE_A)
+        self.assertEqual(d, {})
+        self.assertIn("不影响抓单", buf.getvalue())
+        self.assertIn("店长", buf.getvalue(), "原因要打印出来")
+
+    def test_会话失效也跳过_由后续抓订单报真死(self):
+        from contextlib import redirect_stdout
+        from src import dump
+        from src.session import CbgAuthError
+        client = mock.Mock()
+        client.store_detail.side_effect = CbgAuthError("HTTP 401")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(dump.load_store(self._conn(), client, STORE_A), {})
+
+    def test_正常路径照写stores表(self):
+        from src import dump
+        client = mock.Mock()
+        client.store_detail.return_value = {"storeNo": STORE_A, "storeName": "测试店"}
+        conn = self._conn()
+        d = dump.load_store(conn, client, STORE_A)
+        self.assertEqual(d["storeNo"], STORE_A)
+        row = conn.execute("SELECT store_name FROM stores").fetchone()
+        self.assertEqual(row[0], "测试店")

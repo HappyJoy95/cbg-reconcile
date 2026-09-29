@@ -41,10 +41,13 @@ class Test注册表收窄(unittest.TestCase):
             os.environ["CBG_EDITION"] = self._old
         edition.reload()
 
-    def test_ALL只剩小工具(self):
+    def test_ALL只剩小工具和收银(self):
+        """⭐ 2026-09-29 收银界面：生活馆注册表 = 小工具 + **收银**（利润核算录入端）。
+        ⚠ 收银是**两版都注册**的（roles 的 HTML↔PAGE_RULES 双向对照按 full 版跑），
+        这里只钉"生活馆版有哪些"。"""
         from src.features import build_all
         keys = [f.key for f in build_all()]
-        self.assertEqual(keys, ["tools"])
+        self.assertEqual(keys, ["tools", "cashier"])
 
     def test_小工具只剩三个子模块(self):
         from src.features import build_all
@@ -82,11 +85,12 @@ class Test注册表收窄(unittest.TestCase):
         self.assertIn('body.lifehall-edition .nav-lifehall', css)
         self.assertIn('data-foot="theme"', side)
         self.assertIn('data-foot="linglong"', side)
-        self.assertTrue({"tools", "pricetag", "claim-pending",
+        self.assertTrue({"tools", "pricetag", "claim-pending", "cashier",
                          "theme", "linglong"}.issubset(edition.LIFEHALL_PAGES))
         self.assertNotIn("badge", edition.LIFEHALL_PAGES)
         self.assertIn('id="lifehall-weather"', html)
-        for key in ("pricetag", "claim-pending"):
+        # 三个平级直连入口（⭐ 2026-09-29 加了「收银」—— 利润核算录入端）
+        for key in ("pricetag", "claim-pending", "cashier"):
             self.assertIn('data-direct-subtab="%s"' % key, html)
 
     def test_刷新待领走dump(self):
