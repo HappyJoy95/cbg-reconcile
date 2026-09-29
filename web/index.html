@@ -224,6 +224,19 @@
       <button class="subtab" data-subtab="sn-trace">串号追踪</button>
     </div>
   </div>
+  <!-- ⚠ 分销（2.3.0，2026-09-29）：渠道分销部的分销单四张看板。
+       **可见性不写在这儿** —— 注册表 `Feature.types="multi"` 派生（区长/平台），
+       接口 `/api/dist/*` 另有一道 403（坑 18：藏菜单不算权限）。
+       数据是**手动选时间段现拉**的（`out/distribution.db`），没有定时步骤。 -->
+  <div class="nav-item" data-tab="distribution">
+    <button class="tab" data-tab="distribution" aria-haspopup="true" aria-expanded="false">分销</button>
+    <div class="nav-menu">
+      <button class="subtab" data-subtab="dist-region">区域看板</button>
+      <button class="subtab" data-subtab="dist-model">机型看板</button>
+      <button class="subtab" data-subtab="dist-salesman">销售员看板</button>
+      <button class="subtab" data-subtab="dist-detail">分销明细</button>
+    </div>
+  </div>
 </nav>
 
     <!-- 左下角：这台电脑是谁、现在什么状态。
@@ -892,6 +905,110 @@
         <button type="submit" class="btn" id="btn-sn-trace">查询</button>
       </form>
       <div id="sn-trace-result" class="hint">输入串号后点「查询」——本地库串起库存快照与销售记录，并反查真 SN。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ──────────────────────── 分销（2.3.0）────────────────────────
+     渠道分销部的分销单四张看板。三条用户拍板的口径（2026-09-29）：
+       ① 只算 `门店=渠道分销部` 且 单据类型 ∈ {分销, 分销退}（净额）；
+       ② 区域识别：备注九区关键词 → 客户映射 → **待确认**（⛔ 不用门店名兜底），
+          明细页下拉确认、按客户落盘、可改可重置；
+       ③ 手动选时间段**现拉**（不读对账库 erp_sales —— 实测它历史有缺行）。
+     ⚠ 日期区间这四个控件是**四页共用**的（写在 `DIST_RANGE`，切页不丢）。 -->
+<section class="panel" id="panel-distribution">
+  <div class="card" id="dist-toolbar">
+    <div class="form-row" style="margin:0;flex-wrap:wrap;gap:8px;align-items:center">
+      <label class="hint" style="margin:0">时间段</label>
+      <input type="date" id="dist-start" aria-label="开始日期" />
+      <span class="hint">～</span>
+      <input type="date" id="dist-end" aria-label="结束日期" />
+      <button class="btn ghost small" id="btn-dist-apply"
+              title="按这个时间段重新读看板（本地已拉过的数据）">应用</button>
+      <button class="btn small" id="btn-dist-fetch"
+              title="从云商现拉这段时间的分销单（覆盖写，重拉即修正）">拉取</button>
+      <button class="btn ghost small" id="btn-dist-export"
+              title="把分销明细导成 Excel">导出 Excel</button>
+      <span class="hint" id="dist-status" style="margin-left:auto"></span>
+    </div>
+    <div class="hint" id="dist-range-note" style="margin-top:6px"></div>
+  </div>
+
+  <div class="subpanel" id="subpanel-dist-region">
+    <div class="card">
+      <div class="card-head">
+        <h2>区域看板 <span class="hint" id="dist-region-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-dist-region">刷新</button>
+      </div>
+      <div id="dist-region-chart" class="dist-chart" aria-label="九区占比环形图"></div>
+      <div id="dist-region-board"></div>
+      <h3 style="margin-top:16px">待确认（按客户）<span class="hint" id="dist-pending-count"></span></h3>
+      <div class="hint" style="margin-bottom:6px">
+        一个客户一条 —— 在右边选个区就落盘，<b>该客户以后所有单自动沿用</b>，
+        在「已确认的客户」里还能改、能重置。
+      </div>
+      <div id="dist-region-pending"></div>
+      <div class="hint" style="margin-top:10px">
+        识别顺序：<b>备注含九区关键词</b> → <b>客户映射</b>（下面确认过的）
+        → <b>待确认</b>。⚠ <b>不用门店名兜底</b> —— 开单门店所在区不等于客户所在区。
+      </div>
+      <h3 style="margin-top:16px">已确认的客户 <span class="hint" id="dist-map-count"></span></h3>
+      <div id="dist-map-list"></div>
+      <div style="margin-top:10px">
+        <button class="btn ghost small" id="btn-dist-map-reset"
+                title="清空全部客户→区的映射，全部回到待确认">重置全部映射</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="subpanel" id="subpanel-dist-model">
+    <div class="card">
+      <div class="card-head">
+        <h2>机型看板 <span class="hint" id="dist-model-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-dist-model">刷新</button>
+      </div>
+      <h3>一级分类</h3>
+      <div id="dist-model-cat1-chart" class="dist-chart" aria-label="一级分类柱形图"></div>
+      <div id="dist-model-cat1"></div>
+      <h3 style="margin-top:16px">三级分类</h3>
+      <div id="dist-model-cat3-chart" class="dist-chart" aria-label="三级分类柱形图"></div>
+      <div id="dist-model-cat3"></div>
+      <div class="hint" style="margin-top:10px">
+        ⚠ 「<b>未分类</b>」是 ERP 里的字面量、「<b>（空）</b>」是压根没值 ——
+        两档分开列，合计才对得上账。金额 = 净额（分销 + 分销退）。
+      </div>
+    </div>
+  </div>
+
+  <div class="subpanel" id="subpanel-dist-salesman">
+    <div class="card">
+      <div class="card-head">
+        <h2>销售员看板 <span class="hint" id="dist-salesman-meta"></span></h2>
+        <button class="btn ghost small" id="btn-refresh-dist-salesman">刷新</button>
+      </div>
+      <div id="dist-salesman-chart" class="dist-chart" aria-label="销售员销售额柱形图"></div>
+      <div id="dist-salesman-board"></div>
+      <div class="hint" style="margin-top:10px">
+        销售员取<b>「店员」列</b>（销售报表的「业务员」列实测全空）。
+        占比 = 该店员各一级分类 |金额| 占比（退单是负金额，取绝对值才画得出堆叠）；
+        总销售额仍是净额。
+      </div>
+    </div>
+  </div>
+
+  <div class="subpanel" id="subpanel-dist-detail">
+    <div class="card">
+      <div class="card-head">
+        <h2>分销明细 <span class="hint" id="dist-detail-meta"></span></h2>
+        <div class="form-row" style="margin:0">
+          <select id="dist-zone-filter" aria-label="按区域筛选" style="max-width:160px">
+            <option value="">全部区域</option>
+          </select>
+          <button class="btn ghost small" id="btn-refresh-dist-detail">刷新</button>
+        </div>
+      </div>
+      <div class="hint" id="dist-pending-hint" style="margin-bottom:8px"></div>
+      <div id="dist-detail-table"></div>
     </div>
   </div>
 </section>

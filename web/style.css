@@ -1727,3 +1727,129 @@ main.tools-frame-mode .subpanel.active {
   text-decoration: line-through;
   opacity: 0.65;
 }
+
+/* ──────────────────── 分销看板图表（2.3.0，手写 SVG/CSS，无图表库）────────────
+   环形图：`.dist-donut-wrap` = svg + 图例左右排；条形图：label / track / value 三段。
+   ⚠ 配色走行内 `--DIST_COLORS`（JS 里那 12 色），这里只管布局 ——
+     别把颜色搬进 CSS：图例的点和扇区必须同色，两处各写一份必漂。 */
+.dist-donut-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 8px 0 14px;
+}
+.dist-donut-wrap svg { flex: 0 0 auto; }
+.dist-donut-num { font-size: 15px; font-weight: 700; fill: var(--ink); }
+.dist-donut-sub { font-size: 10px; fill: var(--ink-2, var(--ink)); }
+.dist-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 14px;
+  font-size: 13px;
+}
+.dist-legend li { display: flex; align-items: center; gap: 6px; }
+.dist-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  display: inline-block;
+}
+.dist-bars { margin: 6px 0 12px; }
+.dist-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 3px 0;
+  font-size: 13px;
+}
+.dist-bar-label {
+  flex: 0 0 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dist-bar-track {
+  flex: 1 1 auto;
+  background: var(--field, var(--code-bg));
+  border-radius: 4px;
+  height: 14px;
+  overflow: hidden;
+}
+.dist-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  min-width: 2px;
+  transition: width var(--motion-normal) var(--ease-out);
+}
+.dist-bar-fill.neg { background: var(--bad) !important; }
+.dist-bar-val {
+  flex: 0 0 90px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dist-bar-val.neg { color: var(--bad); font-weight: 600; }
+@media (max-width: 720px) {
+  .dist-bar-label { flex-basis: 84px; }
+  .dist-bar-val { flex-basis: 72px; }
+}
+
+/* ────────── 分销：销售额/销量 一左一右（2026-09-29 用户：「分开吧，一左一右」）── */
+/* 双饼：**页面平分两列，各自内容居中**（先 50/50，再 center —— 用户原话）。 */
+.dist-donut-pair {
+  display: flex;
+  gap: 0;
+  flex-wrap: nowrap;
+}
+.dist-donut-pair > div {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.dist-chart-cap {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2, var(--ink));
+}
+/* 环形图组件在自己的半区里水平居中（svg + 图例整组居中） */
+.dist-donut-pair .dist-donut-wrap {
+  justify-content: center;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+/* 条形图：销售额 / 销量 两张，一左一右各占一半 */
+.dist-bars-pair {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  margin: 6px 0 12px;
+}
+.dist-bars-half {
+  flex: 1 1 300px;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .dist-donut-pair { flex-wrap: wrap; }
+  .dist-donut-pair > div { flex: 1 1 100%; }
+  .dist-bars-pair { gap: 12px; }
+}
+
+/* 未分类的「点开看」—— 原生 details，窄一行、别抢主表的视觉 */
+.dist-unc { margin: 8px 0 4px; font-size: 13px; }
+.dist-unc summary {
+  cursor: pointer;
+  color: var(--ink-2, var(--ink));
+  user-select: none;
+  padding: 4px 0;
+}
+.dist-unc summary:hover { color: var(--ink); }
+.dist-unc[open] summary { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
