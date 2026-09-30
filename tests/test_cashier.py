@@ -493,6 +493,36 @@ class Test页面接线(unittest.TestCase):
         i = APP_JS.index("function cashierImport")
         self.assertIn("disabled", APP_JS[i:i + 900])
 
+    def test_两段式和导出接上了(self):
+        """2026-09-30 两段式：确认添加进暂存 → 保存并记录入库 → 导出走下载。"""
+        for cid in ("cashier-commit", "cashier-export", "cashier-category"):
+            with self.subTest(id=cid):
+                self.assertIn('id="%s"' % cid, INDEX_HTML)
+        self.assertIn("确认添加", INDEX_HTML, "「保存一笔」要改名 —— 它不入账了")
+        self.assertNotIn(">保存一笔<", INDEX_HTML)
+        self.assertIn("保存并记录", INDEX_HTML)
+        for fn in ("cashierCommit", "cashierExport"):
+            with self.subTest(fn=fn):
+                self.assertIn("function %s" % fn, APP_JS)
+        self.assertIn("status: 'staged'", APP_JS, "确认添加要进暂存，不直接入账")
+        self.assertIn("/api/cashier/commit", APP_JS)
+        self.assertIn("/api/cashier/export", APP_JS)
+        self.assertIn("未入库", APP_JS, "暂存行要有徽章")
+        i = APP_JS.index("function cashierExport")
+        self.assertIn("triggerDownload", APP_JS[i:i + 700],
+                      "导出要走浏览器下载，不是新窗口")
+
+    def test_品类下拉录入和编辑两边都在(self):
+        for o in ("手机", "平板", "笔记本", "穿戴", "音频", "配件",
+                  "第三方配件", "服务"):
+            with self.subTest(opt=o):
+                self.assertIn("<option>%s</option>" % o, INDEX_HTML)
+        self.assertIn("cashierCATEGORIES", APP_JS)
+        self.assertIn("sel('category', r.category, cashierCATEGORIES)", APP_JS,
+                      "卡内编辑也要能改品类")
+        self.assertIn("category: ($('#cashier-category')", APP_JS,
+                      "录入卡的品类要进保存体")
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:

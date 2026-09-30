@@ -978,11 +978,19 @@
         <label>实收金额 <input type="number" id="cashier-amount" step="0.01"
                         placeholder="手动匹配" style="width:8em"></label>
         <label>SN <input id="cashier-sn" placeholder="可空" style="width:10em"></label>
+        <label>品类
+          <select id="cashier-category" title="导出销售表的「品类」列 —— 录入时选">
+            <option value=""></option>
+            <option>手机</option><option>平板</option><option>笔记本</option>
+            <option>穿戴</option><option>音频</option><option>配件</option>
+            <option>第三方配件</option><option>服务</option>
+          </select></label>
         <label>销售员 <input id="cashier-seller" list="cashier-sellers"
                         placeholder="选一个或新输">
           <datalist id="cashier-sellers"></datalist></label>
         <label>备注 <input id="cashier-note" placeholder="可空" style="width:11em"></label>
-        <button class="btn primary" id="cashier-save">保存一笔</button>
+        <button class="btn primary" id="cashier-save"
+                title="加进今日清单（还没入库）—— 入库点汇总条上的「保存并记录」">确认添加</button>
         <button class="btn ghost" id="cashier-cancel" hidden>取消修改</button>
       </div>
     </div>
@@ -993,9 +1001,13 @@
       <span><b id="cashier-qty-sum">0</b> 件</span>
       <span>实收 ¥<b id="cashier-amount-sum">0.00</b></span>
       <span>配件 ¥<b id="cashier-acc-sum">0.00</b></span>
+      <button class="btn primary small" id="cashier-commit"
+              title="把今天还没入库的记录（确认添加 / 导入来的）正式写进账">保存并记录</button>
       <span class="cs-gap"></span>
       <button class="btn primary small" id="cashier-import"
-              title="拉当天玲珑销售单合并入库并生成卡片（已导过的不会重复）">导入玲珑单</button>
+              title="拉当天玲珑销售单合并生成卡片（已导过的不会重复；生成的是暂存，要点保存并记录入库）">导入玲珑单</button>
+      <button class="btn ghost small" id="cashier-export"
+              title="导出当月销售表 + 现行政策表两个 sheet，走浏览器下载">导出 Excel</button>
       <button class="btn ghost small" id="cashier-blacklist-open">排除关键词</button>
       <input type="date" id="cashier-day" title="看哪天的流水">
     </div>

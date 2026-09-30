@@ -358,6 +358,10 @@ $$('.nav-item').forEach((item) => {
 let _cashierEditing = 0;      // 正在改的流水 id（**number**，0 = 没在改）
 let _cashierEditAcc = [];     // 编辑中的配件草稿（深拷贝自原行，保存才提交）
 let _cashierEditPay = [];     // 编辑中的支付草稿（同上 —— 取消修改要能还原）
+
+//: 品类清单（= 后端 `store.CATEGORIES`，导出销售表的「品类」列就用它）
+const cashierCATEGORIES = ['手机', '平板', '笔记本', '穿戴', '音频',
+  '配件', '第三方配件', '服务'];
 let _cashierAutoName = '';    // 最近一次反查自动带出的名 —— 用户手改过就不再覆盖
 let _cashierBound = false;    // 事件只绑一次（loadCashier 每次进来都调）
 let _cashierRows = {};        // id → 行（卡片按钮按 dataset.id 查行用）
@@ -382,7 +386,8 @@ function cashierResetForm() {
   _cashierAutoName = '';
   const sold = $('#cashier-sold-at');
   if (sold) sold.value = cashierNow();
-  for (const id of ['cashier-scan', 'cashier-sn', 'cashier-amount', 'cashier-note']) {
+  for (const id of ['cashier-scan', 'cashier-sn', 'cashier-amount',
+                    'cashier-note', 'cashier-category']) {
     const el = $('#' + id);
     if (el) el.value = '';
   }
@@ -424,15 +429,19 @@ async function cashierLookup(focusAmount) {
 
 async function cashierSave() {
   // ⚠ 顶部表单**只管新录** —— 改已有那笔在卡里（cashierCardSave），别再往这儿塞 id
+  // ⚠ 两段式（2026-09-30）：这里**不入账** —— status=staged 进今日清单，
+  //   真正入库是汇总条那个「保存并记录」（cashierCommit）。
   const body = {
     sold_at: $('#cashier-sold-at').value,
     goods_code: ($('#cashier-scan').value || '').trim(),
     goods_name: ($('#cashier-name').value || '').trim(),
     sn: ($('#cashier-sn').value || '').trim(),
+    category: ($('#cashier-category') || {}).value || '',
     quantity: $('#cashier-qty').value,
     amount: $('#cashier-amount').value,
     seller: ($('#cashier-seller').value || '').trim(),
     note: ($('#cashier-note').value || '').trim(),
+    status: 'staged',
   };
   if (!String(body.amount).trim()) {
     toast('实收金额还没填（金额是手动匹配的那项）', 'bad');
@@ -441,11 +450,11 @@ async function cashierSave() {
   }
   try {
     await api('/api/cashier/entry-save', { method: 'POST', body });
-    toast('已保存一笔', 'good');
+    toast('已加入今日清单（还没入库）—— 结账时点「保存并记录」', 'good');
     cashierResetForm();
     await loadCashier();
   } catch (e) {
-    toast('保存失败：' + e.message, 'bad');
+    toast('添加失败：' + e.message, 'bad');
   }
 }
 
@@ -483,6 +492,10 @@ function cashierCardHtml(r) {
   const src = r.source === 'linglong'
     ? '<span class="cc-wait" title="修改只影响本机视图，不动华为原单">玲珑 '
       + esc2(r.external_id || '') + '</span>' : '';
+  // 两段式：没点「保存并记录」的行挂个徽章（一眼看出哪些还没入账）
+  const wait = r.status === 'staged'
+    ? '<span class="cc-wait" title="还没入账 —— 结账时点汇总条的「保存并记录」">未入库</span>'
+    : '';
   const accHtml = acc.length
     ? '<div class="cc-acc"><b>配件</b>'
       + acc.map((x) => `<div class="cc-acc-row"><span>${esc2(x.name)}</span>`
@@ -491,7 +504,7 @@ function cashierCardHtml(r) {
     : '';
   return `<div class="cashier-card card" data-id="${r.id}">`
     + `<div class="cc-main">`
-    + `<div class="cc-time">${esc2(sold)} ${src}</div>`
+    + `<div class="cc-time">${esc2(sold)} ${wait} ${src}</div>`
     + `<div class="cc-name">${esc2(r.goods_name) || '（没填名称）'}</div>`
     + `<div class="cc-meta">商品编码 ${esc2(r.goods_code) || '—'}`
     + `<br>SN ${esc2(r.sn) || '—'}</div>`
@@ -507,6 +520,8 @@ function cashierCardHtml(r) {
     + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
     + `<div class="cc-row"><span class="k">销售员</span>`
     + `<span class="v">${esc2(r.seller) || '—'}</span></div>`
+    + `<div class="cc-row"><span class="k">品类</span>`
+    + `<span class="v">${esc2(r.category) || '—'}</span></div>`
     + `<div class="cc-row"><span class="k">备注</span>`
     + `<span class="v">${esc2(r.note) || '—'}</span></div></div>`
     + `<div class="cc-group cc-muted"><div class="cc-group-title">客户信息</div>`
@@ -531,6 +546,9 @@ function cashierCardEditHtml(r) {
   const acc = _cashierEditAcc;
   const inp = (f, v, type, w) => `<input data-f="${f}" type="${type || 'text'}"`
     + ` value="${esc2(v == null ? '' : v)}"${w ? ` style="width:${w}"` : ''}>`;
+  const sel = (f, v, opts) => `<select data-f="${f}"><option value=""></option>`
+    + opts.map((o) => `<option${o === v ? ' selected' : ''}>${esc2(o)}</option>`)
+      .join('') + `</select>`;
   return `<div class="cashier-card card cc-editing" data-id="${r.id}">`
     + `<div class="cc-main">`
     + `<div class="cc-time">编辑中</div>`
@@ -552,6 +570,8 @@ function cashierCardEditHtml(r) {
     + `<div class="cc-side">`
     + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
     + `<div class="cc-row"><span class="k">销售员</span>${inp('seller', r.seller)}</div>`
+    + `<div class="cc-row"><span class="k">品类</span>`
+    + `${sel('category', r.category, cashierCATEGORIES)}</div>`
     + `<div class="cc-row"><span class="k">备注</span>${inp('note', r.note)}</div>`
     + `<div class="cc-row"><span class="k">销售时间</span>`
     + `${inp('sold_at', String(r.sold_at || '').slice(0, 16).replace(' ', 'T'), 'datetime-local')}</div>`
@@ -767,6 +787,53 @@ function cashierRenderSummary(rows, day) {
   set('cashier-acc-sum', acc.toFixed(2));
   const lab = $('#cashier-day-label');
   if (lab) lab.textContent = day || cashierToday();
+  // 两段式：汇总条上「保存并记录」把待入库的条数亮出来（没待入库就干干净净）
+  const staged = rows.filter((r) => r.status === 'staged').length;
+  const cb = $('#cashier-commit');
+  if (cb) {
+    cb.textContent = staged ? `保存并记录（${staged} 笔待入库）` : '保存并记录';
+    cb.title = staged
+      ? `把今天 ${staged} 笔未入库的记录正式写进账`
+      : '把今天还没入库的记录正式写进账（现在没有待入库的）';
+  }
+}
+
+/** 「保存并记录」—— 当天暂存 → 已入库（两段式第二段）。 */
+async function cashierCommit() {
+  try {
+    const d = await api('/api/cashier/commit',
+      { method: 'POST', body: { day: cashierDayValue() } });
+    if (!d.saved) {
+      toast('这天没有待入库的记录', 'bad');
+      return;
+    }
+    toast(`已入库 ${d.saved} 笔`, 'good');
+    await loadCashier();
+  } catch (e) {
+    toast('入库失败：' + e.message, 'bad');
+  }
+}
+
+/** 当月导出（销售表 + 政策表）—— 拿 file 走浏览器下载。 */
+async function cashierExport() {
+  const btn = $('#cashier-export');
+  if (!btn || btn.disabled) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '导出中…';
+  try {
+    const month = cashierDayValue().slice(0, 7);      // 看哪个月就导哪个月
+    const r = await api('/api/cashier/export',
+      { method: 'POST', body: { month } });
+    triggerDownload('/api/export/download?name=' + encodeURIComponent(r.file),
+                    r.file);
+    toast(`已导出 ${r.file}（${r.rows} 行）`, 'good');
+  } catch (e) {
+    toast('导出失败：' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 function renderCashierCards(rows) {
@@ -859,7 +926,8 @@ async function cashierImport() {
     const d = await api('/api/cashier/import', { method: 'POST', body: { day } });
     toast(`导入完成：新增 ${d.imported} 笔`
       + (d.skipped_blacklist ? `，排除词命中 ${d.skipped_blacklist}` : '')
-      + (d.skipped_dup ? `，已存在 ${d.skipped_dup}` : ''), 'good');
+      + (d.skipped_dup ? `，已存在 ${d.skipped_dup}` : '')
+      + (d.imported ? '（还没入库，点「保存并记录」）' : ''), 'good');
     await loadCashier();
   } catch (e) {
     toast('导入失败：' + e.message, 'bad');
@@ -914,6 +982,8 @@ function bindCashierEvents() {
   $('#cashier-cancel').addEventListener('click', cashierCardCancel);
   $('#cashier-day').addEventListener('change', loadCashier);
   $('#cashier-refresh').addEventListener('click', cashierRefreshPolicy);
+  $('#cashier-commit').addEventListener('click', cashierCommit);
+  $('#cashier-export').addEventListener('click', cashierExport);
   $('#cashier-import').addEventListener('click', cashierImport);
   $('#cashier-blacklist-open').addEventListener('click', cashierBlacklistOpen);
   $('#cashier-blacklist-save').addEventListener('click', cashierBlacklistSave);
@@ -1340,9 +1410,10 @@ function showSetup(st) {
   // ⚠ 2026-09-21（用户：「先把**体验店登录需要玲珑**这个跳过一下……我想看看
   //   **体验店的界面**」）—— 玲珑那步没过时，多给一个「先看看界面」。
   //   `preview_available` 由后端给（= 云商那步过了、只差玲珑），前端不自己判。
-  //   生活馆版没有"跳过看界面"这回事（后端恒 False），连段一起藏。
+  //   生活馆版 2026-09-30 起也有（用户：「登录页加个跳过按钮，让我直接进入」）——
+  //   后端 `_setup_state_lifehall` 在没会话时给 True，这里不再按 LH 藏。
   const pv = $('#setup-step-preview');
-  if (pv) pv.hidden = LH || !(setupState && setupState.preview_available);
+  if (pv) pv.hidden = !(setupState && setupState.preview_available);
 
   mask.hidden = false;
   document.body.classList.add('setup-locked');
@@ -1380,8 +1451,12 @@ async function checkPreviewBanner() {
   const why = ((st.linglong || {}).why) || '玲珑还没登录';
   const el = $('#preview-text');
   if (el) {
-    el.textContent = `：${why} —— 界面能看，但**抓取玲珑数据 / 双平台对比 / POS 合规`
-      + `这三件仍然要会话**（点了会照常报错，不会给假的数）。`;
+    // 横幅点名的功能按版说 —— full 的「双平台对比 / POS 合规」生活馆根本没有
+    el.textContent = st.lifehall
+      ? `：${why} —— 界面能看，但**导入玲珑单 / 政策刷新这类要会话的功能`
+        + `仍然进不来**（点了会照常报错，不会给假的数）。`
+      : `：${why} —— 界面能看，但**抓取玲珑数据 / 双平台对比 / POS 合规`
+        + `这三件仍然要会话**（点了会照常报错，不会给假的数）。`;
   }
   box.hidden = false;
 }
