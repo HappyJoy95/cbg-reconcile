@@ -380,7 +380,7 @@ function cashierResetForm() {
   _cashierAutoName = '';
   const sold = $('#cashier-sold-at');
   if (sold) sold.value = cashierNow();
-  for (const id of ['cashier-code', 'cashier-amount', 'cashier-note']) {
+  for (const id of ['cashier-scan', 'cashier-amount', 'cashier-note']) {
     const el = $('#' + id);
     if (el) el.value = '';
   }
@@ -390,16 +390,13 @@ function cashierResetForm() {
   if (name) name.value = '';
   const cancel = $('#cashier-cancel');
   if (cancel) cancel.hidden = true;
-  const hint = $('#cashier-lookup');
-  if (hint) hint.textContent =
-    '政策表没刷新过时，编码反查不到商品名 —— 手输名称也能存。';
 }
 
 function cashierFill(r) {
   _cashierEditing = r.id;
   _cashierAutoName = '';          // 回填的是人写的名 —— 反查不许再覆盖它
   $('#cashier-sold-at').value = String(r.sold_at || '').slice(0, 16).replace(' ', 'T');
-  $('#cashier-code').value = r.goods_code || '';
+  $('#cashier-scan').value = r.goods_code || '';
   $('#cashier-name').value = r.goods_name || '';
   $('#cashier-qty').value = r.quantity != null ? r.quantity : 1;
   $('#cashier-amount').value = r.amount != null ? r.amount : '';
@@ -410,14 +407,13 @@ function cashierFill(r) {
 }
 
 async function cashierLookup(focusAmount) {
-  const codeEl = $('#cashier-code');
-  const hint = $('#cashier-lookup');
+  const codeEl = $('#cashier-scan');
   const code = (codeEl.value || '').trim();
   if (!code) return;
   try {
     const d = await api('/api/cashier/lookup?code=' + encodeURIComponent(code));
     if (!d.found || !d.row) {
-      hint.textContent = `✗ 编码 ${code} 不在政策表 —— 先「刷新政策数据」，或手输商品名。`;
+      toast(`编码 ${code} 不在政策表 —— 先「刷新政策数据」，或手输商品名。`, 'bad');
       return;
     }
     const row = d.row;
@@ -427,29 +423,16 @@ async function cashierLookup(focusAmount) {
       nameEl.value = name;
       _cashierAutoName = name;
     }
-    const bits = [];
-    if (row['基准提货价*'] != null && row['基准提货价*'] !== '') {
-      bits.push('基准提货价 ' + row['基准提货价*']);
-    }
-    if (row['无条件单台返利金额'] != null && row['无条件单台返利金额'] !== '') {
-      bits.push('无条件返利 ' + row['无条件单台返利金额']);
-    }
-    if (row['有条件最高单台返利金额'] != null && row['有条件最高单台返利金额'] !== '') {
-      bits.push('有条件最高 ' + row['有条件最高单台返利金额']);
-    }
-    hint.textContent = `✓ ${name || code}（商品编码 ${code}）`
-      + (bits.length ? ' · ' + bits.join(' · ') : '')
-      + (row['价格生效日期'] ? ' · 生效 ' + row['价格生效日期'] : '');
     if (focusAmount) $('#cashier-amount').focus();
   } catch (e) {
-    hint.textContent = '反查失败：' + e.message;
+    toast('反查失败：' + e.message, 'bad');
   }
 }
 
 async function cashierSave() {
   const body = {
     sold_at: $('#cashier-sold-at').value,
-    goods_code: ($('#cashier-code').value || '').trim(),
+    goods_code: ($('#cashier-scan').value || '').trim(),
     goods_name: ($('#cashier-name').value || '').trim(),
     quantity: $('#cashier-qty').value,
     amount: $('#cashier-amount').value,
@@ -486,7 +469,7 @@ async function cashierRemove(id) {
 
 function renderCashierTable(rows) {
   const host = $('#cashier-table');
-  const meta = $('#cashier-day-meta');
+  const meta = $('#cashier-day-label');
   _cashierRows = {};
   (rows || []).forEach((r) => { _cashierRows[r.id] = r; });
   if (!rows || !rows.length) {
@@ -570,13 +553,13 @@ function bindCashierEvents() {
   if (_cashierBound) return;
   _cashierBound = true;
   // 扫码枪 = 键盘：输完编码回车 → 立刻反查并把光标送进「实收金额」
-  $('#cashier-code').addEventListener('keydown', (e) => {
+  $('#cashier-scan').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       cashierLookup(true);
     }
   });
-  $('#cashier-code').addEventListener('blur', () => cashierLookup(false));
+  $('#cashier-scan').addEventListener('blur', () => cashierLookup(false));
   $('#cashier-save').addEventListener('click', cashierSave);
   $('#cashier-cancel').addEventListener('click', cashierResetForm);
   $('#cashier-day').addEventListener('change', loadCashier);
