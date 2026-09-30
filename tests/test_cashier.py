@@ -462,6 +462,22 @@ class Test页面接线(unittest.TestCase):
         # 卡内编辑读的是卡里的字段，不再回填顶部表单
         self.assertNotIn("cashierFill(", APP_JS, "回填顶部表单的老路要拆")
 
+    def test_支付块和删除分叉接上了(self):
+        """Task 11：卡内可编辑的支付方块 + ✕ 按来源分叉（玲珑排除 / 手工真删）。"""
+        for fn in ("cashierPayEditBlock", "cashierPayAdd", "cashierPayDel",
+                   "cashierPaySync", "cashierCardClose", "cashierPAY_METHODS"):
+            with self.subTest(fn=fn):
+                self.assertIn(fn, APP_JS)
+        # 支付清单写死但存原始字符串（清单变动不坏老数据）
+        self.assertIn("支付宝直连", APP_JS)
+        self.assertIn("微信直连", APP_JS)
+        # 删除语义分叉：linglong → 软排除；manual → cashierRemove（真删接口在它里面）
+        i = APP_JS.index("function cashierCardClose")
+        blk = APP_JS[i:i + 700]
+        self.assertIn("exclude", blk, "玲珑卡 ✕ 没走软排除")
+        self.assertIn("cashierRemove", blk, "手工卡 ✕ 没走真删")
+        self.assertIn("/api/cashier/entry-delete", APP_JS, "真删接口还接在")
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:

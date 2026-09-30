@@ -357,6 +357,7 @@ $$('.nav-item').forEach((item) => {
 
 let _cashierEditing = 0;      // 正在改的流水 id（**number**，0 = 没在改）
 let _cashierEditAcc = [];     // 编辑中的配件草稿（深拷贝自原行，保存才提交）
+let _cashierEditPay = [];     // 编辑中的支付草稿（同上 —— 取消修改要能还原）
 let _cashierAutoName = '';    // 最近一次反查自动带出的名 —— 用户手改过就不再覆盖
 let _cashierBound = false;    // 事件只绑一次（loadCashier 每次进来都调）
 let _cashierRows = {};        // id → 行（卡片按钮按 dataset.id 查行用）
@@ -518,15 +519,14 @@ function cashierCardHtml(r) {
     + `</div>`;
 }
 
-/* ───────────── 卡内编辑态（Task 10）─────────────
+/* ───────────── 卡内编辑态（Task 10，支付块 Task 11 接上）─────────────
 
    ⚠ `_cashierEditing` 必须是 **number**：`data-cc-edit` 从 dataset 拿到的是
      string，直接赋进去的话 `_cashierEditing === r.id`（JSON number）**永远 false**
      ⇒ `.cc-editing` 永远不加 ⇒ `cashierEditState()` 查不到卡返回 null
      ⇒ 保存静默 no-op。所以入口 `cashierCardEdit(id)` 里 `Number(id)` 归一。
-   ⚠ 支付区**本任务只读**：不调 `cashierPayEditBlock`（Task 11 才有），
-     只留 `data-pay-blocks` 容器；没有 `[data-pay-block]` ⇒ `cashierEditState`
-     走原行兜底，**不会把已有 payments 清空**。 */
+   ⚠ 支付块渲染自 `_cashierEditPay` 草稿（进编辑时深拷贝原行），增删先
+     `cashierPayDraftFromDom()` 把 DOM 里没同步的字收回来，取消能还原。 */
 function cashierCardEditHtml(r) {
   const acc = _cashierEditAcc;
   const inp = (f, v, type, w) => `<input data-f="${f}" type="${type || 'text'}"`
@@ -560,10 +560,9 @@ function cashierCardEditHtml(r) {
     + `会员/手机号<span class="cc-wait">待接入</span></div>`
     + `<div class="cc-group"><div class="cc-group-title">支付方式</div>`
     + `<div class="pay-blocks" data-pay-blocks>`
-    + ((r.payments || []).length
-        ? `<div class="cc-muted">已录 ${r.payments.length} 种（Task 11 接编辑）</div>`
-        : '')
-    + `</div><button class="btn ghost small" data-pay-add="1" hidden>+ 添加支付</button>`
+    + _cashierEditPay.map((p, i) => cashierPayEditBlock(p, i)).join('')
+    + `</div>`
+    + `<button class="btn ghost small" data-pay-add="1">+ 添加支付</button>`
     + `<div class="pay-sum" data-pay-sum></div></div>`
     + `</div>`
     + `<button class="cc-close" data-cc-close="${r.id}" title="删除这笔">✕</button>`
@@ -588,9 +587,9 @@ function cashierEditState() {
   });
   _cashierEditAcc = accs;
   out.accessories = _cashierEditAcc;
-  // ⚠ 防清空：只有真出现支付块（Task 11）才读表单；否则**原样带回原行的 payments** ——
-  //   写成 `out.payments = cashierPayRead(card)` 的话，只读态会读出 [] 把原数据抹了
-  out.payments = card.querySelector('[data-pay-block]')
+  // ⚠ 支付**以输入框为准**（编辑态一定渲染了块）：没块时才回原行兜底 ——
+  //   写死 `cashierPayRead(card)` 在没有块的中间态会读出 [] 把原数据抹了
+  out.payments = card.querySelector('[data-pay-blocks]')
     ? cashierPayRead(card) : (r.payments || []);
   return out;
 }
@@ -617,7 +616,7 @@ function cashierRerenderEdit() {
   });
 }
 
-/** 读一组支付块 → `{method, amount}[]`。本任务没有块，恒返回 []（预期）。 */
+/** 读一组支付块 → `{method, amount}[]`。空金额的块不进（保存时不提交半截）。 */
 function cashierPayRead(card) {
   const out = [];
   card.querySelectorAll('[data-pay-block]').forEach((b) => {
@@ -628,17 +627,98 @@ function cashierPayRead(card) {
   return out;
 }
 
+/* ───────────── 组合支付方块（Task 11）─────────────
+
+   ⚠ 支付方式**存原始字符串不是枚举**：清单以后增删名字不坏老数据 ——
+     老行里的名字照原样显示，不在清单里的也能显示。
+   ⚠ 已付合计 ≠ 实收只弹黄条**不拦截保存**（用户定的软提醒）。 */
+const cashierPAY_METHODS = ['助手', 'C扫B', 'POS', '现金', '公对公',
+  '付以旧换新(旧)', '付以旧换新(新)', '预收款', '企业微信', '支付宝直连', '微信直连'];
+
+function cashierPayEditBlock(p, i) {
+  const opts = cashierPAY_METHODS.map((m) => `<option value="${esc2(m)}"`
+    + `${m === p.method ? ' selected' : ''}>${esc2(m)}</option>`).join('');
+  return `<div class="pay-block" data-pay-block="${i}">`
+    + `<button class="pb-x" data-pay-del="${i}" title="去掉这种方式">✕</button>`
+    + `<div class="pb-name"><select data-pay-method>${opts}</select></div>`
+    + `<input data-pay-amount type="number" step="0.01" placeholder="金额"`
+    + ` value="${p.amount != null ? esc2(p.amount) : ''}">`
+    + `</div>`;
+}
+
+/** 把编辑卡里还没同步的支付块收进草稿（增删前调，别把空金额的块丢了）。 */
+function cashierPayDraftFromDom() {
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card || !card.querySelector('[data-pay-blocks]')) return;
+  const out = [];
+  card.querySelectorAll('[data-pay-block]').forEach((b) => {
+    const method = (b.querySelector('[data-pay-method]') || {}).value || '';
+    const raw = (b.querySelector('[data-pay-amount]') || {}).value;
+    if (method) out.push({ method, amount: raw === '' ? '' : Number(raw) });
+  });
+  _cashierEditPay = out;
+}
+
+function cashierPayAdd() {
+  cashierPayDraftFromDom();
+  _cashierEditPay.push({ method: cashierPAY_METHODS[0], amount: '' });
+  cashierRerenderEdit();
+}
+
+function cashierPayDel(i) {
+  cashierPayDraftFromDom();
+  _cashierEditPay.splice(Number(i), 1);
+  cashierRerenderEdit();
+}
+
+//: 软提醒：已付合计 ≠ 实收 ⇒ 黄条；**不拦截保存**（用户定）。
+function cashierPaySync(card) {
+  const r = _cashierRows[card.dataset.id] || {};
+  const pays = cashierPayRead(card);
+  const sum = pays.reduce((a, x) => a + (Number(x.amount) || 0), 0);
+  const amtEl = card.querySelector('[data-f="amount"]');
+  const amt = Number(amtEl ? amtEl.value : r.amount) || 0;
+  const el = card.querySelector('[data-pay-sum]');
+  if (!el) return;
+  const warn = (pays.length && Math.abs(sum - amt) > 0.009)
+    ? `<div class="pay-warn">已付 ¥${sum.toFixed(2)} ≠ 实收 ¥${amt.toFixed(2)}（仍可保存）</div>`
+    : '';
+  el.innerHTML = `已付 ¥${sum.toFixed(2)} / 应付 ¥${amt.toFixed(2)}` + warn;
+}
+
+/** 卡片 ✕：**按来源分叉** —— 玲珑单软排除（原单不动、再导不回来），手工单真删。 */
+async function cashierCardClose(id) {
+  const r = _cashierRows[id];
+  if (!r) return;
+  if (r.source === 'linglong') {
+    if (!window.confirm('从当日视图排除这张玲珑单？\n（不会删华为那边的原单，'
+      + '再点「导入」也不会把它加回来）')) return;
+    try {
+      await api('/api/cashier/exclude', { method: 'POST', body: { id: r.id } });
+      toast('已排除（华为原单没动）', 'good');
+      if (_cashierEditing === Number(r.id)) cashierCardCancel();
+      await loadCashier();
+    } catch (e) {
+      toast('排除失败：' + e.message, 'bad');
+    }
+    return;
+  }
+  await cashierRemove(id);          // 手工单：真删（确认 + entry-delete 在它里面）
+}
+
 function cashierCardEdit(id) {
   const r = _cashierRows[id];
   if (!r) return;
   _cashierEditing = Number(id);          // ⚠ dataset 是 string，归一成 number 才 === r.id
   _cashierEditAcc = JSON.parse(JSON.stringify(r.accessories || []));
+  _cashierEditPay = JSON.parse(JSON.stringify(r.payments || []));
   renderCashierCards(Object.values(_cashierRows));
 }
 
 function cashierCardCancel() {
   _cashierEditing = 0;
   _cashierEditAcc = [];
+  _cashierEditPay = [];
   renderCashierCards(Object.values(_cashierRows));
 }
 
@@ -667,6 +747,7 @@ async function cashierCardSave(id) {
     toast('已修改', 'good');
     _cashierEditing = 0;
     _cashierEditAcc = [];
+    _cashierEditPay = [];
     await loadCashier();
   } catch (e) {
     toast('保存失败：' + e.message, 'bad');
@@ -699,6 +780,9 @@ function renderCashierCards(rows) {
   if (host) {
     host.innerHTML = rows.map((r) => (_cashierEditing === r.id
       ? cashierCardEditHtml(r) : cashierCardHtml(r))).join('');
+    // 编辑卡刚画出来 ⇒ 支付合计/黄条要立刻有值（不等用户敲第一个字）
+    const editing = host.querySelector('.cashier-card.cc-editing');
+    if (editing) cashierPaySync(editing);
   }
 }
 
@@ -788,7 +872,16 @@ function bindCashierEvents() {
     if (t.dataset.accDel !== undefined && t.dataset.accDel !== '') {
       cashierAccDel(t.dataset.accDel); return;
     }
-    // ⚠ data-cc-close / data-pay-* 的分发在 Task 11 接 —— 本任务点了没反应是计划内中间态
+    if (t.dataset.payAdd) { cashierPayAdd(); return; }
+    if (t.dataset.payDel !== undefined && t.dataset.payDel !== '') {
+      cashierPayDel(t.dataset.payDel); return;
+    }
+    if (t.dataset.ccClose) { cashierCardClose(t.dataset.ccClose); return; }
+  });
+  // 支付块金额/实收金额一变就刷「已付/应付」与黄条（软提醒，不拦截）
+  $('#cashier-cards').addEventListener('input', (e) => {
+    const card = e.target.closest && e.target.closest('.cashier-card.cc-editing');
+    if (card) cashierPaySync(card);
   });
 }
 
