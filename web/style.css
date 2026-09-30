@@ -1836,6 +1836,7 @@ main.tools-frame-mode .subpanel.active {
 .cc-prod select { min-width: 0; max-width: 7.5em; }
 .cc-prod .btn { justify-self: end; }
 .cc-acc-edit .ac-name { grid-column: 1; }
+.cc-acc-edit .ac-qty { grid-column: 4; }
 .cc-acc-edit .ac-amt { grid-column: 5; }
 .cc-acc-edit .ac-x { grid-column: 7; }
 .cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }

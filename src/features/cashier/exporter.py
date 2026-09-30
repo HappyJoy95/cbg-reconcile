@@ -327,8 +327,8 @@ def _entry_rows(e: dict, conn, costs: dict, sos: dict = None) -> List[list]:
         if not isinstance(acc, dict):
             continue
         out.append(_line_row(time_s, "配件", None, acc.get("name"), None,
-                             1, total, acc.get("amount"), seller, {}, note,
-                             costs, sos, sold_day))
+                             acc.get("quantity") or 1, total, acc.get("amount"),
+                             seller, {}, note, costs, sos, sold_day))
     return out
 
 

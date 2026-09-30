@@ -72,10 +72,12 @@ def ensure(root=None) -> Path:
 
 
 # ---------------------------------------------------------------- 流水
-def _clean_items(val, what: str, name_key: str):
+def _clean_items(val, what: str, name_key: str, with_qty: bool = False):
     """配件/支付明细 `[{名, 金额}]` → `(list, None)`；坏的回 `(None, why)`。
 
     金额两位小数、不许负；名字不许空。**不校验支付加总**（用户定：软提醒不拦截）。
+    `with_qty=True`（配件）再收 `quantity` —— 缺省 1、必须 > 0
+ （用户：配件也带数量，导出跟商品行对齐）。
     """
     if val in (None, ""):
         return [], None
@@ -101,7 +103,19 @@ def _clean_items(val, what: str, name_key: str):
             return None, "%s「%s」的金额得是数字" % (what, name)
         if amt < 0:
             return None, "%s「%s」的金额不能是负数" % (what, name)
-        out.append({name_key: name, "amount": amt})
+        row = {name_key: name, "amount": amt}
+        if with_qty:
+            qty_raw = item.get("quantity")
+            if qty_raw in (None, ""):
+                qty_raw = 1
+            try:
+                qty = float(qty_raw)
+            except (TypeError, ValueError):
+                return None, "%s「%s」的数量得是数字" % (what, name)
+            if not math.isfinite(qty) or qty <= 0:
+                return None, "%s「%s」的数量得大于 0" % (what, name)
+            row["quantity"] = qty
+        out.append(row)
     return out, None
 
 
@@ -174,6 +188,10 @@ def _clean_entry(data: dict, entry_id=None):
     prod, why = _clean_products(data.get("products"))
     if why:
         return None, why
+    # 配件先解出来：应收（amount）= 商品 + 配件（用户 2026-09-30 第 11 轮）
+    acc, why = _clean_items(data.get("accessories"), "配件", "name", with_qty=True)
+    if why:
+        return None, why
     # 顶层显示字段（名/编码/SN）在有商品行时**照首行派生** ——
     # 卡内编辑撤掉了那三个输入框（用户第 1 条：左上角冗余），它们只能服务端算
     goods_name = str(data.get("goods_name") or "").strip()
@@ -184,7 +202,9 @@ def _clean_entry(data: dict, entry_id=None):
             " 等%d件" % len(prod) if len(prod) > 1 else "")
         goods_code = "|".join([p["code"] for p in prod if p["code"]])
         sn = "|".join([p["sn"] for p in prod if p["sn"]])
-        amount = round(sum(p["amount"] for p in prod), 2)
+        # 应收 = Σ商品 + Σ配件（配件金额不进"件数"）
+        amount = round(sum(p["amount"] for p in prod)
+                       + sum(a["amount"] for a in acc), 2)
         qty = float(sum(p["quantity"] for p in prod))
         category = prod[0]["category"]
     else:
@@ -211,9 +231,6 @@ def _clean_entry(data: dict, entry_id=None):
     source = str(data.get("source") or "manual").strip() or "manual"
     if source not in SOURCES:
         return None, "来源只认 %s" % "/".join(SOURCES)
-    acc, why = _clean_items(data.get("accessories"), "配件", "name")
-    if why:
-        return None, why
     pay, why = _clean_items(data.get("payments"), "支付", "method")
     if why:
         return None, why
@@ -331,7 +348,13 @@ def _row_out(r) -> dict:
 
 
 def list_entries(root=None, day: str = "") -> List[dict]:
-    """流水（`day` = `YYYY-MM-DD` 过滤那天；空 = 全部）。**新→旧**，排除软排除的行。"""
+    """流水（`day` = `YYYY-MM-DD` 过滤那天；空 = 全部）。
+
+    **排序 = 最近触达在最上面**（用户 2026-09-30：最晚加入的在最上面，
+    改过的也在最上面，位置别乱动）—— `updated_at DESC, id DESC`。
+    ⚠ 跟销售时间**脱钩**：改销售时间不会让卡片在列表里乱跑。
+    排除软排除的行。
+    """
     path = ensure(root)
     conn = _db.open_db(str(path))
     try:
@@ -339,12 +362,12 @@ def list_entries(root=None, day: str = "") -> List[dict]:
             rows = conn.execute(
                 "SELECT * FROM sale_entries"
                 " WHERE (excluded IS NULL OR excluded=0) AND sold_at LIKE ?"
-                " ORDER BY sold_at DESC, id DESC", (str(day).strip() + "%",)).fetchall()
+                " ORDER BY updated_at DESC, id DESC", (str(day).strip() + "%",)).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM sale_entries"
                 " WHERE excluded IS NULL OR excluded=0"
-                " ORDER BY sold_at DESC, id DESC").fetchall()
+                " ORDER BY updated_at DESC, id DESC").fetchall()
         return [_row_out(r) for r in rows]
     finally:
         conn.close()
@@ -359,12 +382,13 @@ def commit_entries(root=None, day: str = "") -> dict:
     day = str(day or "").strip()
     if len(day) != 10 or day[4] != "-" or day[7] != "-":
         return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
-    now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     with _db.tx(str(ensure(root))) as conn:
+        # ⚠ 只改 status，**不碰 updated_at** —— 「保存并记录」是入账动作，
+        #   不是"改了内容"，动了它整屏卡片会跟着重排（用户：别乱动位置）
         cur = conn.execute(
-            "UPDATE sale_entries SET status=?, updated_at=?"
+            "UPDATE sale_entries SET status=?"
             " WHERE status=? AND sold_at LIKE ?",
-            (SAVED, now, STAGED, day + "%"))
+            (SAVED, STAGED, day + "%"))
         return {"ok": True, "saved": int(cur.rowcount or 0), "day": day}
 
 

@@ -468,7 +468,14 @@ async function cashierRemove(id) {
   try {
     await api('/api/cashier/entry-delete', { method: 'POST', body: { id } });
     toast('已删除', 'good');
-    if (_cashierEditing === Number(id)) cashierResetForm();
+    // ⚠ 只清**这张卡的编辑态**，别碰顶部表单（用户：删卡不许把上面
+    //   填到一半的新单冲掉 —— 那是两码事）。别卡的编辑由 loadCashier 保。
+    if (_cashierEditing === Number(id)) {
+      _cashierEditing = 0;
+      _cashierEditAcc = [];
+      _cashierEditPay = [];
+      _cashierEditProd = [];
+    }
     await loadCashier();
   } catch (e) {
     toast('删除失败：' + e.message, 'bad');
@@ -517,7 +524,8 @@ function cashierCardHtml(r) {
     : '';
   const accHtml = acc.length
     ? '<div class="cc-acc"><b>配件</b>'
-      + acc.map((x) => `<div class="cc-acc-row"><span>${esc2(x.name)}</span>`
+      + acc.map((x) => `<div class="cc-acc-row"><span>${esc2(x.name)} `
+        + `<span class="cc-muted">×${esc2(Math.round((Number(x.quantity) || 1) * 100) / 100)}</span></span>`
         + `<span>¥${(Number(x.amount) || 0).toFixed(2)}</span></div>`).join('')
       + '</div>'
     : '';
@@ -608,6 +616,9 @@ function cashierCardEditHtml(r) {
     + acc.map((x, i) => `<div class="cc-prod cc-acc-edit" data-acc-i="${i}">`
         + `<input class="ac-name" data-acc-f="name" value="${esc2(x.name)}"`
         + ` placeholder="配件名">`
+        + `<input class="ac-qty" data-acc-f="quantity" type="number" step="any"`
+        + ` min="0.01" value="${esc2(x.quantity == null ? '' : x.quantity)}"`
+        + ` placeholder="数量">`
         + `<input class="ac-amt" data-acc-f="amount" type="number" step="0.01"`
         + ` value="${esc2(x.amount)}" placeholder="金额">`
         + `<button class="btn ghost small ac-x" data-acc-del="${i}">删</button>`
@@ -651,7 +662,8 @@ function cashierEditState() {
   card.querySelectorAll('[data-acc-i]').forEach((row) => {
     const name = ((row.querySelector('[data-acc-f="name"]') || {}).value || '').trim();
     const amount = Number((row.querySelector('[data-acc-f="amount"]') || {}).value) || 0;
-    accs.push({ name, amount });
+    const quantity = ((row.querySelector('[data-acc-f="quantity"]') || {}).value || '') || 1;
+    accs.push({ name, amount, quantity });
   });
   _cashierEditAcc = accs;
   out.accessories = _cashierEditAcc;
@@ -741,7 +753,7 @@ function cashierProdDel(i) {
   cashierRerenderEdit();
 }
 
-//: 派生值：实收（应收）= Σ商品金额（后端同口径，这里只管显示）
+//: 派生值：应收 = Σ商品金额 + Σ配件金额（用户第 11 轮：营收 = 商品 + 配件）
 function cashierProdSync(card) {
   if (!card) return;
   const rows = card.querySelectorAll('[data-prod-i]');
@@ -756,6 +768,9 @@ function cashierProdSync(card) {
   rows.forEach((row) => {
     const a = row.querySelector('[data-prod-f="amount"]');
     sum += Number(a ? a.value : 0) || 0;
+  });
+  card.querySelectorAll('[data-acc-i] [data-acc-f="amount"]').forEach((a) => {
+    sum += Number(a.value) || 0;
   });
   const aEl = card.querySelector('[data-f="amount"]');
   if (aEl) aEl.value = (Math.round(sum * 100) / 100).toFixed(2);
@@ -884,7 +899,7 @@ function cashierCardCancel() {
 
 function cashierAccAdd() {
   cashierEditState();            // 先把输入框里还没同步的字收进草稿
-  _cashierEditAcc.push({ name: '', amount: 0 });
+  _cashierEditAcc.push({ name: '', amount: 0, quantity: 1 });
   cashierRerenderEdit();
 }
 
@@ -999,6 +1014,14 @@ function renderCashierCards(rows) {
 
 async function loadCashier() {
   bindCashierEvents();
+  // ⚠ 重画前把**没做完的编辑**收走（用户：删别的卡 / 刷新不许冲掉
+  //   正在编辑的卡）—— 草稿先从 DOM 同步，画回来再把标量输入放回去。
+  const stash = _cashierEditing ? cashierEditState() : null;
+  if (stash) {
+    _cashierEditAcc = stash.accessories || [];
+    _cashierEditProd = stash.products || [];
+    _cashierEditPay = stash.payments || [];
+  }
   const dayEl = $('#cashier-day');
   if (dayEl && !dayEl.value) dayEl.value = cashierToday();
   const soldEl = $('#cashier-sold-at');
@@ -1020,6 +1043,7 @@ async function loadCashier() {
     }
     renderCashierCards(d.rows || []);
     cashierRenderSummary(d.rows || [], cashierDayValue());
+    if (stash) cashierRestoreEdit(stash);
   } catch (e) {
     const host = $('#cashier-cards');
     if (host) host.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
@@ -1030,6 +1054,16 @@ async function loadCashier() {
       .forEach((id) => { const el = $('#' + id); if (el) el.textContent = '—'; });
     toast('读取流水失败：' + e.message, 'bad');
   }
+}
+
+/** 把 stash 里的标量输入（应收/销售员/备注/时间）写回刚重画的编辑卡。 */
+function cashierRestoreEdit(st) {
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card) return;
+  card.querySelectorAll('[data-f]').forEach((el) => {
+    const v = st[el.dataset.f];
+    if (v !== undefined && v !== null) el.value = v;
+  });
 }
 
 function cashierDayValue() {

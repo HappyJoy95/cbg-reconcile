@@ -134,6 +134,53 @@ class Test流水(_RootCase):
         self.assertEqual(len(store.list_entries(self.root)), 3, "空 day = 全部")
         self.assertEqual(store.list_entries(self.root, day="2026-01-01"), [])
 
+    def test_按最新触达排序_改一版顶到最上面(self):
+        """用户 2026-09-30：最晚加入的在最上面；**改过的也顶到最上面** ——
+        排序跟销售时间脱钩（改销售时间不再让卡片乱跑）。"""
+        import time as _time
+        a = store.save_entry(self.root, dict(self.ROW, sold_at="2026-09-29 09:00"))["id"]
+        store.save_entry(self.root, dict(self.ROW, sold_at="2026-09-29 12:00"))
+        ids = [r["id"] for r in store.list_entries(self.root, day="2026-09-29")]
+        self.assertNotEqual(ids[0], a, "后加的在最上面")
+        _time.sleep(1.05)                      # updated_at 是秒级，隔一秒再改
+        row = [r for r in store.list_entries(self.root) if r["id"] == a][0]
+        store.save_entry(self.root, dict(row, sold_at="2026-09-29 07:00",
+                                         amount=777), entry_id=a)
+        ids2 = [r["id"] for r in store.list_entries(self.root, day="2026-09-29")]
+        self.assertEqual(ids2[0], a, "改过的卡片顶到最上面（就算销售时间更早）")
+
+    def test_保存并记录不挪位置(self):
+        """commit 只改 status，不碰 updated_at —— 入库不该把整屏重排。"""
+        store.save_entry(self.root, dict(self.ROW, sold_at="2026-09-29 10:00",
+                                         status="staged"))
+        store.save_entry(self.root, dict(self.ROW, sold_at="2026-09-29 11:00"))
+        before = [r["id"] for r in store.list_entries(self.root, day="2026-09-29")]
+        store.commit_entries(self.root, "2026-09-29")
+        after = [r["id"] for r in store.list_entries(self.root, day="2026-09-29")]
+        self.assertEqual(after, before)
+
+    def test_应收等于商品加配件(self):
+        """用户 2026-09-30：左上角应收 = 下面商品 + 配件的金额总和。"""
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-30 10:00", "amount": 1,
+            "products": [{"name": "A", "code": "", "sn": "", "quantity": 1,
+                          "amount": 100, "category": ""},
+                         {"name": "B", "code": "", "sn": "", "quantity": 2,
+                          "amount": 50, "category": ""}],
+            "accessories": [{"name": "壳", "amount": 60, "quantity": 2}]})
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["amount"], 210.0, "150（商品）+ 60（配件）")
+        self.assertEqual(r["quantity"], 3.0, "件数还是只算商品")
+
+    def test_配件带数量(self):
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-30 11:00", "amount": 99,
+            "accessories": [{"name": "壳", "amount": 60, "quantity": 2},
+                            {"name": "膜", "amount": 30}]})
+        acc = store.list_entries(self.root, day="2026-09-30")[0]["accessories"]
+        self.assertEqual(acc[0]["quantity"], 2.0, "带了数量要存下来")
+        self.assertEqual(acc[1]["quantity"], 1.0, "没给默认 1")
+
     def test_销售员下拉靠积累_最近优先(self):
         store.save_entry(self.root, dict(self.ROW, seller="小张"))
         store.save_entry(self.root, dict(self.ROW, seller="小王"))
@@ -588,6 +635,29 @@ class Test页面接线(unittest.TestCase):
         # 第 4 条：支付块底色回系统统一（六色 pastel 撤掉）
         self.assertNotIn(".pay-block:nth-child", css)
 
+    def test_删卡保住没做完的修改(self):
+        """用户 2026-09-30：删一张卡不许把顶部填一半的新单 / 别卡的编辑冲掉。"""
+        i = APP_JS.index("async function cashierRemove")
+        self.assertNotIn("cashierResetForm", APP_JS[i:i + 500],
+                         "删卡清顶部表单的老毛病 —— 那是两码事")
+        # loadCashier 重画前收走编辑态、画回来再放回去
+        j = APP_JS.index("async function loadCashier")
+        blk = APP_JS[j:j + 1400]
+        self.assertIn("cashierEditState()", blk)
+        self.assertIn("cashierRestoreEdit", blk)
+        # 删卡分支自己清编辑态（不清顶部表单）
+        self.assertIn("_cashierEditing = 0", APP_JS[i:i + 500])
+
+    def test_应收连配件一起加_配件行带数量(self):
+        # prodSync 的 Σ 要把配件金额算进去
+        i = APP_JS.index("function cashierProdSync")
+        self.assertIn("data-acc-f", APP_JS[i:i + 1000],
+                      "应收 = 商品 + 配件")
+        # 配件编辑行有数量输入，落在与商品数量同一栅格列
+        self.assertIn('class="ac-qty" data-acc-f="quantity"', APP_JS)
+        css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".cc-acc-edit .ac-qty { grid-column: 4; }", css)
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:
@@ -681,7 +751,8 @@ class Test新字段存取(_RootCase):
         r = rows[0]
         self.assertEqual(r["sn"], "HXR123")
         self.assertEqual(r["accessories"],
-                         [{"name": "原装保护壳", "amount": 199.0}])
+                         [{"name": "原装保护壳", "amount": 199.0,
+                           "quantity": 1.0}])
         self.assertEqual([p["method"] for p in r["payments"]], ["现金", "微信直连"])
         # 改
         body.update({"id": r["id"], "sn": "HXR456", "accessories": []})
@@ -712,7 +783,8 @@ class Test新字段存取(_RootCase):
         })
         self.assertTrue(res.get("ok"), res)
         r = store.list_entries(self.root, day="2026-09-30")[0]
-        self.assertEqual(r["accessories"], [{"name": "壳", "amount": 9.0}])
+        self.assertEqual(r["accessories"],
+                         [{"name": "壳", "amount": 9.0, "quantity": 1.0}])
 
     def test_nan_inf不进库(self):
         """nan/inf 过得了 `< 0` 检查（nan < 0 是 False），写进去 json.dumps
@@ -1274,20 +1346,20 @@ class Test导出内容(_RootCase):
                 {"name": "键盘", "code": "6903", "sn": "",
                  "quantity": 1, "amount": 499, "category": "配件"},
             ],
-            "accessories": [{"name": "碎屏险", "amount": 199}],
+            "accessories": [{"name": "碎屏险", "amount": 199, "quantity": 2}],
         })
         head, rows = self._sheets()["9月份销售表"]
         data = self._data(rows)
         self.assertEqual(len(data), 3, "2 商品 + 1 配件 = 3 行")
         a, b, c = (dict(zip(head, r)) for r in data)
-        # 商品行：品类跟行、合计=订单合计（=Σ商品）、金额是各商品自己的
-        self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2398))
-        self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2398))
+        # 商品行：品类跟行、合计=订单合计（应收=商品+配件=2597）、金额是各商品自己的
+        self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2597))
+        self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2597))
         self.assertEqual(a["编码"], "6901")
         self.assertIsNone(b["序列号"], "空 SN 就是空单元格（跟空列占位一个口径）")
-        # 配件行：品类恒「配件」、数量 1、编码/SN 空、合计=订单合计
-        self.assertEqual((c["品类"], c["金额"], c["数量"]), ("配件", 199, 1))
-        self.assertEqual(c["合计"], 2398)
+        # 配件行：品类恒「配件」、数量=配件自己的数量、编码/SN 空、合计=订单合计
+        self.assertEqual((c["品类"], c["金额"], c["数量"]), ("配件", 199, 2))
+        self.assertEqual(c["合计"], 2597)
         self.assertIsNone(c["编码"])
         self.assertIsNone(c["序列号"])
         self.assertEqual(c["明细"], "碎屏险")
