@@ -270,6 +270,7 @@ def entries_from_orders(root=None, day: str = "") -> dict:
       再调这里）—— 这样本函数纯读、零网络，好测。
     ⚠ 过滤两道：① 备注命中黑名单（`import_cfg.load`）跳过；
       ② `external_id` 已存在（**含软排除的** —— excluded 行不删）跳过 ⇒ 幂等。
+      ⚠ 只匹配 orders.remark 一列 —— 状态/标签不在过滤范围（spec 口径就是「备注」）。
     ⚠ **单据一卡**：多行聚合（数量=Σ、名称=首行+等N件、编码/SN 拼接）。
     """
     day = str(day or "").strip()
@@ -279,8 +280,7 @@ def entries_from_orders(root=None, day: str = "") -> dict:
     blacklist = import_cfg.load(root)
     now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     imported = skipped_black = skipped_dup = 0
-    conn = _db.open_db(str(path))
-    try:
+    with _db.tx(str(path), named=True) as conn:
         try:
             orders = conn.execute(
                 "SELECT document_no, doc_create_time, included_tax_amount, remark,"
@@ -293,12 +293,14 @@ def entries_from_orders(root=None, day: str = "") -> dict:
             "SELECT external_id FROM sale_entries"
             " WHERE external_id IS NOT NULL AND external_id != ''").fetchall()}
         for o in orders:
-            dn = o["document_no"]
+            dn = str(o["document_no"] or "").strip()
             remark = str(o["remark"] or "")
             if any(w and w in remark for w in blacklist):
                 skipped_black += 1
                 continue
-            if dn in have:
+            # 空单号也按"重导跳过"算：have 里有 '' 会挡住下一张空单号的卡，
+            # 宁可每导一次只留一张，也别导一次多一张
+            if not dn or dn in have:
                 skipped_dup += 1
                 continue
             lines = conn.execute(
@@ -308,24 +310,24 @@ def entries_from_orders(root=None, day: str = "") -> dict:
             names = [str(ln["item_name"] or "") for ln in lines if ln["item_name"]]
             name = (names[0] if names else "") + (
                 " 等%d件" % len(lines) if len(lines) > 1 else "")
+            if not name:
+                name = dn or "（无明细单）"
             codes = [str(ln["ean"] or "") for ln in lines if ln["ean"]]
             sns = [str(ln["sn"] or "") for ln in lines if ln["sn"]]
             amount = float(o["included_tax_amount"] or 0)
             if not math.isfinite(amount):
-                amount = 0.0            # 防 nan/inf 挂整页读（同 _clean_entry 口径）
+                # _clean_entry 那边是拒收；导入路径拒收会废掉整批，归 0 保住页面
+                amount = 0.0
             conn.execute(
                 "INSERT INTO sale_entries (sold_at, goods_code, goods_name,"
                 " quantity, amount, seller, note, source, sn, external_id,"
                 " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (o["doc_create_time"], "|".join(codes), name.strip(),
-                 qty, amount,
+                 qty, round(amount, 2),
                  str(o["consumer_guide_name"] or ""), remark,
                  "linglong", "|".join(sns), dn, now, now))
             have.add(dn)
             imported += 1
-        conn.commit()
-    finally:
-        conn.close()
     return {"ok": True, "imported": imported,
             "skipped_blacklist": skipped_black, "skipped_dup": skipped_dup}
 

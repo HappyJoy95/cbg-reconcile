@@ -699,6 +699,42 @@ class Test排除与导入(_RootCase):
         self.assertFalse(bad.get("ok"))
         self.assertIn("手工", bad.get("why", ""))
 
+    def test_零明细单_名称用单号兜底不空白(self):
+        """dump 详情失败会留 0 行明细的单 —— 卡面不能是空字符串（没法认）。"""
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        # 只有 orders 行、order_lines 一行都没有（dump 详情失败的真实形状）
+        conn.execute(
+            "INSERT INTO orders (document_no, doc_create_time, included_tax_amount,"
+            " remark, consumer_guide_name) VALUES (?,?,?,?,?)",
+            ("DN-NO-LINE", "2026-09-30 14:32:00", 99.0, "", "张三"))
+        conn.commit()
+        conn.close()
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual((res["ok"], res["imported"]), (True, 1))
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertTrue(r["goods_name"], "0 行明细不许落空名")
+        self.assertIn("DN-NO-LINE", r["goods_name"])
+
+    def test_inf金额归0_导入不废整批(self):
+        """SQLite REAL 存得出 inf —— 归 0 保住页面（导入路径拒收会废掉整批）。"""
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        _seed_order(conn, "DN-INF2", amount=float("inf"))
+        _seed_order(conn, "DN-OK", amount=1899.5)
+        conn.commit()
+        conn.close()
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertTrue(res["ok"], res)
+        rows = {x["external_id"]: x
+                for x in store.list_entries(self.root, day="2026-09-30")}
+        self.assertEqual(rows["DN-INF2"]["amount"], 0.0)
+        self.assertEqual(rows["DN-OK"]["amount"], 1899.5)
+
 
 if __name__ == "__main__":
     unittest.main()
