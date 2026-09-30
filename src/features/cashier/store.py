@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -61,6 +62,37 @@ def ensure(root=None) -> Path:
 
 
 # ---------------------------------------------------------------- 流水
+def _clean_items(val, what: str, name_key: str):
+    """配件/支付明细 `[{名, 金额}]` → `(list, None)`；坏的回 `(None, why)`。
+
+    金额两位小数、不许负；名字不许空。**不校验支付加总**（用户定：软提醒不拦截）。
+    """
+    if val in (None, ""):
+        return [], None
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except ValueError:
+            return None, "%s不是合法 JSON，得是列表" % what
+    if not isinstance(val, list):
+        return None, "%s得是列表" % what
+    out = []
+    for i, item in enumerate(val):
+        if not isinstance(item, dict):
+            return None, "%s第 %d 条不是对象" % (what, i + 1)
+        name = str(item.get(name_key) or "").strip()
+        if not name:
+            return None, "%s第 %d 条没有名字" % (what, i + 1)
+        try:
+            amt = round(float(item.get("amount")), 2)
+        except (TypeError, ValueError):
+            return None, "%s「%s」的金额得是数字" % (what, name)
+        if amt < 0:
+            return None, "%s「%s」的金额不能是负数" % (what, name)
+        out.append({name_key: name, "amount": amt})
+    return out, None
+
+
 def _clean_entry(data: dict, entry_id=None):
     """校验 + 归一 —— 返回 `(行, None)` 或 `(None, why)`。"""
     data = data or {}
@@ -85,6 +117,13 @@ def _clean_entry(data: dict, entry_id=None):
     source = str(data.get("source") or "manual").strip() or "manual"
     if source not in SOURCES:
         return None, "来源只认 %s" % "/".join(SOURCES)
+    sn = str(data.get("sn") or "").strip()
+    acc, why = _clean_items(data.get("accessories"), "配件", "name")
+    if why:
+        return None, why
+    pay, why = _clean_items(data.get("payments"), "支付", "method")
+    if why:
+        return None, why
     now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     return {
         "sold_at": sold_at,
@@ -95,6 +134,9 @@ def _clean_entry(data: dict, entry_id=None):
         "seller": str(data.get("seller") or "").strip(),
         "note": str(data.get("note") or "").strip(),
         "source": source,
+        "sn": sn,
+        "accessories": json.dumps(acc, ensure_ascii=False),
+        "payments": json.dumps(pay, ensure_ascii=False),
     }, None
 
 
@@ -110,11 +152,13 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
             try:
                 cur = conn.execute(
                     "UPDATE sale_entries SET sold_at=?, goods_code=?, goods_name=?,"
-                    " quantity=?, amount=?, seller=?, note=?, source=?, updated_at=?"
+                    " quantity=?, amount=?, seller=?, note=?, source=?, sn=?,"
+                    " accessories=?, payments=?, updated_at=?"
                     " WHERE id=?",
                     (row["sold_at"], row["goods_code"], row["goods_name"],
                      row["quantity"], row["amount"], row["seller"], row["note"],
-                     row["source"], now, int(entry_id)))
+                     row["source"], row["sn"], row["accessories"],
+                     row["payments"], now, int(entry_id)))
             except (TypeError, ValueError):
                 return {"ok": False, "why": "id 不对"}
             if cur.rowcount == 0:
@@ -122,10 +166,12 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
             return {"ok": True, "id": int(entry_id)}
         cur = conn.execute(
             "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
-            " amount, seller, note, source, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " amount, seller, note, source, sn, accessories, payments,"
+            " created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["sold_at"], row["goods_code"], row["goods_name"], row["quantity"],
-             row["amount"], row["seller"], row["note"], row["source"], now, now))
+             row["amount"], row["seller"], row["note"], row["source"], row["sn"],
+             row["accessories"], row["payments"], now, now))
         return {"ok": True, "id": int(cur.lastrowid)}
 
 
@@ -142,19 +188,37 @@ def delete_entry(root=None, entry_id=None) -> dict:
         return {"ok": True, "id": eid}
 
 
+def _row_out(r) -> dict:
+    """行 → 给界面的形状：JSON 列拆开、NULL 兜底（老行没有新列的值）。"""
+    d = dict(r)
+    d["sn"] = d.get("sn") or ""
+    d["external_id"] = d.get("external_id") or ""
+    d["excluded"] = int(d.get("excluded") or 0)
+    for k in ("accessories", "payments"):
+        try:
+            v = json.loads(d.get(k) or "[]")
+        except ValueError:
+            v = []
+        d[k] = v if isinstance(v, list) else []
+    return d
+
+
 def list_entries(root=None, day: str = "") -> List[dict]:
-    """流水（`day` = `YYYY-MM-DD` 过滤那天；空 = 全部）。**新→旧**。"""
+    """流水（`day` = `YYYY-MM-DD` 过滤那天；空 = 全部）。**新→旧**，排除软排除的行。"""
     path = ensure(root)
     conn = _db.open_db(str(path))
     try:
         if day:
             rows = conn.execute(
-                "SELECT * FROM sale_entries WHERE sold_at LIKE ?"
+                "SELECT * FROM sale_entries"
+                " WHERE (excluded IS NULL OR excluded=0) AND sold_at LIKE ?"
                 " ORDER BY sold_at DESC, id DESC", (str(day).strip() + "%",)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM sale_entries ORDER BY sold_at DESC, id DESC").fetchall()
-        return [dict(r) for r in rows]
+                "SELECT * FROM sale_entries"
+                " WHERE excluded IS NULL OR excluded=0"
+                " ORDER BY sold_at DESC, id DESC").fetchall()
+        return [_row_out(r) for r in rows]
     finally:
         conn.close()
 

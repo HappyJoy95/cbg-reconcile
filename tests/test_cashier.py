@@ -451,6 +451,12 @@ class Test迁移新列(_RootCase):
             "m007 没把新列补上：%s" % sorted(cols))
         rows = store.list_entries(self.root, day="2026-09-30")
         self.assertEqual(len(rows), 1, "老行要能读出来")
+        r = rows[0]
+        self.assertEqual(r["sn"], "")
+        self.assertEqual(r["accessories"], [])
+        self.assertEqual(r["payments"], [])
+        self.assertEqual(r["external_id"], "")
+        self.assertEqual(r["excluded"], 0)
 
     def test_唯一索引只管非空_external_id(self):
         """部分索引的行为钉子：NULL / 空串互不冲突，真单号重复才 IntegrityError。"""
@@ -473,6 +479,46 @@ class Test迁移新列(_RootCase):
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(base % "'DOC-1'")
         conn.close()
+
+
+# ────────────────────────────────────── 新字段：SN / 配件 / 支付
+class Test新字段存取(_RootCase):
+    def test_存改查一条龙(self):
+        body = {
+            "sold_at": "2026-09-30 14:32", "goods_code": "6901", "goods_name": "MatePad",
+            "quantity": 1, "amount": 1899, "seller": "张三", "note": "老客户",
+            "sn": "HXR123",
+            "accessories": [{"name": "原装保护壳", "amount": 199}],
+            "payments": [{"method": "现金", "amount": 1000},
+                          {"method": "微信直连", "amount": 899}],
+        }
+        res = store.save_entry(self.root, body)
+        self.assertTrue(res.get("ok"), res)
+        rows = store.list_entries(self.root, day="2026-09-30")
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["sn"], "HXR123")
+        self.assertEqual(r["accessories"],
+                         [{"name": "原装保护壳", "amount": 199.0}])
+        self.assertEqual([p["method"] for p in r["payments"]], ["现金", "微信直连"])
+        # 改
+        body.update({"id": r["id"], "sn": "HXR456", "accessories": []})
+        self.assertTrue(store.save_entry(self.root, body, entry_id=r["id"]).get("ok"))
+        r2 = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r2["sn"], "HXR456")
+        self.assertEqual(r2["accessories"], [])
+
+    def test_坏明细回why不抛(self):
+        base = {"sold_at": "2026-09-30 14:32", "amount": 100}
+        for bad, frag in (
+                ({"accessories": [{"amount": 5}]}, "名字"),
+                ({"accessories": [{"name": "壳", "amount": "abc"}]}, "数字"),
+                ({"payments": [{"method": "现金", "amount": -1}]}, "负数"),
+                ({"payments": "不是列表"}, "列表")):
+            with self.subTest(frag=frag):
+                res = store.save_entry(self.root, dict(base, **bad))
+                self.assertFalse(res.get("ok"))
+                self.assertIn(frag, res.get("why", ""))
 
 
 if __name__ == "__main__":
