@@ -411,6 +411,15 @@ class Test页面接线(unittest.TestCase):
         self.assertIn('id="cashier-summary"', seg, "汇总条必须在吸顶容器里")
         self.assertIn('id="cashier-scan"', seg, "录入区必须在吸顶容器里")
 
+    def test_收银订单卡样式段在(self):
+        css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+        for token in (".cashier-top", ".cashier-card", ".cc-side",
+                      ".cc-group-title", ".pay-block", ".cc-close"):
+            with self.subTest(token=token):
+                self.assertIn(token, css)
+        self.assertIn("position: sticky",
+                      css[css.index(".cashier-top"):css.index(".cashier-top") + 400])
+
     def test_SUBTABS和loader接上了(self):
         blk = APP_JS[APP_JS.index("const SUBTABS = {"):]
         blk = blk[:blk.index("\n};")]

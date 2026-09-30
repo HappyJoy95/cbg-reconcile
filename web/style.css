@@ -1779,3 +1779,80 @@ main.tools-frame-mode .subpanel.active {
   color: inherit;
 }
 .store-code-box .hint { flex: 1 1 220px; }
+
+
+/* ──────────────────────── 收银 · 订单卡（2026-09-30） ────────────────────────
+   布局照华为 POS 参考图：吸顶「录入+汇总」，下面每笔订单一张卡（左数据右信息栏）。
+   ⚠ 滚动容器是窗口本身（main / subpanel 都没有 overflow），所以 sticky top:0
+   是贴视口顶 —— 别给这俩容器加 overflow，加了吸顶就只在容器内生效。 */
+.cashier-top { position: sticky; top: 0; z-index: 20;
+  background: var(--bg); padding-bottom: 6px; }
+.cashier-scan { display: flex; gap: 8px; margin-bottom: 10px; }
+.cashier-scan input { flex: 1; font-size: 15px; padding: 9px 12px; }
+.cashier-summary { display: flex; align-items: center; gap: 16px;
+  font-size: 13.5px; color: var(--muted); }
+.cashier-summary b { color: var(--text); font-size: 15px; }
+.cashier-summary .cs-date { font-weight: 650; color: var(--text); }
+.cashier-summary .cs-gap { flex: 1; }
+.cashier-blacklist { display: flex; align-items: center; gap: 10px; }
+.cashier-blacklist label { min-width: 0; display: flex; align-items: center; gap: 8px; }
+
+.cashier-cards { display: flex; flex-direction: column; gap: 12px; }
+/* 卡片 HTML 是 `class="cashier-card card"`：card 自带 padding:18px/margin-bottom，
+   两区分栏要贴边 ⇒ padding 归零由本类覆盖（后写的选择器赢，同特异性）。 */
+.cashier-card { display: flex; gap: 0; padding: 0; overflow: hidden;
+  position: relative; margin-bottom: 0; }
+.cc-main { flex: 1 1 auto; min-width: 0; padding: 14px 16px; }
+.cc-time { font-size: 12.5px; color: var(--muted); }
+.cc-name { font-size: 15.5px; font-weight: 650; margin: 2px 0 6px; }
+.cc-meta { font-size: 12.5px; color: var(--muted); line-height: 1.7;
+  word-break: break-all; }
+.cc-amount-row { display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 8px; }
+.cc-amount-row .cc-qty { font-size: 13px; color: var(--muted); }
+.cc-amount-row .cc-amount { font-size: 21px; font-weight: 700; }
+.cc-acc { margin-top: 10px; border-top: 1px dashed var(--line);
+  padding-top: 8px; font-size: 13px; }
+.cc-acc-row { display: flex; justify-content: space-between; gap: 12px;
+  padding: 2px 0; }
+.cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.cc-editing { outline: 2px solid var(--brand); }
+
+/* 右侧信息栏 —— 参考图的蓝竖条分组标题；右 28px 给垂直居中的 ✕ 让位
+   （原计划写两条 .cc-side，已合并进这一条：padding 左14 右28）。 */
+.cc-side { flex: 0 0 260px; border-left: 1px solid var(--line);
+  padding: 12px 28px 12px 14px; background: var(--field); font-size: 13px; }
+.cc-group + .cc-group { margin-top: 12px; }
+.cc-group-title { font-weight: 650; margin-bottom: 6px; padding-left: 8px;
+  border-left: 3px solid var(--brand); line-height: 1.2; }
+.cc-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.cc-row .k { color: var(--muted); flex: 0 0 auto; }
+.cc-row .v { text-align: right; word-break: break-all; }
+.cc-muted { color: var(--muted); }
+.cc-wait { display: inline-block; font-size: 11.5px; border: 1px dashed var(--line);
+  border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+
+/* 支付方块（参考图彩色块）：块 + 下方金额框；软提醒不拦截。
+   ⚠ 底色用纯 hex、不写 color-mix —— 门店 Win7 老 Chromium 不认 color-mix()。 */
+.pay-blocks { display: flex; flex-wrap: wrap; gap: 8px; }
+.pay-block { position: relative; border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; background: var(--card); min-width: 86px; }
+.pay-block .pb-name { font-size: 12.5px; font-weight: 600; padding-right: 14px; }
+.pay-block input { width: 76px; margin-top: 4px; }
+.pay-block .pb-x { position: absolute; top: 2px; right: 3px; border: 0;
+  background: none; cursor: pointer; color: var(--muted); font-size: 13px; }
+.pay-block:nth-child(6n+1) { background: #eef2ff; }
+.pay-block:nth-child(6n+2) { background: #eef6ff; }
+.pay-block:nth-child(6n+3) { background: #fff7e8; }
+.pay-block:nth-child(6n+4) { background: #eefaf0; }
+.pay-block:nth-child(6n+5) { background: #fdeeee; }
+.pay-block:nth-child(6n+6) { background: #f3f0ff; }
+.pay-sum { font-size: 12.5px; margin-top: 8px; color: var(--muted); }
+.pay-warn { color: #b45309; background: #fffbeb; border: 1px solid #fde68a;
+  border-radius: 5px; padding: 3px 8px; display: inline-block; margin-top: 6px; }
+
+/* 卡右侧垂直居中的 ✕（两类卡统一入口，语义在 JS 分叉） */
+.cc-close { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  border: 0; background: none; font-size: 17px; line-height: 1; cursor: pointer;
+  color: var(--muted); padding: 6px; }
+.cc-close:hover { color: var(--bad); }
