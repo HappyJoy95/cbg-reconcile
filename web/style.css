@@ -1815,6 +1815,14 @@ main.tools-frame-mode .subpanel.active {
   padding-top: 8px; font-size: 13px; }
 .cc-acc-row { display: flex; justify-content: space-between; gap: 12px;
   padding: 2px 0; }
+/* 商品行（一张卡 = 一个订单）：名/编码/SN/数量/金额/品类 一排，
+   窄屏自动换行 —— 输入框都收着宽度，别把卡撑破 */
+.cc-prod { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.cc-prod input { min-width: 0; }
+.cc-prod input[data-prod-f="name"] { flex: 1 1 9em; }
+.cc-prod select { max-width: 7.5em; }
+.cc-prod .btn { margin-left: auto; }
 .cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 .cc-editing { outline: 2px solid var(--brand); }
 

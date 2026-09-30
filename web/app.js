@@ -358,6 +358,7 @@ $$('.nav-item').forEach((item) => {
 let _cashierEditing = 0;      // 正在改的流水 id（**number**，0 = 没在改）
 let _cashierEditAcc = [];     // 编辑中的配件草稿（深拷贝自原行，保存才提交）
 let _cashierEditPay = [];     // 编辑中的支付草稿（同上 —— 取消修改要能还原）
+let _cashierEditProd = [];    // 编辑中的商品行草稿（一张卡 = 一个订单）
 
 //: 品类清单（= 后端 `store.CATEGORIES`，导出销售表的「品类」列就用它）
 const cashierCATEGORIES = ['手机', '平板', '笔记本', '穿戴', '音频',
@@ -488,6 +489,7 @@ function cashierPayViewHtml(r) {
 
 function cashierCardHtml(r) {
   const acc = (r.accessories || []);
+  const prods = (r.products || []);
   const sold = String(r.sold_at || '').slice(5, 16);
   const src = r.source === 'linglong'
     ? '<span class="cc-wait" title="修改只影响本机视图，不动华为原单">玲珑 '
@@ -495,6 +497,19 @@ function cashierCardHtml(r) {
   // 两段式：没点「保存并记录」的行挂个徽章（一眼看出哪些还没入账）
   const wait = r.status === 'staged'
     ? '<span class="cc-wait" title="还没入账 —— 结账时点汇总条的「保存并记录」">未入库</span>'
+    : '';
+  // 商品行（一张卡 = 一个订单）：品类**跟商品走**，有商品行就逐行列；
+  // 没有（单商品老口径）才把卡片品类放 meta —— 卡片右侧不再放品类（第三轮）
+  const catMeta = (!prods.length && r.category)
+    ? `<br>品类 ${esc2(r.category)}` : '';
+  const prodHtml = prods.length
+    ? '<div class="cc-acc"><b>商品</b>'
+      + prods.map((p) => `<div class="cc-acc-row">`
+        + `<span>${p.category ? `[${esc2(p.category)}] ` : ''}${esc2(p.name)}`
+        + `${p.code ? ` <span class="cc-muted">${esc2(p.code)}</span>` : ''}</span>`
+        + `<span>×${esc2(Math.round((Number(p.quantity) || 0) * 100) / 100)}`
+        + ` ¥${(Number(p.amount) || 0).toFixed(2)}</span></div>`).join('')
+      + '</div>'
     : '';
   const accHtml = acc.length
     ? '<div class="cc-acc"><b>配件</b>'
@@ -507,10 +522,11 @@ function cashierCardHtml(r) {
     + `<div class="cc-time">${esc2(sold)} ${wait} ${src}</div>`
     + `<div class="cc-name">${esc2(r.goods_name) || '（没填名称）'}</div>`
     + `<div class="cc-meta">商品编码 ${esc2(r.goods_code) || '—'}`
-    + `<br>SN ${esc2(r.sn) || '—'}</div>`
+    + `<br>SN ${esc2(r.sn) || '—'}${catMeta}</div>`
     + `<div class="cc-amount-row"><span class="cc-qty">数量 `
     + `${esc2(Math.round((Number(r.quantity) || 0) * 100) / 100)}</span>`
     + `<span class="cc-amount">¥${(Number(r.amount) || 0).toFixed(2)}</span></div>`
+    + prodHtml
     + accHtml
     + `<div class="cc-actions">`
     + `<button class="btn ghost small" data-cc-edit="${r.id}">改</button>`
@@ -520,8 +536,6 @@ function cashierCardHtml(r) {
     + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
     + `<div class="cc-row"><span class="k">销售员</span>`
     + `<span class="v">${esc2(r.seller) || '—'}</span></div>`
-    + `<div class="cc-row"><span class="k">品类</span>`
-    + `<span class="v">${esc2(r.category) || '—'}</span></div>`
     + `<div class="cc-row"><span class="k">备注</span>`
     + `<span class="v">${esc2(r.note) || '—'}</span></div></div>`
     + `<div class="cc-group cc-muted"><div class="cc-group-title">客户信息</div>`
@@ -546,17 +560,42 @@ function cashierCardEditHtml(r) {
   const acc = _cashierEditAcc;
   const inp = (f, v, type, w) => `<input data-f="${f}" type="${type || 'text'}"`
     + ` value="${esc2(v == null ? '' : v)}"${w ? ` style="width:${w}"` : ''}>`;
-  const sel = (f, v, opts) => `<select data-f="${f}"><option value=""></option>`
-    + opts.map((o) => `<option${o === v ? ' selected' : ''}>${esc2(o)}</option>`)
-      .join('') + `</select>`;
+  // 商品行（一张卡 = 一个订单）：名/编码/SN/数量/金额/品类 六件套。
+  // ⚠ 品类在**行上**（用户：品类跟单条商品走）—— 卡片右侧那个品类没了。
+  const prodRow = (p, i) => `<div class="cc-prod" data-prod-i="${i}">`
+    + `<input data-prod-f="name" value="${esc2(p.name)}" placeholder="商品名">`
+    + `<input data-prod-f="code" value="${esc2(p.code)}" placeholder="编码" style="width:7em">`
+    + `<input data-prod-f="sn" value="${esc2(p.sn)}" placeholder="SN" style="width:8em">`
+    + `<input data-prod-f="quantity" type="number" step="any" min="0.01"`
+    + ` value="${esc2(p.quantity == null ? '' : p.quantity)}" style="width:4.5em"`
+    + ` title="数量">`
+    + `<input data-prod-f="amount" type="number" step="0.01"`
+    + ` value="${p.amount == null ? '' : esc2(p.amount)}" style="width:6em"`
+    + ` title="金额">`
+    + `<select data-prod-f="category" title="品类（跟这条商品走）">`
+    + `<option value=""></option>`
+    + cashierCATEGORIES.map((o) => `<option${o === p.category ? ' selected' : ''}>`
+      + `${esc2(o)}</option>`).join('')
+    + `</select>`
+    + `<button class="btn ghost small" data-prod-del="${i}">删</button>`
+    + `</div>`;
   return `<div class="cashier-card card cc-editing" data-id="${r.id}">`
     + `<div class="cc-main">`
     + `<div class="cc-time">编辑中</div>`
     + `<div class="cc-name">${inp('goods_name', r.goods_name)}</div>`
     + `<div class="cc-meta">商品编码 ${inp('goods_code', r.goods_code)}`
     + `<br>SN ${inp('sn', r.sn)}</div>`
-    + `<div class="cc-amount-row"><span>数量 ${inp('quantity', r.quantity, 'number', '5em')}</span>`
-    + `<span>实收 ${inp('amount', r.amount, 'number', '8em')}</span></div>`
+    // ⚠ 数量/实收在有商品行时是**派生值**（后端 products 非空就按 Σ 覆盖）——
+    //   所以这里只读，改数字去改商品行，免得"改了又自己弹回去"。
+    + `<div class="cc-amount-row"><span>数量 <input data-f="quantity" type="number"`
+    + ` step="any" readonly value="${esc2(r.quantity == null ? '' : r.quantity)}"`
+    + ` style="width:5em" title="Σ商品数量（自动）"></span>`
+    + `<span>实收 <input data-f="amount" type="number" step="0.01" readonly`
+    + ` value="${esc2(r.amount == null ? '' : r.amount)}" style="width:8em"`
+    + ` title="合计 = Σ商品金额（自动）"></span></div>`
+    + `<div class="cc-acc" data-prod-blocks><b>商品</b>`
+    + _cashierEditProd.map(prodRow).join('')
+    + `<button class="btn ghost small" data-prod-add="1">+ 添加商品</button></div>`
     + `<div class="cc-acc"><b>配件区</b>`
     + acc.map((x, i) => `<div class="cc-acc-row" data-acc-i="${i}">`
         + `<input data-acc-f="name" value="${esc2(x.name)}" placeholder="配件名">`
@@ -570,8 +609,6 @@ function cashierCardEditHtml(r) {
     + `<div class="cc-side">`
     + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
     + `<div class="cc-row"><span class="k">销售员</span>${inp('seller', r.seller)}</div>`
-    + `<div class="cc-row"><span class="k">品类</span>`
-    + `${sel('category', r.category, cashierCATEGORIES)}</div>`
     + `<div class="cc-row"><span class="k">备注</span>${inp('note', r.note)}</div>`
     + `<div class="cc-row"><span class="k">销售时间</span>`
     + `${inp('sold_at', String(r.sold_at || '').slice(0, 16).replace(' ', 'T'), 'datetime-local')}</div>`
@@ -611,6 +648,11 @@ function cashierEditState() {
   //   写死 `cashierPayRead(card)` 在没有块的中间态会读出 [] 把原数据抹了
   out.payments = card.querySelector('[data-pay-blocks]')
     ? cashierPayRead(card) : (r.payments || []);
+  // ⚠ 商品行同样以输入框为准；**整行全空的丢掉**（手滑多点了一下「添加」，
+  //   拿去后端会撞「第 N 条没有名字」白报一轮错）
+  out.products = card.querySelector('[data-prod-blocks]')
+    ? cashierProdRead(card).filter((p) => !cashierProdBlank(p))
+    : (r.products || []);
   return out;
 }
 
@@ -634,6 +676,85 @@ function cashierRerenderEdit() {
   card.querySelectorAll('[data-f]').forEach((el) => {
     if (fields[el.dataset.f] !== undefined) el.value = fields[el.dataset.f];
   });
+  // 刷完要把派生值补上：商品行变了 → 实收/数量重算；支付合计/黄条同理
+  cashierProdSync(card);
+  cashierPaySync(card);
+}
+
+/* ───────────── 商品行（一张卡 = 一个订单，2026-09-30 第三轮）─────────────
+
+   ⚠ 品类在**每一行商品**上（用户：「品类要跟单条商品走」）——
+     卡片右侧不再有品类选择器；顶部录入口那个品类 = 新卡首商品的品类。
+   ⚠ 有商品行时「数量 / 实收」是派生值（后端按 Σ 覆盖），界面只读 +
+     `cashierProdSync` 实时刷 —— 避免"改了又自己弹回去"的错觉。 */
+function cashierProdBlank(p) {
+  return !String(p.name || '').trim() && !String(p.code || '').trim()
+    && !String(p.sn || '').trim() && !String(p.category || '').trim()
+    && !(Number(p.amount) > 0);
+}
+
+/** 读编辑卡里的商品行（原样，含空行 —— 空行过滤在 cashierEditState 做）。 */
+function cashierProdRead(card) {
+  const out = [];
+  card.querySelectorAll('[data-prod-i]').forEach((row) => {
+    const v = (f) => ((row.querySelector(`[data-prod-f="${f}"]`) || {}).value);
+    out.push({
+      name: String(v('name') || '').trim(),
+      code: String(v('code') || '').trim(),
+      sn: String(v('sn') || '').trim(),
+      category: String(v('category') || '').trim(),
+      quantity: String(v('quantity') || '').trim() || 1,
+      amount: String(v('amount') || '').trim() || 0,
+    });
+  });
+  return out;
+}
+
+/** 商品行的值收进草稿（增删前调 —— 人手打的字还在 DOM 里）。 */
+function cashierProdDraftFromDom() {
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card || !card.querySelector('[data-prod-blocks]')) return;
+  _cashierEditProd = cashierProdRead(card);
+}
+
+function cashierProdAdd() {
+  cashierProdDraftFromDom();
+  _cashierEditProd.push({ name: '', code: '', sn: '', quantity: 1,
+                          amount: '', category: '' });
+  cashierRerenderEdit();
+}
+
+function cashierProdDel(i) {
+  cashierProdDraftFromDom();
+  _cashierEditProd.splice(Number(i), 1);
+  cashierRerenderEdit();
+}
+
+//: 派生值：数量 = Σ行数量、实收 = Σ行金额（后端同口径，这里只管显示）
+function cashierProdSync(card) {
+  if (!card) return;
+  const rows = card.querySelectorAll('[data-prod-i]');
+  if (!rows.length) {
+    // 商品行被删光 ⇒ 派生值清空（留着旧 Σ 会"没商品却有合计"，保存时后端
+    // 走老口径拿空金额报「金额得是数字」，比静默存一笔空单强）
+    const q0 = card.querySelector('[data-f="quantity"]');
+    if (q0) q0.value = '';
+    const a0 = card.querySelector('[data-f="amount"]');
+    if (a0) a0.value = '';
+    return;
+  }
+  let qty = 0;
+  let sum = 0;
+  rows.forEach((row) => {
+    const q = row.querySelector('[data-prod-f="quantity"]');
+    const a = row.querySelector('[data-prod-f="amount"]');
+    qty += Number(q ? q.value : 0) || 0;
+    sum += Number(a ? a.value : 0) || 0;
+  });
+  const qEl = card.querySelector('[data-f="quantity"]');
+  if (qEl) qEl.value = Math.round(qty * 100) / 100;
+  const aEl = card.querySelector('[data-f="amount"]');
+  if (aEl) aEl.value = (Math.round(sum * 100) / 100).toFixed(2);
 }
 
 /** 读一组支付块 → `{method, amount}[]`。空金额的块不进（保存时不提交半截）。 */
@@ -732,6 +853,17 @@ function cashierCardEdit(id) {
   _cashierEditing = Number(id);          // ⚠ dataset 是 string，归一成 number 才 === r.id
   _cashierEditAcc = JSON.parse(JSON.stringify(r.accessories || []));
   _cashierEditPay = JSON.parse(JSON.stringify(r.payments || []));
+  // 商品行**打开就铺出来**（第三轮定的）：老卡没有商品行 ⇒ 把顶层字段补成
+  // 第一行（首编保存后导出就以卡内行为准；没编过的老卡仍回退查 order_lines）
+  _cashierEditProd = JSON.parse(JSON.stringify(r.products || []));
+  if (!_cashierEditProd.length) {
+    _cashierEditProd = [{
+      name: r.goods_name || '', code: r.goods_code || '', sn: r.sn || '',
+      quantity: r.quantity == null ? 1 : r.quantity,
+      amount: r.amount == null ? 0 : r.amount,
+      category: r.category || '',
+    }];
+  }
   renderCashierCards(Object.values(_cashierRows));
 }
 
@@ -739,6 +871,7 @@ function cashierCardCancel() {
   _cashierEditing = 0;
   _cashierEditAcc = [];
   _cashierEditPay = [];
+  _cashierEditProd = [];
   renderCashierCards(Object.values(_cashierRows));
 }
 
@@ -768,6 +901,7 @@ async function cashierCardSave(id) {
     _cashierEditing = 0;
     _cashierEditAcc = [];
     _cashierEditPay = [];
+    _cashierEditProd = [];
     await loadCashier();
   } catch (e) {
     toast('保存失败：' + e.message, 'bad');
@@ -847,9 +981,12 @@ function renderCashierCards(rows) {
   if (host) {
     host.innerHTML = rows.map((r) => (_cashierEditing === r.id
       ? cashierCardEditHtml(r) : cashierCardHtml(r))).join('');
-    // 编辑卡刚画出来 ⇒ 支付合计/黄条要立刻有值（不等用户敲第一个字）
+    // 编辑卡刚画出来 ⇒ 派生值与支付合计/黄条要立刻有值（不等用户敲第一个字）
     const editing = host.querySelector('.cashier-card.cc-editing');
-    if (editing) cashierPaySync(editing);
+    if (editing) {
+      cashierProdSync(editing);
+      cashierPaySync(editing);
+    }
   }
 }
 
@@ -998,16 +1135,22 @@ function bindCashierEvents() {
     if (t.dataset.accDel !== undefined && t.dataset.accDel !== '') {
       cashierAccDel(t.dataset.accDel); return;
     }
+    if (t.dataset.prodAdd) { cashierProdAdd(); return; }
+    if (t.dataset.prodDel !== undefined && t.dataset.prodDel !== '') {
+      cashierProdDel(t.dataset.prodDel); return;
+    }
     if (t.dataset.payAdd) { cashierPayAdd(); return; }
     if (t.dataset.payDel !== undefined && t.dataset.payDel !== '') {
       cashierPayDel(t.dataset.payDel); return;
     }
     if (t.dataset.ccClose) { cashierCardClose(t.dataset.ccClose); return; }
   });
-  // 支付块金额/实收金额一变就刷「已付/应付」与黄条（软提醒，不拦截）
+  // 商品行/支付金额一变 → 刷「数量/实收」派生值 + 「已付/应付」黄条（软提醒）
   $('#cashier-cards').addEventListener('input', (e) => {
     const card = e.target.closest && e.target.closest('.cashier-card.cc-editing');
-    if (card) cashierPaySync(card);
+    if (!card) return;
+    cashierProdSync(card);
+    cashierPaySync(card);
   });
 }
 

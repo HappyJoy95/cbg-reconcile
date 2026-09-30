@@ -518,10 +518,29 @@ class Test页面接线(unittest.TestCase):
             with self.subTest(opt=o):
                 self.assertIn("<option>%s</option>" % o, INDEX_HTML)
         self.assertIn("cashierCATEGORIES", APP_JS)
-        self.assertIn("sel('category', r.category, cashierCATEGORIES)", APP_JS,
-                      "卡内编辑也要能改品类")
+        self.assertIn('data-prod-f="category"', APP_JS,
+                      "品类在**商品行**上（第三轮：品类跟单条商品走）")
         self.assertIn("category: ($('#cashier-category')", APP_JS,
-                      "录入卡的品类要进保存体")
+                      "录入卡的品类要进保存体（= 首商品的品类）")
+
+    def test_卡内商品行接上了(self):
+        """一张卡 = 一个订单：卡内能加商品行，数量/实收按 Σ 派生只读。"""
+        for fn in ("cashierProdAdd", "cashierProdDel", "cashierProdSync",
+                   "cashierProdRead", "cashierProdBlank"):
+            with self.subTest(fn=fn):
+                self.assertIn("function %s" % fn, APP_JS)
+        self.assertIn("+ 添加商品", APP_JS)
+        self.assertIn("data-prod-blocks", APP_JS)
+        self.assertNotIn('<span class="k">品类</span>', APP_JS,
+                         "卡片右侧的品类行要撤（品类跟商品走）")
+        # 派生值：实收/数量只读，由商品行 Σ 出来
+        self.assertIn('data-f="amount" type="number" step="0.01" readonly',
+                      APP_JS)
+        self.assertIn('data-f="quantity" type="number"', APP_JS)
+        # 保存体带 products；草稿在编辑态铺出来
+        i = APP_JS.index("function cashierEditState")
+        self.assertIn("products", APP_JS[i:i + 1600])
+        self.assertIn("_cashierEditProd", APP_JS)
 
     def test_node语法检查(self):
         node = shutil.which("node")
