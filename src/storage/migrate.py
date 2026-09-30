@@ -180,6 +180,23 @@ def _m006(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS ix_price_policy_code ON price_policy(goods_code)")
 
 
+def _m007(conn) -> None:
+    """收银流水补列（2026-09-30 订单卡改造）—— SN / 配件 / 组合支付 / 玲珑来源。
+
+    ⚠ `external_id` 上建唯一索引（玲珑 `document_no`）：SQLite 的 UNIQUE 索引
+      **放行多个 NULL** ⇒ 手工单（external_id 空）互不冲突，玲珑单天然幂等。
+    ⚠ `excluded` 不给 DEFAULT（ALTER 加列 + 非空默认在老 SQLite 上有坑）——
+      读侧一律 `excluded IS NULL OR =0` 兜底（`list_entries` 负责）。
+    """
+    conn.execute("ALTER TABLE sale_entries ADD COLUMN sn TEXT")
+    conn.execute("ALTER TABLE sale_entries ADD COLUMN accessories TEXT")
+    conn.execute("ALTER TABLE sale_entries ADD COLUMN payments TEXT")
+    conn.execute("ALTER TABLE sale_entries ADD COLUMN external_id TEXT")
+    conn.execute("ALTER TABLE sale_entries ADD COLUMN excluded INTEGER")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_sale_entries_external"
+                 " ON sale_entries(external_id)")
+
+
 MIGRATIONS: List[Migration] = [
     Migration(n=1, name="结构基线", apply=_m001),
     Migration(n=2, name="采集尝试表 fetch_attempt", apply=_m002),
@@ -191,6 +208,7 @@ MIGRATIONS: List[Migration] = [
     Migration(n=4, name="利润结果表 profit_result", apply=_m004),
     Migration(n=5, name="收银流水 sale_entries", apply=_m005),
     Migration(n=6, name="政策快照 price_policy", apply=_m006),
+    Migration(n=7, name="收银流水补列 SN/配件/支付/玲珑", apply=_m007),
 ]
 
 

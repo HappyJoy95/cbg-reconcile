@@ -431,5 +431,27 @@ class Test页面接线(unittest.TestCase):
             edition.reload()
 
 
+# ────────────────────────────────────── 迁移：SN/配件/支付/来源/排除 列
+class Test迁移新列(_RootCase):
+    def test_五列都在_老行读得出来(self):
+        import sqlite3
+        path = store.ensure(self.root)
+        conn = sqlite3.connect(str(path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+        # 模拟"迁移前写进去的老行"：只给老列，新列是 NULL
+        conn.execute(
+            "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
+            " amount, seller, note, source, created_at, updated_at)"
+            " VALUES ('2026-09-30 10:00:00','c1','老货',1,99,'小张','',"
+            " 'manual','2026-09-30 10:00:00','2026-09-30 10:00:00')")
+        conn.commit()
+        conn.close()
+        self.assertTrue(
+            {"sn", "accessories", "payments", "external_id", "excluded"} <= cols,
+            "m007 没把新列补上：%s" % sorted(cols))
+        rows = store.list_entries(self.root, day="2026-09-30")
+        self.assertEqual(len(rows), 1, "老行要能读出来")
+
+
 if __name__ == "__main__":
     unittest.main()
