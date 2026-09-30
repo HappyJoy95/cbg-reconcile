@@ -24,6 +24,7 @@ from pathlib import Path
 
 import requests
 
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
 from . import envfile
 
 DEFAULT_ENV_FILE = ".secrets/wecom.env"
@@ -326,7 +327,8 @@ def _check(j: dict, what: str) -> None:
 
 def _post(url: str, payload: dict, timeout: int = 20) -> dict:
     try:
-        r = requests.post(url, json=payload, timeout=timeout)
+        r = requests.post(url, json=payload, timeout=timeout,
+                          proxies=httputil.NO_PROXY)
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
@@ -357,6 +359,7 @@ def upload_file(wc: WecomConfig, path) -> str:
     try:
         with p.open("rb") as f:
             r = requests.post(f"{API}/upload_media?key={wc.key}&type=file",
+                              proxies=httputil.NO_PROXY,
                               files={"media": (p.name, f,
                                                "application/octet-stream")},
                               timeout=60)

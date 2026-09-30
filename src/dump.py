@@ -64,6 +64,7 @@ from pathlib import Path
 
 # ⚠ 融合后**不再自己找仓库根** —— 2026-09-19 起统一从 `src/paths.py` 取，
 #   全项目只有那一处知道"自己在第几层"（`parents[1]` 这种写法搬文件就会静默算错）。
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
 from .paths import ROOT
 
 import requests                                                        
@@ -662,6 +663,7 @@ def load_medias(conn, sess: CbgSession, store_code: str) -> int:
     """
     def _req(p):
         r = requests.post(CBG_BASE + MEDIA_PATH,
+                          proxies=httputil.NO_PROXY,
                           params={"locale": "zh_CN", "curPage": p["curPage"],
                                   "pageSize": p["pageSize"]},
                           json={"isParmas": {"curPage": p["curPage"], "pageSize": p["pageSize"]},

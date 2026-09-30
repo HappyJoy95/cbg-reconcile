@@ -187,8 +187,31 @@ TRIES = 3
 BACKOFF = 1.5          # 秒；第 n 次等 n * BACKOFF
 
 
+def _proxy_broken(e) -> bool:
+    """这次失败是不是「代理那条线」断的 —— 兜底只在这种情况才插手。
+
+    ⚠ 判据不能只靠 `isinstance`：测试会用**假 requests 模块**（只有
+      `RequestException` / `Session`）顶替真模块，那时候取不到 `exceptions.ProxyError`。
+      所以两条腿：类名对得上就算；对不上再看报错原文里有没有 proxy 字样。
+    """
+    import requests
+    cls = getattr(getattr(requests, "exceptions", None), "ProxyError", None)
+    if cls is not None and isinstance(e, cls):
+        return True
+    text = str(e)
+    return "ProxyError" in text or "Unable to connect to proxy" in text
+
+
 def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None):
-    """带重试的 GET。每次都用**新的 Session** —— 连接池里的坏连接别再复用。"""
+    """带重试的 GET。每次都用**新的 Session** —— 连接池里的坏连接别再复用。
+
+    ⚠ **代理不通就脱掉代理直连再来一轮**（2026-09-29 用户：「加个兜底吧」）：
+      代理软件重启 / 换端口那阵，环境变量还指着一个没人听的端口 ⇒ 每一发都是
+      `ProxyError`，而 GitHub 直连**可能是通的** —— 检查更新不该被
+      「代理抖一下」卡住（当天实测：走代理全挂、直连 200）。
+      ⚠ 代理错**不占用原来那几次重试**：端口没监听是确定性的，
+        等它三遍纯属浪费时间，发现就立刻换直连。
+    """
     import requests
     n = TRIES if tries is None else max(1, tries)
     last = None
@@ -199,10 +222,39 @@ def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None):
                 r.raise_for_status()
                 return r
         except requests.RequestException as e:
+            if _proxy_broken(e):
+                return _get_direct(url, timeout=timeout, stream=stream,
+                                   tries=n, proxy_err=e)
             last = e
             if attempt < n:
                 time.sleep(BACKOFF * attempt)
     raise UpdateError(f"连不上 GitHub（试了 {n} 次）：{last}")
+
+
+def _get_direct(url: str, *, timeout: int, stream: bool = False, tries: int = 1,
+                proxy_err=None):
+    """上一条的兜底：**这一次请求不走代理**，别的环境行为照旧。
+
+    ⚠ 只把 `proxies` 三个键置 `None`（`httputil.NO_PROXY`），
+      **不动 `trust_env`** —— 自定义 CA、netrc 这些还得照常生效。
+    """
+    import requests
+    from . import httputil
+    n = max(1, int(tries))
+    last = None
+    for attempt in range(1, n + 1):
+        try:
+            with requests.Session() as s:
+                r = s.get(url, timeout=timeout, stream=stream,
+                          proxies=httputil.NO_PROXY)
+                r.raise_for_status()
+                return r
+        except requests.RequestException as e:
+            last = e
+            if attempt < n:
+                time.sleep(BACKOFF * attempt)
+    raise UpdateError("代理不通、直连也不通 —— 代理：%s；直连：%s"
+                      % (proxy_err, last))
 
 
 # ------------------------------------------------------------------ 版本比较

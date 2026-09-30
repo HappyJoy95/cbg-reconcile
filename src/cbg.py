@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import requests
 
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
 from .session import CBG_BASE, CbgAuthError, CbgSession
 
 LIST_PATH = "/isrp/srs/sale-order/paged-list"
@@ -63,7 +64,7 @@ class CbgClient:
         self.timeout = timeout
         self.verbose = verbose
         self.retries = retries
-        self.http = requests.Session()
+        self.http = httputil.session()   # trust_env=False —— 不吃代理
 
     # ------------------------------------------------------------------ 基础
     def _request(self, method: str, path: str, payload: dict | None = None,

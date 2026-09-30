@@ -80,6 +80,8 @@ import zlib
 
 import requests
 
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
+
 #: 默认文档（「任务目标分配」）。换个文档就换这个 id。
 DEFAULT_DOC = "DTE90WnJBWUhtUHhS"
 #: 目标 tab 与映射 tab 的名字 —— **按名字找，不写死 tab id**
@@ -105,6 +107,11 @@ class TdocError(RuntimeError):
 #:   而那本该是可恢复的网络抖动（应用 `TdocError`）。
 NET_TRIES = 3
 NET_BACKOFF = 1.5          # 秒；第 n 次失败后等 n * BACKOFF
+
+#: 默认 Session（不传 `session=` 时用它）—— **不吃代理**（见 `httputil`）。
+#: 为什么单独留一个：`_get` 要在同一个连接上带 cookie / 复用 keep-alive，
+#: 每次新建 Session 会把 `fetch_html → fetch_tab` 那两跳的登录态断掉。
+_SESS = httputil.session()
 
 
 def _is_transient_net_error(exc):
@@ -400,7 +407,7 @@ def _with_net_retry(fn, what, tries=None):
 
 
 def _get(url, referer=None, session=None, timeout=60):
-    sess = session or requests
+    sess = session or _SESS   # 默认那个也不吃代理（httputil）
     headers = {"User-Agent": UA}
     if referer:
         headers["Referer"] = referer

@@ -1885,6 +1885,7 @@ class TestNetworkRetry(unittest.TestCase):
             def get(self, url, **kw):
                 i = calls["n"]
                 calls["n"] += 1
+                calls.setdefault("kw", []).append(kw)
                 r = results[min(i, len(results) - 1)]
                 if isinstance(r, Exception):
                     raise r
@@ -1927,6 +1928,91 @@ class TestNetworkRetry(unittest.TestCase):
         src = inspect.getsource(selfupdate._get)
         self.assertIn("Session()", src)
         self.assertIn("with requests.Session()", src)
+
+
+class Test代理兜底(unittest.TestCase):
+    """代理软件重启 / 换端口那阵，环境变量还指着没人听的端口 ⇒ 每一发都是
+    `ProxyError`（2026-09-29 实测：走代理全挂、直连 200）。
+
+    用户：「加个兜底吧，感觉有必要」—— 检查更新不该被「代理抖一下」卡住。
+    """
+
+    @staticmethod
+    def _fake(results):
+        """results: 每次调用给一个异常或 None（None = 成功的假响应）。"""
+        import types as _t
+        import requests as real
+        calls = {"n": 0, "kw": []}
+
+        class FakeResp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"content": ""}
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, **kw):
+                i = calls["n"]
+                calls["n"] += 1
+                calls["kw"].append(kw)
+                r = results[min(i, len(results) - 1)]
+                if isinstance(r, Exception):
+                    raise r
+                return FakeResp()
+
+        fake = _t.ModuleType("requests")
+        fake.RequestException = Exception
+        fake.Session = FakeSession
+        fake.exceptions = real.exceptions          # _proxy_broken 要拿 ProxyError
+        return fake, calls, real
+
+    def test_代理不通_立刻换直连不把重试耗在它身上(self):
+        import requests as real
+        fake, calls, _real = self._fake(
+            [real.exceptions.ProxyError("Unable to connect to proxy"), None])
+        with mock.patch.dict("sys.modules", {"requests": fake}), \
+                mock.patch.object(selfupdate.time, "sleep", lambda s: None):
+            r = selfupdate._get("https://x/y", timeout=1, tries=3)
+        self.assertIsNotNone(r)
+        self.assertEqual(calls["n"], 2,
+                         "代理端口没人听是**确定性**的 —— 一次就该换直连")
+        self.assertTrue(calls["kw"][1].get("proxies"),
+                        "直连那次要显式带 proxies（不走代理）")
+
+    def test_代理不通直连也不通_报错要写清两边(self):
+        import requests as real
+        fake, calls, _real = self._fake(
+            [real.exceptions.ProxyError("Unable to connect to proxy"),
+             real.exceptions.ConnectionError("Connection timed out")])
+        with mock.patch.dict("sys.modules", {"requests": fake}), \
+                mock.patch.object(selfupdate.time, "sleep", lambda s: None):
+            with self.assertRaises(selfupdate.UpdateError) as cm:
+                selfupdate._get("https://x/y", timeout=1, tries=2)
+        msg = str(cm.exception)
+        self.assertIn("代理不通、直连也不通", msg)
+        self.assertIn("Unable to connect to proxy", msg, "代理那条的原始错误要留着")
+
+    def test_普通网络错不触发兜底(self):
+        """TLS 被掐那种（老的重试理由）不该顺手改成直连 —— 兜底只管代理。"""
+        import requests as real
+        fake, calls, _real = self._fake([real.exceptions.SSLError("boom")])
+        with mock.patch.dict("sys.modules", {"requests": fake}), \
+                mock.patch.object(selfupdate.time, "sleep", lambda s: None):
+            with self.assertRaises(selfupdate.UpdateError) as cm:
+                selfupdate._get("https://x/y", timeout=1, tries=2)
+        self.assertEqual(calls["n"], 2, "该重试还是要重试满")
+        for kw in calls["kw"]:
+            self.assertNotIn("proxies", kw, "没走兜底就不该带直连参数")
+        self.assertIn("连不上 GitHub", str(cm.exception))
 
 
 class TestRestartSnippet(unittest.TestCase):

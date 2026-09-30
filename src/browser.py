@@ -30,6 +30,7 @@ from pathlib import Path
 
 import requests
 
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
 from . import envfile
 from .cdp import Cdp, CdpError, http_json, page_targets
 from .session import CBG_BASE, CbgAuthError, CbgSession, _clean_cookies
@@ -1029,6 +1030,7 @@ def csrf_from_api(cookies: str, timeout: int = 20) -> str | None:
     """退路：csrf 也能从接口换（前端 js 里就是 `post("phoenix-gws/phoenix.sso.csrf.token")`）。"""
     try:
         r = requests.post(f"{CBG_BASE}{CSRF_PATH}",
+                          proxies=httputil.NO_PROXY,
                           headers={"accept": "application/json", "cookie": cookies,
                                    "referer": PORTAL_URL,
                                    "user-agent": "Mozilla/5.0"},

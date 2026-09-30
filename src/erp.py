@@ -26,6 +26,7 @@ from pathlib import Path
 
 import requests
 
+from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个坑）
 from . import envfile
 from .paths import ROOT as _ROOT
 from .xlsx_io import read_rows
@@ -582,7 +583,7 @@ class ErpClient:
         self.timeout = timeout
         self.verbose = verbose
         self.env_file = env_file
-        self.s = requests.Session()
+        self.s = httputil.session()   # trust_env=False —— 不吃代理
         self._relogin_tried = False
         self._apply_headers()
 
