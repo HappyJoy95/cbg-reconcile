@@ -2039,6 +2039,10 @@ class App:
     #  双击开两个登录窗是最坏的体验 —— 第二次直接回"正在更新"。
     _cashier_policy_lock = threading.Lock()
 
+    #: 一键导入互斥锁（类属性，**别共用 policy 锁**）：拉单是网络+写库的慢活，
+    #  双击 = 两个导入同时写同一个库 —— 第二次直接回"正在导入"。
+    _cashier_import_lock = threading.Lock()
+
     def cashier_entries(self, day: str = "") -> dict:
         """当日流水 + 销售员历史 + 政策新鲜度 —— 页面初始化一次 GET 全带回。"""
         from .features.cashier import store as cashier_store
@@ -2116,33 +2120,42 @@ class App:
         import datetime
         from . import dump as _dump
         from .features.cashier import store as cashier_store
-        day = str((body or {}).get("day") or "").strip()
+        if not self._cashier_import_lock.acquire(blocking=False):
+            return {"ok": False, "why": "正在导入，等它跑完再点"}
         try:
-            datetime.datetime.strptime(day, "%Y-%m-%d")
-        except ValueError:
-            return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
-        path = cashier_store.ensure(self.root)
-        cfg = config_io.load_raw(self.config_path)
-        start, end = _day_window(day)
-        conn = _dump.connect(path)
-        try:
-            conn.executescript(_dump.SCHEMA)
-            client = self.cbg_client()
-            _dump.load_orders(conn, client, cfg.get("store_code") or None,
-                              start, end, verbose=False)
-            conn.commit()
-        except (CbgAuthError, CbgError) as e:
-            return {"ok": False, "why": str(e) or "会话失效，先抓一次会话"}
-        except Exception as e:                                     # noqa: BLE001
-            return {"ok": False,
-                    "why": str(e) or ("%s: %s" % (type(e).__name__, e))}
+            day = str((body or {}).get("day") or "").strip()
+            try:
+                dt = datetime.datetime.strptime(day, "%Y-%m-%d")
+            except ValueError:
+                return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
+            day = dt.strftime("%Y-%m-%d")          # "2026-9-3" → "2026-09-03"
+            path = cashier_store.ensure(self.root)
+            cfg = config_io.load_raw(self.config_path)
+            start, end = _day_window(day)
+            conn = _dump.connect(path)
+            try:
+                conn.executescript(_dump.SCHEMA)
+                client = self.cbg_client()
+                _dump.load_orders(conn, client, cfg.get("store_code") or None,
+                                  start, end, verbose=False)
+                conn.commit()
+            except (CbgAuthError, CbgError) as e:
+                return {"ok": False, "why": str(e) or "会话失效，先抓一次会话"}
+            except Exception as e:                                 # noqa: BLE001
+                return {"ok": False,
+                        "why": str(e) or type(e).__name__}
+            finally:
+                conn.close()
+            return cashier_store.entries_from_orders(self.root, day)
         finally:
-            conn.close()
-        return cashier_store.entries_from_orders(self.root, day)
+            self._cashier_import_lock.release()
 
     def cashier_exclude(self, entry_id) -> dict:
         from .features.cashier import store as cashier_store
-        return cashier_store.exclude_entry(self.root, entry_id)
+        try:
+            return cashier_store.exclude_entry(self.root, entry_id)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": str(e) or type(e).__name__}
 
     def cashier_import_settings(self, body: dict = None, save: bool = False) -> dict:
         """黑名单读写。⚠ save 失败要转 {ok:False, why} —— import_cfg.save

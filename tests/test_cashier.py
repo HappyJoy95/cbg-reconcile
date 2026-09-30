@@ -778,6 +778,31 @@ class Test导入接口(_RootCase):
         self.assertEqual(st, 400)
         self.assertIn("日期", d.get("error", ""))
 
+    def test_导入并发点第二次劝退_跑完锁要释放(self):
+        """⚠ 类锁没释放 = 一次失败**永久卡死**（再点永远"正在导入"）。"""
+        lock = web.App._cashier_import_lock
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            st, d = self.srv.request("POST", "/api/cashier/import",
+                                     {"day": "2026-09-30"})
+            self.assertEqual(st, 400)
+            self.assertIn("正在导入", d.get("error", ""))
+        finally:
+            lock.release()
+        # 上一次（含失败路径）跑完后锁要能再进 —— 坏日期走完整条真路径后释放
+        st, d = self.srv.request("POST", "/api/cashier/import", {"day": "bad"})
+        self.assertEqual((st, "日期" in d.get("error", "")), (400, True))
+        self.assertTrue(lock.acquire(blocking=False), "跑完没释放 = 永久卡死")
+        lock.release()
+
+    def test_黑名单保存写失败_人话不500(self):
+        with mock.patch("src.features.cashier.import_cfg.save",
+                        side_effect=OSError("磁盘满")):
+            st, d = self.srv.request("PUT", "/api/cashier/import-settings",
+                                     {"blacklist": ["x"]})
+        self.assertEqual(st, 400)
+        self.assertIn("写不进去", d["error"])
+
     def test_排除接口_软排除走通(self):
         store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
                                      "amount": 1, "source": "linglong"})
