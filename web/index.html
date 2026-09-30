@@ -26,7 +26,7 @@
 <link rel="stylesheet" href="/themes/taotu.css?v=135">
 <link rel="stylesheet" href="/themes/dianye.css?v=135">
 <link rel="stylesheet" href="/themes/photo.css?v=136">
-<link rel="stylesheet" href="/style.css?v=147">
+<link rel="stylesheet" href="/style.css?v=152">
 <link rel="stylesheet" href="/inventory/style.css?v=136">
 <link rel="stylesheet" href="/gomoku/style.css?v=1">
 </head>
@@ -225,7 +225,8 @@
     </div>
   </div>
   <!-- ⚠ 分销（2.3.0，2026-09-29）：渠道分销部的分销单四张看板。
-       **可见性不写在这儿** —— 注册表 `Feature.types="multi"` 派生（区长/平台），
+       **可见性不写在这儿** —— 注册表 `Feature.types="platform"` 派生
+       （**仅平台岗**；2026-09-30 从 `multi`（区长/平台）收紧 —— 区长也看不见），
        接口 `/api/dist/*` 另有一道 403（坑 18：藏菜单不算权限）。
        数据是**手动选时间段现拉**的（`out/distribution.db`），没有定时步骤。 -->
   <div class="nav-item" data-tab="distribution">
@@ -1968,6 +1969,26 @@
      光在设置页列出来没用（门店不会主动去点），所以主动弹一次 + 一键处理。
      ⚠ 顺序是「**先建新的、建成了再删老的**」（`src/schedule.replace_legacy`）——
      反过来的话中间失败会落到"门店再也不会自动跑"，而**当天没人会发现**。 -->
+<!-- 增值两页 · 明细下钻（2026-09-29）：点门店行上**每个能下钻的数字**弹出来的
+     （新机 / 贴膜达成 / 礼包达成 / 无忧 / Care+ / 各份毛利·利润）。
+     ⚠ 形态选**弹窗**而不是行下展开：两张都是宽表 + rowspan（区域/赛道合并格），
+       插行要把 rowspan 重算一遍，而防护膜页门店行还占着「拆到人」那个展开。 -->
+<div class="modal-mask" id="drill-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="drill-title"
+       style="max-width:min(1040px,96vw);width:1040px">
+    <div class="modal-head">
+      <h2><span id="drill-title">销售明细</span> <span class="hint" id="drill-sub"></span></h2>
+    </div>
+    <div class="modal-body" style="max-height:70vh;overflow:auto">
+      <div id="drill-body">加载中…</div>
+      <div class="hint" id="drill-legend" style="margin-top:8px"></div>
+    </div>
+    <div class="modal-foot">
+      <span class="hint" id="drill-sum"></span>
+      <button type="button" class="btn ghost" id="drill-close">关闭</button>
+    </div>
+  </div>
+</div>
 <div class="modal-mask" id="claim-acts-mask" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="claim-acts-title"
        style="max-width:min(960px,94vw);width:960px">
@@ -2082,6 +2103,6 @@
 <!-- ⚠ `?v=` 里那个数字不是装饰：前端**没有构建步骤**，浏览器对 .js/.css 会有内存缓存。
      每次改动前端资源就 +1。game.js 必须在 app.js **之前**（连点时要 mountGomoku）。 -->
 <script src="/gomoku/game.js?v=1"></script>
-<script src="/app.js?v=175"></script>
+<script src="/app.js?v=178"></script>
 </body>
 </html>

@@ -6,7 +6,8 @@
 1. 只算 `门店=渠道分销部` 且 单据类型 ∈ {分销, 分销退}，**净额**；
 2. 区域识别：备注关键词 → 客户映射 → 待确认，**⛔ 不用门店名兜底**；
 3. 手动确认**按客户落盘**（跨时段沿用）、可改可重置；
-4. `types="multi"`（区长/平台），`/api/dist/*` 对门店 **403**（坑 18）。
+4. `types="platform"`（**仅平台岗**，2026-09-30 从 `multi` 收紧），
+   `/api/dist/*` 对区长/门店 **403**（坑 18）；`field/value` 下钻走白名单。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from http.client import HTTPConnection
+from urllib.parse import quote
 from pathlib import Path
 from threading import Thread
 from unittest import mock
@@ -49,7 +51,9 @@ class Test注册接入(unittest.TestCase):
         f = [x for x in ALL if x.key == "distribution"]
         self.assertEqual(len(f), 1, "ALL 里要有 distribution（唯一注册动作）")
         f = f[0]
-        self.assertEqual(f.types, "multi", "只给区长/平台（用户拍板）")
+        self.assertEqual(f.types, "platform",
+                         "仅平台岗（用户 2026-09-30：「分销仅平台岗可见」）"
+                         "—— ⚠ 别写回 multi，那个口径连区长都放行")
         self.assertEqual([s.key for s in f.children],
                          ["dist-region", "dist-model", "dist-salesman", "dist-detail"])
         self.assertEqual(f.steps(), [], "手动选时间段现拉 —— 不注册定时步骤")
@@ -57,15 +61,36 @@ class Test注册接入(unittest.TestCase):
     def test_页面可见性从注册表派生(self):
         for key in ("distribution", "dist-region", "dist-model",
                     "dist-salesman", "dist-detail"):
-            self.assertEqual(web.PAGE_RULES.get(key), "multi",
-                             "%s 应该派生成 multi" % key)
+            self.assertEqual(web.PAGE_RULES.get(key), "platform",
+                             "%s 应该派生成 platform（仅平台岗）" % key)
 
     def test_可见性口径跟can_for一致(self):
-        """`can` 是写操作的判据，`not is_store` 必须跟页面 `multi` 同口径。"""
+        """`can` 是写操作的判据，必须跟页面 `platform` 同口径 ——
+        三档身份里**只有平台岗**拿到 True（2026-09-30 从 `not is_store` 收紧）。"""
         self.assertTrue(web._can_for(web.ROLE_PLATFORM)["dist.write"])
-        self.assertTrue(web._can_for(web.ROLE_MANAGER)["dist.export"])
-        self.assertFalse(web._can_for(web.ROLE_STORE)["dist.write"])
-        self.assertFalse(web._can_for(web.ROLE_STORE)["dist.export"])
+        self.assertTrue(web._can_for(web.ROLE_PLATFORM)["dist.export"])
+        for role in (web.ROLE_MANAGER, web.ROLE_STORE):
+            with self.subTest(role=role):
+                self.assertFalse(web._can_for(role)["dist.write"],
+                                 "%s 不该能拉取/改区" % role)
+                self.assertFalse(web._can_for(role)["dist.export"])
+
+    def test_三种身份的菜单只有平台岗有分销(self):
+        """`pages_for` 是前端渲染菜单的**唯一来源** —— 区长连那一行都不该有。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        cases = [
+            (web.ROLE_PLATFORM, "有", True),
+            (web.ROLE_MANAGER, "没有", False),
+            (web.ROLE_STORE, "没有", False),
+        ]
+        for role, word, want in cases:
+            sc = {"role": role,
+                  "stores": None if role == web.ROLE_PLATFORM else {"青岛城阳万达店"}}
+            with self.subTest(role=role):
+                got = "distribution" in web.pages_for(sc, root=root)
+                self.assertEqual(got, want, "%s 的菜单该%s分销" % (role, word))
 
 
 class Test区域识别(unittest.TestCase):
@@ -448,11 +473,23 @@ class Test接口门禁(unittest.TestCase):
         self.assertTrue(d.get("ok"))
         self.assertEqual(d.get("store"), dist.TARGET_STORE)
 
-    def test_区长_看板能读(self):
+    def test_区长_看板403_仅平台岗(self):
+        """⚠ 2026-09-30 口径变更：原来 `types="multi"` 区长能读（这条测试当时是
+        `assertEqual(200)`），用户复核「**分销仅平台岗可见**」⇒ 区长一并拦。
+        菜单藏了不算数 —— 这道统一 403 才是真闸门（坑 18）。"""
         self._as(account="SL15763940156", who="杨英梅")
-        code, d = self.srv.request("GET", "/api/dist/board?kind=salesman")
-        self.assertEqual(code, 200, d)
-        self.assertIn("board", d)
+        for method, path, body in (
+                ("GET", "/api/dist/board?kind=salesman", None),
+                ("GET", "/api/dist/detail", None),
+                ("GET", "/api/dist/map", None),
+                ("POST", "/api/dist/fetch",
+                 {"start": "2026-09-01", "end": "2026-09-10"}),
+                ("POST", "/api/dist/zone", {"customer": "x", "zone": "城阳"}),
+                ("POST", "/api/dist/export", {})):
+            with self.subTest(path=path):
+                code, d = self.srv.request(method, path, body)
+                self.assertEqual(code, 403, "%s 区长不该进来：%s" % (path, d))
+                self.assertTrue(d.get("forbidden"))
 
     def test_平台_改区标落盘(self):
         self._as(account="someone-else", platform=True)
@@ -461,6 +498,96 @@ class Test接口门禁(unittest.TestCase):
         self.assertEqual(code, 200, d)
         self.assertTrue(d.get("ok"))
         self.assertEqual(dist_store.map_all(self.root), {"青岛某电子": "崂山"})
+
+    # ------------------------------------------------ 明细下钻（2026-09-30）
+
+    def _seed(self):
+        """4 行分销单：Mate XT2 含**退货**（负金额）、一行空店员 —— 下钻对账都用它。"""
+        rows = [
+            _row(单号="M1", 三级分类="Mate XT2", 商品名称="Mate XT2 曜黑",
+                 金额="1000", 支付时间="2026-09-05 10:00:00"),
+            _row(单号="M2", 三级分类="Mate XT2", 商品名称="Mate XT2 金色",
+                 单据类型="分销退", 金额="-200", 支付时间="2026-09-06 11:00:00"),
+            _row(单号="N1", 三级分类="nova 13", 商品名称="nova 13",
+                 金额="500", 店员="李四", 支付时间="2026-09-07 12:00:00"),
+            _row(单号="P1", 一级分类="配件", 三级分类="Pura 80",
+                 金额="80", 店员="", 支付时间="2026-09-08 13:00:00"),
+        ]
+        dist_store.replace_range(self.root, datetime.date(2026, 9, 1),
+                                 datetime.date(2026, 9, 10), rows)
+
+    def _detail(self, **params):
+        q = {"start": "2026-09-01", "end": "2026-09-10"}
+        q.update(params)
+        path = "/api/dist/detail?" + "&".join(
+            "%s=%s" % (k, quote(str(v), safe="")) for k, v in q.items())
+        return self.srv.request("GET", path)
+
+    def test_机型行点开_只回那一档的销售单(self):
+        self._as(account="someone-else", platform=True)
+        self._seed()
+        code, d = self._detail(field="三级分类", value="Mate XT2")
+        self.assertEqual(code, 200, d)
+        self.assertEqual({r["单号"] for r in d["rows"]}, {"M1", "M2"},
+                         "Mate XT2 那两行（含退货）")
+        self.assertEqual(d["drill"], {"三级分类": "Mate XT2"})
+
+    def test_两级筛_店员再按品类(self):
+        """销售员 → 品类 → 销售单：`field=店员` + `field2=一级分类`。"""
+        self._as(account="someone-else", platform=True)
+        self._seed()
+        code, d = self._detail(field="店员", value="张三",
+                               field2="一级分类", value2="手机")
+        self.assertEqual(code, 200, d)
+        self.assertEqual({r["单号"] for r in d["rows"]}, {"M1", "M2"})
+        code, d2 = self._detail(field="店员", value="李四",
+                                field2="一级分类", value2="手机")
+        self.assertEqual({r["单号"] for r in d2["rows"]}, {"N1"})
+
+    def test_白名单外的列_400不是静默给全表(self):
+        """前端拼错列名得看得见 —— 静默回全表的话「点开是全部行」没人查得出来。"""
+        self._as(account="someone-else", platform=True)
+        self._seed()
+        code, d = self._detail(field="金额", value="1000")
+        self.assertEqual(code, 400, d)
+        self.assertIn("不能按这一列", d.get("error", ""))
+
+    def test_只给一半参数_400(self):
+        self._as(account="someone-else", platform=True)
+        code, d = self._detail(field="店员")
+        self.assertEqual(code, 400, d)
+        self.assertIn("一起给", d.get("error", ""))
+
+    def test_空店员的占位名点得开(self):
+        """看板上空店员显示「（无店员）」—— 那一行点开不能是 0 行。"""
+        self._as(account="someone-else", platform=True)
+        self._seed()
+        code, d = self._detail(field="店员", value="（无店员）")
+        self.assertEqual(code, 200, d)
+        self.assertEqual({r["单号"] for r in d["rows"]}, {"P1"})
+
+    def test_明细合计等于看板那一档_含退货(self):
+        """⚠ 下钻跟看板必须**同口径** —— 明细加出来 ≠ 页面那个数就是 bug。"""
+        self._as(account="someone-else", platform=True)
+        self._seed()
+        code, board = self.srv.request(
+            "GET", "/api/dist/board?kind=model&start=2026-09-01&end=2026-09-10")
+        self.assertEqual(code, 200, board)
+        hit = {r["key"]: r for r in board["board"]["cat3"]}["Mate XT2"]
+        code, d = self._detail(field="三级分类", value="Mate XT2")
+        self.assertEqual(code, 200, d)
+        got = sum(float(r["金额"] or 0) for r in d["rows"])
+        self.assertAlmostEqual(got, hit["amount"], places=6,
+                               msg="明细合计要等于看板那一档（1000−200=800）")
+        self.assertAlmostEqual(hit["amount"], 800.0, places=6,
+                               msg="退货要冲减（1000−200=800）")
+
+    def test_区长照样403_下钻也不能绕过(self):
+        """下钻走的是同一道统一门 —— 区长连明细都拿不到。"""
+        self._as(account="SL15763940156", who="杨英梅")
+        code, d = self._detail(field="三级分类", value="Mate XT2")
+        self.assertEqual(code, 403, d)
+        self.assertTrue(d.get("forbidden"))
 
     def test_不认识的分销接口_404(self):
         self._as(account="someone-else", platform=True)
@@ -482,6 +609,31 @@ class Test日期区间(unittest.TestCase):
             {"start": ["2026-99-99"], "end": [""]}, default_days=5)
         self.assertIn("格式", note)
         self.assertEqual((end - start).days, 4)
+
+
+class Test下钻前端接线(unittest.TestCase):
+    """点开这件事漏了接线 = 「点了没反应」—— 这个项目最怕的失败。"""
+
+    APP = (ROOT_DIR / "web" / "app.js").read_text(encoding="utf-8")
+    CSS = (ROOT_DIR / "web" / "style.css").read_text(encoding="utf-8")
+
+    def test_属性_函数_样式都在(self):
+        for needle in ("data-dist-key", "distDrillToggle", "distMixTable",
+                       "distDrillTable", "distDrillRows.clear()"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.APP, "app.js 缺 " + needle)
+        self.assertIn(".dist-drill-open", self.CSS, "可点的那格要看得出来")
+
+    def test_机型两张表把筛的列名传下去了(self):
+        """后端按列名筛 —— 传错列名会 400，所以两处调用必须点名。"""
+        self.assertIn("distCatTable(b.cat1, '一级分类')", self.APP)
+        self.assertIn("distCatTable(b.cat3, '三级分类')", self.APP)
+
+    def test_换区间要清下钻缓存(self):
+        """不清的话新窗口点开的是旧窗口那批行（静默给错数据）。"""
+        i = self.APP.index("async function loadDistBoard(")
+        blk = self.APP[i:i + 700]
+        self.assertIn("distDrillRows.clear()", blk)
 
 
 if __name__ == "__main__":

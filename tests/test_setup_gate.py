@@ -757,14 +757,18 @@ class Test前端接线(unittest.TestCase):
         self.assertIn("Math.trunc", blk,
                       "benefitInt 必须是截断（整数部分），不能四舍五入")
         # 门店表：三列点名的都要走 int
+        # ⚠ 「新机」那格 2026-09-29 起**可下钻**（`dnum`）—— 但格式不能变：
+        #   门店行走 `benefitInt`、小计/合计行走 `benefitCell(v,'int')`，两头都截断。
         j = self.js.index("function renderBenefitStores(")
         stores = self.js[j:self.js.index("\n}\n", j)]
         for call in ("benefitCell(r.day_target, 'int')",
                      "benefitCell(r.slot_progress, 'int')",
-                     "benefitCell(r.new, 'int')"):
+                     "dnum('new', r.new, 'int')"):
             with self.subTest(call=call):
                 self.assertIn(call, stores,
                               "台量目标/台量进度/新机 要走整数格式：%s" % call)
+        self.assertIn("kind2 === 'int' ? benefitInt(val)", self.js,
+                      "可下钻的格也必须走 benefitInt（截断），别退化成 benefitNum")
         # 区域表 / 人表的新机同源 —— 显示要一致
         jr = self.js.index("function renderBenefitRegions(")
         regions = self.js[jr:self.js.index("\n}\n", jr)]

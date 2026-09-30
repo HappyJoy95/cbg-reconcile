@@ -250,37 +250,31 @@ class Test系统人店表(unittest.TestCase):
         self.assertIn("erp_sales", src)
 
 
-class Test新机口径(unittest.TestCase):
-    """新机 = **手机零售净 + 美团/抖音转线上**，普通批发分销**不算新机**。
+class _BenefitDbCase:
+    """脚手架（**故意不继承 `unittest.TestCase`** —— 继承了会被整个跑一遍）：
 
-    用户 2026-09-26 拍板：「新机的数据来源按照我刚才跟你说的来就行」——
-    即源表口径 (134+16)×0.9 里的 134=手机零售净、16=美团转线上（万达实数）。
-    ⚠ 修前 bug：`compute` 对手机行**不分单据类型全算**（含京东/天猫等普通分销），
-    万达 194 vs 文档口径 181。
-    ⚠ 判「美团/抖音」要同时看**客户/顾客字段**：万达备注含美团=0 台、
-    客户=美团外卖=16 台 —— 只看备注会把转线上全漏掉。
+    建一张带 `单号` 的 `erp_sales` 临时库 → 打掉 `find_db` / `load_people`
+    （名册走系统人店表会联网，集成测试一律 patch）→ 算一遍。
+    `Test新机口径` 和 `Test新机明细下钻` 共用它，免得两份 fixture 走散。
     """
 
     STORE = "青岛城阳万达店"
 
-    def _compute(self, rows, day=None):
-        import datetime
+    def _build(self, rows, store=None):
         import sqlite3
-        import tempfile
-        from pathlib import Path
-        from src.features.valueadd.benefit import compute as bcomp
-        day = day or datetime.date(2026, 9, 26)
+        store = store or self.STORE
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         path = Path(tmp.name)
         conn = sqlite3.connect(path)
+        # ⚠ `单号` 在列里 —— 明细下钻要列销售单号（老库缺列走 `'' AS 单号` 兜底）
         conn.execute(
-            "CREATE TABLE erp_sales (门店 TEXT, 店员 TEXT, 单据类型 TEXT,"
+            "CREATE TABLE erp_sales (单号 TEXT, 门店 TEXT, 店员 TEXT, 单据类型 TEXT,"
             " 商品名称 TEXT, 一级分类 TEXT, 二级分类 TEXT, 数量 REAL,"
             " 零售考核毛利 REAL, 支付时间 TEXT, 备注 TEXT, 单行备注 TEXT,"
             " \"客户/顾客\" TEXT, 串号标识 TEXT)")
         for d in rows:
-            base = {"门店": self.STORE, "店员": "张三", "单据类型": "零售",
+            base = {"单号": "", "门店": store, "店员": "张三", "单据类型": "零售",
                     "商品名称": "智能手机/华为/nova 16", "一级分类": "手机",
                     "二级分类": "手机", "数量": 1, "零售考核毛利": 0,
                     "支付时间": "2026-09-12 10:00:00", "备注": "", "单行备注": "",
@@ -293,7 +287,10 @@ class Test新机口径(unittest.TestCase):
                          [base[k] for k in ks])
         conn.commit()
         conn.close()
+        return path
 
+    def _patch(self, path):
+        from src.features.valueadd.benefit import compute as bcomp
         swaps = [(bcomp, "find_db", lambda root=None: path),
                  (bcomp, "load_people", lambda *a, **k: ({}, "empty", ""))]
         olds = [(mm, nn, getattr(mm, nn)) for mm, nn, _ in swaps]
@@ -302,7 +299,28 @@ class Test新机口径(unittest.TestCase):
         self.addCleanup(lambda: [setattr(mm, nn, o) for mm, nn, o in olds])
         bcomp._CACHE.clear()
         self.addCleanup(bcomp._CACHE.clear)
+        return bcomp
+
+    def _compute(self, rows, day=None):
+        import datetime
+        from src.features.valueadd.benefit import compute as bcomp
+        day = day or datetime.date(2026, 9, 26)
+        self._patch(self._build(rows))
         return bcomp.compute(stores=[self.STORE], day=day)
+
+
+class Test新机口径(_BenefitDbCase, unittest.TestCase):
+    """新机 = **手机零售净 + 美团/抖音转线上**，普通批发分销**不算新机**。
+
+    用户 2026-09-26 拍板：「新机的数据来源按照我刚才跟你说的来就行」——
+    即源表口径 (134+16)×0.9 里的 134=手机零售净、16=美团转线上（万达实数）。
+    ⚠ 修前 bug：`compute` 对手机行**不分单据类型全算**（含京东/天猫等普通分销），
+    万达 194 vs 文档口径 181。
+    ⚠ 判「美团/抖音」要同时看**客户/顾客字段**：万达备注含美团=0 台、
+    客户=美团外卖=16 台 —— 只看备注会把转线上全漏掉。
+    """
+
+    STORE = "青岛城阳万达店"
 
     def test日期窗口_看上月全月(self):
         """**日期窗口**（2026-09-29 用户：「每月 1 号手动拉上个月全月」）——
@@ -432,6 +450,136 @@ class Test新机口径(unittest.TestCase):
         # 利润合计跟着 care_profit 走（这批行没有无忧/权益利润）
         self.assertAlmostEqual(st["profit_total"], 69, places=6,
                                msg="利润合计 = 权益利润 + Care+利润 + 无忧利润")
+
+
+class Test明细下钻(_BenefitDbCase, unittest.TestCase):
+    """点门店行上**每个能下钻的数字**弹出来的明细 —— 合计必须等于页面那个数。
+
+    用户 2026-09-29：「每个门店新机销量那个数字，点开要有纳入统计的门店对应的
+    销售单号、商品名称和数量，以及销售时间，包含退货。」
+    同日追加：「几个具体达成的，点开也显示一下对应的销售单据？」+「金额类也一起做」
+    +「带上毛利吧」。
+    ⚠ 最要紧的一条：明细走 `row_kind()`、页面也走它 —— 判据写两份就会
+      「页面 2 台、明细加出来 3 台」，而这种不一致没人报、只会被业务抓包。
+    """
+
+    def _detail_pair(self, rows, store=None, day=None):
+        """同一份库上算 **页面** 和 **明细** —— 两边必须对得上。"""
+        import datetime
+        from src.features.valueadd.benefit import compute as bcomp
+        day = day or datetime.date(2026, 9, 26)
+        self._patch(self._build(rows, store=store))
+        d = bcomp.compute(stores=[store or self.STORE], day=day)
+        det = bcomp.drill_rows(store=store or self.STORE, kind="new", day=day)
+        return d, det
+
+    def test明细合计等于页面新机数(self):
+        rows = [
+            {"单号": "A1"},                                          # 零售 +1
+            {"单号": "R1", "单据类型": "零售退", "数量": -1,
+             "支付时间": "2026-09-13 09:00:00"},                      # 退货 −1
+            {"单号": "M1", "单据类型": "分销", "数量": 2, "备注": "美团线上下单",
+             "支付时间": "2026-09-14 10:00:00"},                      # 转线上 +2
+            {"单号": "J1", "单据类型": "分销", "备注": "9.13京东国补订单",
+             "客户/顾客": "京东到家", "支付时间": "2026-09-15 10:00:00"},   # 不算
+            {"单号": "D1", "商品名称": "智能手机/华为/Pura 80-演示机",
+             "支付时间": "2026-09-16 10:00:00"},                      # 演示机不算
+        ]
+        d, det = self._detail_pair(rows)
+        st = d["stores"][0]
+        self.assertAlmostEqual(det["total"], st["new"], places=6,
+                               msg="明细合计必须等于页面「新机」——同一个 new_bucket")
+        self.assertAlmostEqual(det["shown"], st["new"], places=6,
+                               msg="权益页不乘 0.9，shown 就是页面数")
+        self.assertEqual(det["factor"], 1.0)
+        nos = {r["no"] for r in det["rows"]}
+        self.assertEqual(nos, {"A1", "R1", "M1"},
+                         "京东分销 / 演示机不该出现在明细里（页面也没算它们）")
+        ret = [r for r in det["rows"] if r["no"] == "R1"][0]
+        self.assertEqual(ret["qty"], -1, "退货行要进来（负数），合计里已冲减")
+        self.assertEqual(ret["typ"], "零售退", "单据类型让退货一眼看得见")
+        self.assertEqual(ret["ts"], "2026-09-13 09:00:00")
+        self.assertTrue(ret["name"], "商品名称要带上")
+
+    def test只回本店的单(self):
+        import datetime
+        rows = [{"单号": "A1", "门店": "甲店"},
+                {"单号": "B1", "门店": "乙店"}]
+        from src.features.valueadd.benefit import compute as bcomp
+        self._patch(self._build(rows, store="甲店"))
+        day = datetime.date(2026, 9, 26)
+        det_a = bcomp.drill_rows(store="甲店", kind="new", day=day)
+        det_b = bcomp.drill_rows(store="乙店", kind="new", day=day)
+        self.assertEqual({r["no"] for r in det_a["rows"]}, {"A1"})
+        self.assertEqual({r["no"] for r in det_b["rows"]}, {"B1"},
+                         "查乙店只能拿到乙店的单 —— 别把别家的销售单摊出来")
+
+    def test没给门店就报错不是空成功(self):
+        """空店名 = 「没指定门店」—— **不许当成"随便哪家"去查**（坑同类）。"""
+        import datetime
+        from src.features.valueadd.benefit import compute as bcomp
+        self._patch(self._build([{"单号": "A1"}]))
+        d = bcomp.drill_rows(store="", kind="new", day=datetime.date(2026, 9, 26))
+        self.assertFalse(d.get("ok"))
+        self.assertIn("门店", d.get("why") or "")
+
+
+    def test_不认识的指标回错不是空成功(self):
+        """`kind` 打错 → 400 那条路的源头：**别默默回一张空表**。"""
+        from src.features.valueadd.benefit import compute as bcomp
+        self._patch(self._build([{"单号": "A1"}]))
+        d = bcomp.drill_rows(store=self.STORE, kind="nope")
+        self.assertFalse(d.get("ok"))
+        self.assertIn("指标", d.get("why") or "")
+
+    def test_达成与利润那些格的明细也对得上(self):
+        """用户 2026-09-29：「几个具体达成的，点开也显示一下对应的销售单据」
+        +「金额类也一起做」+「带上毛利吧」。
+
+        ⚠ 关键那条：**Care+ 件数认全部延保行、利润只认 `care_profit_ok` 的行** ——
+          页面本来就这么算的；金额类明细不按这个收，毛利合计就会跟页面对不上。
+        """
+        import datetime
+        from src.features.valueadd.benefit import compute as bcomp
+        day = datetime.date(2026, 9, 26)
+        rows = [
+            {"单号": "W1", "一级分类": "会员", "二级分类": "会员",
+             "商品名称": "无忧会员 优选版本-二年299元（新）", "数量": 1,
+             "零售考核毛利": 100, "支付时间": "2026-09-10 10:00:00"},
+            {"单号": "C1", "一级分类": "手机平板周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/华为/nova 16/HUAWEI Care+(一年期)", "数量": 1,
+             "零售考核毛利": 69, "支付时间": "2026-09-11 10:00:00"},
+            {"单号": "C2", "一级分类": "手机平板周边", "二级分类": "延保服务",
+             "商品名称": "延保服务/Mate XT 2 | ULTIMATE DESIGN HUAWEI Care+(一年期)",
+             "数量": 1, "零售考核毛利": 899, "支付时间": "2026-09-12 10:00:00"},
+            {"单号": "A1", "支付时间": "2026-09-13 10:00:00"},   # 新机，不该混进来
+        ]
+        self._patch(self._build(rows))
+        d = bcomp.compute(stores=[self.STORE], day=day)
+        st = d["stores"][0]
+        cases = [
+            ("wuyou", st["wuyou"], {"W1"}),
+            ("care", st["care"], {"C1", "C2"}),
+            ("total", st["total"], {"W1", "C1", "C2"}),
+            ("tier_profit", st["tier_profit"], {"W1"}),
+            ("care_profit", st["care_profit"], {"C1"}),
+        ]
+        for kind, want, nos in cases:
+            det = bcomp.drill_rows(store=self.STORE, kind=kind, day=day)
+            self.assertTrue(det["ok"], (kind, det))
+            self.assertAlmostEqual(det["total"], want, places=6,
+                                   msg="kind=%s 的合计要等于页面那一格" % kind)
+            self.assertEqual({r["no"] for r in det["rows"]}, nos, kind)
+            for r in det["rows"]:
+                self.assertIn("profit", r, "明细行要带毛利列（用户：带上毛利吧）")
+        self.assertEqual(st["care"], 2, "件数认全部延保服务行")
+        self.assertAlmostEqual(st["care_profit"], 69, places=6,
+                               msg="利润只认「含 Care+ 且含 /华为/」的行 —— C2 不算")
+        # ⚠ 「利润合计」**故意不可下钻**：它是 后返+权益利润+Care+利润，
+        #   后返是台数×单价（这里 100）不是毛利 —— 硬做会 269≠169 对不上。
+        self.assertNotIn("profit_total", bcomp.DRILL_KINDS)
+        self.assertAlmostEqual(st["profit_total"], 269, places=6,
+                               msg="100 后返 + 100 权益 + 69 Care+（它含后返）")
 
 
 if __name__ == "__main__":

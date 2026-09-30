@@ -1186,6 +1186,11 @@ body.setup-locked .shell { visibility: hidden; }
 .nav-item[data-tab="valueadd"].open .nav-menu { height: 109px; }
 .nav-item[data-tab="tools"]:hover .nav-menu,
 .nav-item[data-tab="tools"].open .nav-menu { height: 146px; }
+/* ⚠ 分销 4 个二级项（2026-09-29 加的）—— **忘了写这条**就落默认 109px：
+   4 项塞不进去，flex 默认 `shrink:1` 会把每行压到 ~26px ⇒ 用户看到的是
+   「二级标签间隔有点近」（不是 gap 的事，是**高度不够被压扁**）。 */
+.nav-item[data-tab="distribution"]:hover .nav-menu,
+.nav-item[data-tab="distribution"].open .nav-menu { height: 146px; }
 .nav-menu .subtab {
   width: 100%; text-align: left; border: 0; background: none;
   border-radius: 8px;
@@ -1496,6 +1501,24 @@ tr:hover .row-mover, .row-mover:focus-within { opacity: 1; }
 /* 点门店拆到人：店名可点 + 人行缩进（跟 plan / attain 同一套视觉） */
 .film-store-open { cursor: pointer; }
 .film-store-open:hover { color: var(--brand); background: var(--hover); }
+
+/* 新机明细下钻（2026-09-29）：门店行那格数字可点 + 明细里的退货行。
+   ⚠ 可点就给**指针 + hover**（跟 `.film-store-open` 同一套视觉语言），
+     否则没人知道这格能点 —— 「可点」必须看得出来。 */
+.drill { cursor: pointer; }
+.drill:hover { color: var(--brand); background: var(--hover); text-decoration: underline; }
+.drill-neg { color: var(--bad); font-weight: 600; }
+
+/* 明细弹窗里那张表：**6 列要一屏放得下** —— 销售时间被横向切掉的话，
+   点开就白点了（那正是这次要给的东西）。所以定死列宽、商品名称吃剩余宽度：
+   超长省略（`title` 看全文），别的列一个都不许出滚动条。 */
+#drill-body .film-table { table-layout: fixed; }
+#drill-body th:nth-child(1), #drill-body td:nth-child(1) { width: 152px; }
+#drill-body th:nth-child(2), #drill-body td:nth-child(2) { width: 74px; }
+#drill-body th:nth-child(4), #drill-body td:nth-child(4) { width: 56px; }
+#drill-body th:nth-child(5), #drill-body td:nth-child(5) { width: 140px; }
+#drill-body th:nth-child(6), #drill-body td:nth-child(6) { width: 84px; }
+#drill-body td:nth-child(3) { overflow: hidden; text-overflow: ellipsis; }
 .film-table tr.film-person td { background: var(--row-alt); color: var(--muted); font-weight: 500; }
 .film-table tr.film-person td:first-child { padding-left: 22px; }
 /* 率类标色必须盖过人行灰底 —— 否则个人行没有粉/蓝（用户 2026-09-23） */
@@ -1867,3 +1890,22 @@ main.tools-frame-mode .subpanel.active {
 }
 .dist-unc summary:hover { color: var(--ink); }
 .dist-unc[open] summary { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+
+/* ── 分销 · 行内下钻（2026-09-30）：分类名 / 店员名可点，点开就地插一行明细。
+   ⚠ `span` 撑满整格（负 margin 吃掉 td 的 padding）—— 只让文字可点会让人
+     觉得"点这儿没反应"；caret 用 ::after，收/展不用改文本。 */
+.dist-drill-open {
+  display: block; margin: -8px -10px; padding: 8px 10px; cursor: pointer;
+}
+.dist-drill-open::after {
+  content: '▸'; margin-left: 6px; font-size: 10px; color: var(--muted);
+}
+.dist-drill-open.open::after { content: '▾'; }
+.dist-drill-open:hover { color: var(--brand); background: var(--hover); }
+.dist-drill-open.dist-loading { opacity: .6; pointer-events: none; }
+/* 展开出来的那一行：底色压暗一档，一眼分得出"这是明细、不是看板行" */
+tr.dist-drill > td { background: var(--row-alt); padding: 10px 12px; }
+tr.dist-drill table { font-size: 12.5px; }
+tr.dist-drill table th { background: transparent; }
+tr.dist-drill tbody tr:hover { background: transparent; }
+.dist-drill-neg { color: var(--bad); }

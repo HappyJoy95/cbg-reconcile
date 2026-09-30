@@ -65,15 +65,16 @@ class _FilmDbCase(unittest.TestCase):
         tmp.close()
         path = Path(tmp.name)
         conn = sqlite3.connect(path)
+        # ⚠ `单号` 在列里 —— 明细下钻要列销售单号（老库缺列走 `'' AS 单号` 兜底）
         if with_clerk:
             conn.execute(
-                "CREATE TABLE erp_sales (门店 TEXT, 单据类型 TEXT, 数量 REAL,"
+                "CREATE TABLE erp_sales (单号 TEXT, 门店 TEXT, 单据类型 TEXT, 数量 REAL,"
                 " 零售考核毛利 REAL, 一级分类 TEXT, 二级分类 TEXT, 商品名称 TEXT,"
                 " 备注 TEXT, 单行备注 TEXT, \"客户/顾客\" TEXT, 付款方式 TEXT,"
                 " 支付时间 TEXT, 店员 TEXT)")
         else:
             conn.execute(
-                "CREATE TABLE erp_sales (门店 TEXT, 单据类型 TEXT, 数量 REAL,"
+                "CREATE TABLE erp_sales (单号 TEXT, 门店 TEXT, 单据类型 TEXT, 数量 REAL,"
                 " 零售考核毛利 REAL, 一级分类 TEXT, 二级分类 TEXT, 商品名称 TEXT,"
                 " 备注 TEXT, 单行备注 TEXT, \"客户/顾客\" TEXT, 付款方式 TEXT,"
                 " 支付时间 TEXT)")
@@ -101,7 +102,7 @@ class _FilmDbCase(unittest.TestCase):
 
     @staticmethod
     def _sale(**over):
-        base = {"门店": "甲店", "店员": "张三", "单据类型": "零售", "数量": 1,
+        base = {"单号": "", "门店": "甲店", "店员": "张三", "单据类型": "零售", "数量": 1,
                 "零售考核毛利": 0, "一级分类": "手机", "二级分类": "手机",
                 "商品名称": "P", "备注": "", "单行备注": "", "客户/顾客": "",
                 "付款方式": "", "支付时间": "2026-09-10 10:00:00"}
@@ -161,6 +162,147 @@ class Test拆到人(_FilmDbCase):
         self.assertTrue(d.get("ok"), d)
         self.assertEqual([p["name"] for p in d["rows"][0]["people"]],
                          ["（没写店员）"])
+
+
+class Test明细下钻(_FilmDbCase):
+    """点门店行上**每个能下钻的数字**弹出来的明细 —— 合计必须等于页面那个数。
+
+    用户 2026-09-29：「每个门店新机销量那个数字，点开要有纳入统计的门店对应的
+    销售单号、商品名称和数量，以及销售时间，包含退货。」
+    同日追加：「几个具体达成的，点开也显示一下对应的销售单据？比如钢化膜的展示
+    钢化膜的销售单」+「金额类也一起做」+「带上毛利吧」。
+    ⚠ 最要紧的一条：明细和页面**共用 `row_kind()`** —— 判据写两份就会出现
+      「页面 3.6、明细加出来 4」，而这种不一致没人报、只会被业务抓包。
+    """
+
+    def test_明细合计乘折算等于页面新机(self):
+        day = datetime.date(2026, 9, 15)
+        rows = [
+            self._sale(单号="A1", 数量=3, 支付时间="2026-09-10 10:00:00"),   # 零售 +3
+            self._sale(单号="R1", 单据类型="零售退", 数量=-1,
+                       支付时间="2026-09-11 11:00:00"),                      # 退货 −1
+            self._sale(单号="M1", 单据类型="分销", 数量=2, 备注="美团线上下单",
+                       支付时间="2026-09-12 12:00:00"),                      # 美团 +2
+            self._sale(单号="J1", 单据类型="分销", 数量=5, 备注="9.13京东国补订单",
+                       支付时间="2026-09-13 13:00:00"),                      # 京东不算
+            self._sale(单号="F1", 一级分类="配件", 二级分类="贴膜",
+                       商品名称="钢化膜", 支付时间="2026-09-14 14:00:00"),   # 贴膜不算
+        ]
+        self._patch(self._db(rows))
+        d = film_compute.load(root=ROOT, stores=["甲店"], day=day, force=True)
+        det = film_compute.drill_rows(root=ROOT, store="甲店", kind="new", day=day)
+        st = d["rows"][0]
+        self.assertAlmostEqual(det["total"] * det["factor"], st["new"], places=6,
+                               msg="明细合计 ×0.9 必须等于页面「新机销售」")
+        self.assertAlmostEqual(det["shown"], st["new"], places=6)
+        self.assertEqual(det["factor"], film_metric.NEW_FACTOR)
+        nos = {r["no"] for r in det["rows"]}
+        self.assertEqual(nos, {"A1", "R1", "M1"},
+                         "京东分销 / 贴膜不该出现在明细里（页面也没算它们）")
+        ret = [r for r in det["rows"] if r["no"] == "R1"][0]
+        self.assertEqual(ret["qty"], -1, "退货行要进来（负数），合计里已冲减")
+        self.assertEqual(ret["typ"], "零售退", "单据类型让退货一眼看得见")
+        self.assertEqual(ret["ts"], "2026-09-11 11:00:00")
+        self.assertTrue(ret["name"], "商品名称要带上")
+
+    def test_只回本店的单(self):
+        day = datetime.date(2026, 9, 15)
+        rows = [self._sale(门店="甲店", 单号="A1"),
+                self._sale(门店="乙店", 单号="B1")]
+        self._patch(self._db(rows))
+        a = film_compute.drill_rows(root=ROOT, store="甲店", kind="new", day=day)
+        b = film_compute.drill_rows(root=ROOT, store="乙店", kind="new", day=day)
+        self.assertEqual({r["no"] for r in a["rows"]}, {"A1"})
+        self.assertEqual({r["no"] for r in b["rows"]}, {"B1"},
+                         "查乙店只能拿到乙店的单 —— 别把别家的销售单摊出来")
+
+    def test_老库没有单号列不炸(self):
+        """老库缺 `单号` → `'' AS 单号` 兜底，别让整条接口 `no such column`。"""
+        day = datetime.date(2026, 9, 15)
+        rows = [self._sale(数量=2)]
+        rows[0].pop("单号")
+        self._patch(self._db(rows))
+        det = film_compute.drill_rows(root=ROOT, store="甲店", kind="new", day=day)
+        self.assertTrue(det["ok"], det)
+        self.assertEqual(len(det["rows"]), 1)
+        self.assertEqual(det["rows"][0]["no"], "")
+
+    def test_没给门店就报错不是空成功(self):
+        self._patch(self._db([self._sale()]))
+        det = film_compute.drill_rows(root=ROOT, store="", kind="new", day=None)
+        self.assertFalse(det.get("ok"))
+        self.assertIn("门店", det.get("why") or "")
+
+    def test_不认识的指标回错不是空成功(self):
+        """`kind` 打错 → 400 那条路的源头：**别默默回一张空表**。"""
+        self._patch(self._db([self._sale()]))
+        det = film_compute.drill_rows(root=ROOT, store="甲店", kind="nope")
+        self.assertFalse(det.get("ok"))
+        self.assertIn("指标", det.get("why") or "")
+
+    def test_贴膜与礼包那些达成的明细也对得上(self):
+        """用户 2026-09-29：「几个具体达成的，点开也显示一下对应的销售单据？
+        比如钢化膜的展示钢化膜的销售单」+「金额类也一起做」。
+
+        ⚠ 一个 fixture 同时验**台数类**（达成 / 礼包达成）和**金额类**
+          （三份毛利）：金额类跟台数类常常是同一批行换个取值字段，
+          所以判据必须还是那一份 `row_kind()`。
+        """
+        day = datetime.date(2026, 9, 15)
+        rows = [
+            self._sale(单号="M1", 一级分类="配件", 二级分类="贴膜",
+                       商品名称="手机贴膜/华为/钢化膜", 数量=2, 零售考核毛利=40,
+                       支付时间="2026-09-10 10:00:00"),                # 贴膜 +2
+            self._sale(单号="M2", 一级分类="配件", 二级分类="贴膜",
+                       商品名称=film_metric.SOFT, 数量=3, 零售考核毛利=30,
+                       支付时间="2026-09-10 10:01:00"),                # 软膜 —— 页面剔
+            self._sale(单号="MR", 单据类型="零售退", 一级分类="配件",
+                       二级分类="贴膜", 商品名称="手机贴膜/华为/钢化膜",
+                       数量=-1, 零售考核毛利=-20,
+                       支付时间="2026-09-11 11:00:00"),                # 贴膜退货
+            self._sale(单号="G1", 一级分类="配件", 二级分类="礼包",
+                       商品名称="99元光固电镀膜礼包", 数量=1, 零售考核毛利=10,
+                       支付时间="2026-09-12 12:00:00"),                # 礼包 +1
+            self._sale(单号="A1", 支付时间="2026-09-13 13:00:00"),     # 新机，不该混进来
+        ]
+        self._patch(self._db(rows))
+        d = film_compute.load(root=ROOT, stores=["甲店"], day=day, force=True)
+        st = d["rows"][0]
+        cases = [
+            ("film", st["done"], {"M1", "MR"}),
+            ("gift", st["gift_done"], {"G1"}),
+            ("film_profit", st["film_profit"], {"M1", "MR"}),
+            ("gift_profit", st["gift_profit"], {"G1"}),
+            ("total_profit", st["total_profit"], {"M1", "MR", "G1"}),
+        ]
+        for kind, want, nos in cases:
+            det = film_compute.drill_rows(root=ROOT, store="甲店",
+                                          kind=kind, day=day)
+            self.assertTrue(det["ok"], (kind, det))
+            self.assertAlmostEqual(det["total"], want, places=6,
+                                   msg="kind=%s 的合计要等于页面那一格" % kind)
+            self.assertEqual({r["no"] for r in det["rows"]}, nos, kind)
+            for r in det["rows"]:
+                self.assertIn("profit", r, "明细行要带毛利列（用户：带上毛利吧）")
+                self.assertIn("qty", r)
+        self.assertAlmostEqual(st["done"], 1, places=6, msg="软膜剔掉、退货冲减 = 1")
+        self.assertAlmostEqual(st["total_profit"], 30, places=6,
+                               msg="40−20（贴膜）+10（礼包）= 30")
+
+    def test_贴膜明细只回贴膜行(self):
+        """钢化膜的展示钢化膜的销售单 —— 别把新机/礼包混进来。"""
+        day = datetime.date(2026, 9, 15)
+        rows = [
+            self._sale(单号="M1", 一级分类="配件", 二级分类="贴膜",
+                       商品名称="手机贴膜/华为/钢化膜"),
+            self._sale(单号="A1", 支付时间="2026-09-10 11:00:00"),
+        ]
+        self._patch(self._db(rows))
+        det = film_compute.drill_rows(root=ROOT, store="甲店", kind="film", day=day)
+        self.assertEqual({r["no"] for r in det["rows"]}, {"M1"})
+        self.assertEqual(det["label"], "达成（贴膜）")
+        self.assertEqual(det["unit"], "台")
+        self.assertEqual(det["field"], "qty")
 
 
 class Test口径(unittest.TestCase):

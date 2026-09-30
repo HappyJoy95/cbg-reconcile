@@ -197,9 +197,14 @@ class Test过渡动画(_Base):
         self.assertNotIn("translateY", nav)
 
     def test_每个一级标签的展开高度跟它的二级项数对上(self):
-        """⚠ 高度是**写死的**（两行 / 三行），写错就会"展开到一半被截掉"。
+        """⚠ 高度是**写死的**（按项数各一条），漏写/写错就会
+        「展开到一半被截掉」，或者更隐蔽的 —— **几行被 flex 压扁**：
+        用户看到的是「二级标签间隔有点近」，其实高度不够。
 
-        所以这条直接对着 HTML 数二级项：`--nav-h` 必须 = 项数 × 行高 + 间隙。
+        所以这条直接对着 HTML 数二级项：高度必须 = 项数 × 行高(35) + 间隙(2)。
+
+        ⚠ **扫全部 nav-item，不再手写名单** —— 2026-09-29 分销（4 项）就是
+        加进来时没进名单 ⇒ 落默认 109px、4 行挤在一起。新页不用记得补测试。
         """
         # ⚠ 切片要**限定在这一个 nav-item 里** —— 切到 `</nav>` 的话
         #   会把后面那个一级标签的二级项也数进来（第一版就这么算错了）。
@@ -214,17 +219,18 @@ class Test过渡动画(_Base):
 
         i = self.style.index("\n.nav-item:hover .nav-menu")
         blk = self.style[i:self.style.index("\n.nav-menu .subtab {", i)]
-        # sales 是**默认那条**（不带 [data-tab] 限定）；项数和它不一样的**每个都要单独写**
-        self.assertEqual(re.search(r"height: (\d+)px", blk).group(1), expected("sales"),
-                         "sales 的展开高度和它的二级项数对不上")
-        # ⚠ 逐个标签核对 —— 只盯 sales/compliance 会漏掉后来加的 1 项页
-        #   （2026-09-21 用户：「月度生意计划的二级标签空白的有点多」就是这么漏的）。
-        for tab in ("compliance", "plan", "inventory", "valueadd", "tools"):
+        # 默认那条（不带 [data-tab] 限定）—— 项数和它一样的页可以不单独写
+        default_h = re.search(r"height: (\d+)px", blk).group(1)
+        tabs = re.findall(r'class="nav-item" data-tab="([a-z-]+)"', self.html)
+        self.assertTrue(tabs, "一个 nav-item 都没扫到 —— HTML 结构或选择器变了？")
+        for tab in tabs:
             with self.subTest(tab=tab):
-                m = re.search(r'data-tab="%s"[^{]*\{[^}]*height: (\d+)px' % re.escape(tab), blk)
-                self.assertIsNotNone(m, "%s 没写自己的展开高度" % tab)
-                self.assertEqual(m.group(1), expected(tab),
-                                 "%s 的展开高度和它的二级项数对不上" % tab)
+                m = re.search(r'data-tab="%s"[^{]*\{[^}]*height: (\d+)px'
+                              % re.escape(tab), blk)
+                h = m.group(1) if m else default_h      # 没写自己的 ⇒ 吃默认那条
+                self.assertEqual(h, expected(tab),
+                                 "%s 的展开高度和它的二级项数对不上（%s 项 = %spx）"
+                                 % (tab, count(tab), expected(tab)))
 
     def test_一级菜单的显隐只靠_open_类(self):
         """⚠ 跟悬浮窗那套 `setVisible` **分家**了：就地变形靠 CSS 过渡，

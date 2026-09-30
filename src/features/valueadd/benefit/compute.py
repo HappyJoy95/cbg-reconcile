@@ -135,6 +135,89 @@ def _load_rows(db: Path, start: str, end: str):
         conn.close()
 
 
+def care_models_of(root) -> list:
+    """送 **Care+** 的机型（折叠屏金秋礼遇活动）—— 这些机型的手机行**不算新机**。
+
+    用户 2026-09-26 拍板；机型表**跟着权益领取活动目录走**（换月随版本更新）。
+    判据 = benefit 含 "Care+" 且是手机类活动（nova无忧礼包/丢失无忧等不命中美掉）。
+    ⚠ `compute` 和 `drill_rows` 都从这里取 —— 两头各写一份迟早走散。
+    """
+    return [a for a in claim_catalog.load_activities(root)
+            if "Care+" in str((a or {}).get("benefit") or "")
+            and str((a or {}).get("category") or "") == "手机"]
+
+
+def new_bucket(c1: str, typ: str, name: str, sid: str, note: str, cust: str,
+               care_models) -> str:
+    """这行算不算「新机」—— `''` 不算 · `retail` 零售净 · `online` 美团/抖音转线上。
+
+    ⚠ **唯一判据**：行归类看 `row_kind()`，新机那一档由这里定 ——
+      `compute` 的累加和 `drill_rows()` 的明细底稿都走同一条路。
+      判据写两份迟早走散（页面数字和明细合计对不上 —— 那是最贵的一种走散）。
+    四类不算（用户 2026-09-26 拍板）：演示机/样机 · 送 Care+ 的折叠屏 ·
+    普通批发分销（京东/天猫，非美团抖音转线上）· 非计件单据（核销等）。
+    """
+    if not metric.is_phone(c1):
+        return ""
+    if not metric.sell_ok(typ):
+        return ""
+    if metric.is_demo(name, sid):
+        return ""
+    if any(claim_catalog.matches_model(a, name) for a in care_models):
+        return ""
+    online = metric.is_meituan(note) or metric.is_online_cust(cust)
+    if typ in ("分销", "分销退") and not online:
+        return ""
+    return "online" if online else "retail"
+
+
+def row_kind(c1: str, c2: str, typ: str, name: str, sid: str, note: str,
+             cust: str, care_models) -> str:
+    """这行属于哪个指标 —— `''` 哪个都不算 · `new_retail`/`new_online` ·
+    `care`（延保服务）· `tier`（无忧六档）。
+
+    ⚠ **唯一判据**：`compute` 的累加和 `drill_rows()` 的明细底稿**都走它**。
+      判据写两份迟早走散（页面数字和明细合计对不上 —— 那是最贵的一种走散）。
+    ⚠ 顺序跟原来一致：计件单据 → 手机（新机，整行归它）→ Care+ → 无忧。
+    """
+    if not metric.sell_ok(typ):
+        return ""
+    if metric.is_phone(c1):
+        b = new_bucket(c1, typ, name, sid, note, cust, care_models)
+        if b == "retail":
+            return "new_retail"
+        if b == "online":
+            return "new_online"
+        return ""
+    if metric.is_care(c2):
+        return "care"
+    if metric.tier_of(name):
+        return "tier"
+    return ""
+
+
+#: 下钻指标表（**页面上能点的那些格**）—— kind → 归属行 / 取值字段 / 单位 / 标题 / 折算。
+#:
+#: ⚠ 金额类跟台数类**常常是同一批行换个取值字段**（无忧台数 vs 权益利润），
+#:   所以判据还是那一份 `row_kind()`，别为金额类另写一遍行判定。
+#: ⚠ **例外是 Care+ 那两个**：件数认全部延保服务行、利润只认
+#:   `care_profit_ok`（含 `Care+` 且含 `/华为/`）的行 —— 页面本来就这么算的，
+#:   金额类明细按 `field == "profit"` 时**把不计利润的 care 行整行剔掉**
+#:   （不然毛利列会出现"有数但不计"的行，合计对不上）。
+#: ⚠ **`profit_total`（利润合计）故意不做**：`metric.store_row` 里它是
+#:   `rebate + care_profit + tier_profit` —— 后返是**台数×单价**，不是这些单的
+#:   毛利；硬做的话底部合计跟毛利列的和对不上（2026-09-29 测试当场抓到 269≠169）。
+DRILL_KINDS: Dict[str, tuple] = {
+    "new":          (frozenset(("new_retail", "new_online")), "qty", "台",
+                     "新机", 1.0),
+    "wuyou":        (frozenset(("tier",)), "qty", "台", "无忧", 1.0),
+    "care":         (frozenset(("care",)), "qty", "件", "Care+", 1.0),
+    "total":        (frozenset(("tier", "care")), "qty", "件", "合计", 1.0),
+    "tier_profit":  (frozenset(("tier",)), "profit", "元", "权益利润", 1.0),
+    "care_profit":  (frozenset(("care",)), "profit", "元", "Care+利润", 1.0),
+}
+
+
 def _blank_store(name: str, cfg: dict) -> dict:
     track, target = metric.track_of(name, cfg.get("tracks") or {})
     region = metric.region_of(name, cfg.get("regions") or {})
@@ -202,11 +285,8 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
         # 倒排索引只建一次（读 config/stores.yaml）；名单读不到 = 空 = 一个都不认
         fidx = foreign_mod.name_index(root)
         # 送 **Care+** 的机型（折叠屏金秋礼遇活动）不算新机 ——
-        # 用户 2026-09-26 拍板；机型表**跟着权益领取活动目录走**（换月随版本更新）。
-        # 判据 = benefit 含 "Care+" 且是手机类活动（nova无忧礼包/丢失无忧等不命中美掉）。
-        care_models = [a for a in claim_catalog.load_activities(root)
-                       if "Care+" in str((a or {}).get("benefit") or "")
-                       and str((a or {}).get("category") or "") == "手机"]
+        # 用户 2026-09-26 拍板；判据见 `care_models_of`（明细下钻同源）。
+        care_models = care_models_of(root)
         for r in _load_rows(db, start, end):
             store = r["store"]
             if want is not None and store not in want:
@@ -232,35 +312,20 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
                 orphan += 1
                 orphan_names[r["who"]] = orphan_names.get(r["who"], 0) + 1
 
-            if not metric.sell_ok(r["typ"]):
-                continue
-
-            # —— 新机（手机）= 手机零售净 + 美团/抖音转线上
-            #   ⚠ 用户 2026-09-26 拍板口径；**普通批发分销不算新机**（京东/天猫等）
-            #   修前不分单据类型全算 → 万达 194 vs 口径 181
-            if metric.is_phone(r["c1"]):
-                # 演示机/样机不算新机（口径E：商品名 或 串号标识 两种认法都排 —— 用户拍板）
-                if metric.is_demo(r["name"], r.get("sid")):
-                    continue
-                # 送 Care+ 的折叠屏机型（care-fold 活动）不算新机
-                # （源表口径：排 Care+ 机型后 12/26 店与人算精确相等、误差34）
-                if any(claim_catalog.matches_model(a, r["name"]) for a in care_models):
-                    continue
-                online = metric.is_meituan(r["note"]) or metric.is_online_cust(r.get("cust"))
-                if r["typ"] in ("分销", "分销退") and not online:
-                    continue
-                bucket = "new_o" if online else "new_r"
+            # ⚠ 归类走 `row_kind()` —— 它里面先问 `sell_ok`（核销等不计），
+            #   再按 手机→新机 / 延保→Care+ / 无忧六档 归位；
+            #   明细下钻（`drill_rows`）问的是同一个函数，合计才对得上。
+            k = row_kind(r["c1"], r["c2"], r["typ"], r["name"], r.get("sid") or "",
+                         r["note"], r.get("cust") or "", care_models)
+            if k == "new_retail":
                 for tgt in (a, pa):
-                    if tgt is None:
-                        continue
-                    if bucket == "new_r":
+                    if tgt is not None:
                         tgt["new_retail"] += r["qty"]
-                    else:
+            elif k == "new_online":
+                for tgt in (a, pa):
+                    if tgt is not None:
                         tgt["new_online"] += r["qty"]
-                continue
-
-            # —— Care+
-            if metric.is_care(r["c2"]):
+            elif k == "care":
                 for tgt in (a, pa):
                     if tgt is None:
                         continue
@@ -270,11 +335,8 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
                     #    matepad Care+ 12月都不算利润）
                     if metric.care_profit_ok(r["name"]):
                         tgt["care_profit"] += r["profit"]
-                continue
-
-            # —— 无忧六档
-            key = metric.tier_of(r["name"])
-            if key:
+            elif k == "tier":
+                key = metric.tier_of(r["name"])
                 for tgt in (a, pa):
                     if tgt is None:
                         continue
@@ -379,6 +441,89 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None,
     }
 
 
+def drill_rows(root=None, store: str = "", kind: str = "new", day=None) -> dict:
+    """某店本窗口**某个指标**纳入统计的销售行 —— 页面那一格数字的明细底稿。
+
+    `kind` 见 `DRILL_KINDS`（页面上能点的那些格：新机 / 无忧 / Care+ / 合计 /
+    三份利润）。列（用户 2026-09-29 点名，同日追加「带上毛利吧」）：
+    **销售单号 · 单据类型 · 商品名称 · 数量 · 销售时间 · 毛利**。
+    **含退货**：源数据里退货数量本来就是负数，进明细也进合计（直接相加）。
+
+    ⚠ 行判定 = `row_kind()`（与 `compute` 同一个）⇒ `合计` 必须等于页面那格的值
+      （本页**不乘 0.9**，与防护膜页不同）。改口径只改 `row_kind` / `DRILL_KINDS`。
+    ⚠ **金额类的 Care+ 行只认 `care_profit_ok`** —— 件数认全部延保服务行、
+      利润只认「含 Care+ 且含 /华为/」的行；不这么收，毛利列会出现
+      "有数但不计"的行、合计对不上（页面 care_profit 本来就是这么算的）。
+    ⚠ 老库可能没有 `单号` 列 —— `PRAGMA` 问一下，缺就补 `'' AS 单号`。
+    """
+    spec = DRILL_KINDS.get(kind)
+    if spec is None:
+        return {"ok": False, "why": "不认识的指标：%s" % kind}
+    kinds, field, unit, label, factor = spec
+    root = Path(root or ROOT)
+    start, end = month_window(day)
+    store = str(store or "").strip()
+    if not store:
+        return {"ok": False, "why": "没指定门店"}
+    db = find_db(root)
+    if not (db and db.exists()):
+        return {"ok": False, "why": "找不到订单库（out/cbg-*.db）—— 先跑「抓数据」"}
+    end_ex = (datetime.date.fromisoformat(end)
+              + datetime.timedelta(days=1)).isoformat()
+    care_models = care_models_of(root)
+    conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    rows: List[dict] = []
+    try:
+        conn.row_factory = sqlite3.Row
+        try:
+            have = {str(x[1]) for x in conn.execute("PRAGMA table_info(erp_sales)")}
+        except sqlite3.Error:
+            have = set()
+        no = '"单号"' if "单号" in have else "'' AS \"单号\""
+        cust = '"客户/顾客"' if "客户/顾客" in have else "'' AS \"客户/顾客\""
+        sid = "串号标识" if "串号标识" in have else "'' AS 串号标识"
+        sql = ("SELECT " + no + ", 单据类型, 一级分类, 二级分类, 商品名称, 数量,"
+               " 零售考核毛利, 支付时间, 备注, 单行备注, " + cust + ", " + sid +
+               " FROM erp_sales"
+               " WHERE 支付时间 >= ? AND 支付时间 < ? AND 门店 = ?")
+        for r in conn.execute(sql, (start, end_ex, store)):
+            # ⚠ `note` 只拼备注+单行备注，客户字段单独传（同 `_load_rows`）
+            note = " ".join(str(r[k] or "") for k in ("备注", "单行备注"))
+            k = row_kind(r["一级分类"] or "", r["二级分类"] or "",
+                         r["单据类型"] or "", r["商品名称"] or "",
+                         r["串号标识"] or "", note, r["客户/顾客"] or "", care_models)
+            if k not in kinds:
+                continue
+            if field == "profit" and k == "care" and \
+                    not metric.care_profit_ok(r["商品名称"] or ""):
+                continue                      # 这行的毛利页面上没计 —— 不进金额明细
+            rows.append({
+                "no": r["单号"] or "",
+                "typ": r["单据类型"] or "",
+                "name": r["商品名称"] or "",
+                "qty": _f(r["数量"]),
+                "profit": _f(r["零售考核毛利"]),
+                "ts": r["支付时间"] or "",
+            })
+    finally:
+        conn.close()
+    rows.sort(key=lambda x: (str(x["ts"]), str(x["no"])), reverse=True)
+    total = sum((x["qty"] if field == "qty" else x["profit"]) for x in rows)
+    shown = round(total * factor, 2)
+    if field == "qty":
+        note = "合计是原始%s数（退货是负数、已在合计里冲减）；本页不乘 0.9，就是页面上的「%s」" % (
+            unit, label)
+    else:
+        note = "合计是这些单的零售考核毛利之和，就是页面上的「%s」" % label
+    return {
+        "ok": True, "why": "",
+        "store": store, "start": start, "end": end,
+        "kind": kind, "label": label, "unit": unit, "field": field,
+        "rows": rows, "total": total, "factor": factor, "shown": shown,
+        "note": note,
+    }
+
+
 _CACHE: Dict[str, dict] = {}
 _FINGER: Dict[str, tuple] = {}
 
@@ -460,4 +605,5 @@ def run(root=None, emit=None) -> dict:
 
 
 __all__ = ["compute", "load", "run", "load_config", "load_people",
-           "month_window", "find_db"]
+           "month_window", "find_db", "new_bucket", "row_kind", "drill_rows",
+           "care_models_of", "DRILL_KINDS"]

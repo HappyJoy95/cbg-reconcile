@@ -2884,6 +2884,92 @@ class Test增值日期窗口(unittest.TestCase):
         self.assertIn("body: { end: winEnd('benefit') }", APP_JS)
 
 
+class Test明细下钻接口(unittest.TestCase):
+    """增值两页 · 点门店行上**每个能下钻的数字** → 明细弹窗背后的两条接口。
+
+    用户 2026-09-29：「每个门店新机销量那个数字，点开要有纳入统计的门店对应的
+    销售单号、商品名称和数量，以及销售时间，包含退货。」
+    同日追加：「几个具体达成的，点开也显示一下对应的销售单据？比如钢化膜的展示
+    钢化膜的销售单」—— 于是接口带 `?kind=`（新机 / 贴膜达成 / 礼包达成 /
+    无忧 / Care+ / 各份毛利·利润）。
+
+    钉五件事：
+    * **越权 403**（坑 18：菜单里能点到 ≠ 有权限 —— 门店只能查本店）；
+    * 没给店 / 没给指标 / 日期写错 / 指标打错 → **400 + `error`**
+      （前端读的是 `error`，不是干巴巴的状态码）；
+    * 本店那条真走到数据层（没库时说的是「找不到订单库」，不是 404 路由没配）；
+    * **前端接线在**（漏了就是「点了没反应」，这个项目最怕的失败）。
+    """
+
+    STORE = "青岛永旺东部店"          # _Server 里配的那家店
+    OTHER = "青岛城阳万达店"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_查别家店_403两页都拦(self):
+        q = "kind=new&store=" + quote(self.OTHER)
+        for path in ("/api/film/drill?" + q, "/api/benefit/drill?" + q):
+            code, d = self.srv.request("GET", path)
+            self.assertEqual(code, 403, (path, d))
+            self.assertTrue(d.get("forbidden"), d)
+            self.assertIn("没有权限", d.get("error") or "")
+
+    def test_没给门店_400带error(self):
+        for path in ("/api/film/drill?kind=new", "/api/benefit/drill?kind=new"):
+            code, d = self.srv.request("GET", path)
+            self.assertEqual(code, 400, (path, d))
+            self.assertIn("门店", d.get("error") or "")
+
+    def test_没给指标_400带error(self):
+        """`kind` 决定看哪个指标 —— 漏了要报，别默认成"随便哪个"。"""
+        code, d = self.srv.request(
+            "GET", "/api/film/drill?store=" + quote(self.STORE))
+        self.assertEqual(code, 400, d)
+        self.assertIn("指标", d.get("error") or "")
+
+    def test_指标打错_400带指标名(self):
+        code, d = self.srv.request(
+            "GET", "/api/film/drill?store=" + quote(self.STORE) + "&kind=nope")
+        self.assertEqual(code, 400, d)
+        self.assertIn("nope", d.get("error") or "")
+
+    def test_日期写错_400带格式说明(self):
+        code, d = self.srv.request(
+            "GET", "/api/film/drill?store=" + quote(self.STORE)
+            + "&kind=new&end=2026/09/30")
+        self.assertEqual(code, 400, d)
+        self.assertIn("YYYY-MM-DD", d.get("error") or "")
+
+    def test_本店走到数据层_没库说的是找不到订单库(self):
+        code, d = self.srv.request(
+            "GET", "/api/film/drill?store=" + quote(self.STORE) + "&kind=film")
+        self.assertEqual(code, 400, d)
+        self.assertIn("订单库", d.get("error") or "",
+                      "范围过了、到数据层了 —— 别把「没配库」说成 404/403")
+
+    def test_前端接线在(self):
+        self.assertIn("/drill?store=", APP_JS)
+        self.assertIn("data-drill", APP_JS)
+        self.assertIn("data-kind", APP_JS)
+        self.assertIn("openDrill", APP_JS)
+        # 每个能下钻的 kind 都要真的拼进格子（漏一个 = 那个数字点了没反应）
+        for kind in ("new", "film", "gift", "film_profit", "gift_profit",
+                     "total_profit"):
+            self.assertIn("'" + kind + "'", APP_JS)
+        self.assertIn('id="drill-mask"', INDEX_HTML)
+        self.assertIn('id="drill-body"', INDEX_HTML)
+        self.assertIn("毛利", APP_JS,
+                      "明细表要有毛利列（用户：带上毛利吧）—— 表头是 JS 拼的")
+        css = Path("web/style.css").read_text(encoding="utf-8")
+        self.assertIn(".drill", css, "可点的那格要看得出来（指针 + hover）")
+
+
 class Test设置强制刷新(unittest.TestCase):
     """设置 · 强制刷新（2026-09-29 用户：「设置里面加个强制刷新按钮吧，
     按照新规则全部重写数据库」）—— 起一趟

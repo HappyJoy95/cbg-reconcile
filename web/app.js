@@ -2884,17 +2884,23 @@ function renderFilm(d) {
     const storeHtml = kind === 'person'
       ? '<span class="plan-who">' + esc(r.name || '') + '</span>'
       : esc(r.store || '') + caret;
+    // ⚠ 只有**门店行**上那几个数字可下钻（区域共计 / 总合计 / 人行不是"某家店"）
+    //   —— 同一套 `drillCell`，只换 `kind`；格子形状跟 `cellNum` 一模一样（同列数）
+    function dnum(mk, v) {
+      return kind === '' ? drillCell('film', mk, r.store, filmFmt(v)) : cellNum(v);
+    }
     return '<tr' + (cls ? ' class="' + cls + '"' : '') + '>'
       + regionHtml
       + '<td' + storeAttr + '>' + storeHtml + '</td>'
-      + cellNum(r.new) + cellNum(r.target) + cellNum(r.done)
+      + dnum('new', r.new) + cellNum(r.target) + dnum('film', r.done)
       + cellNum(r.unit_profit)
       + cellRate(r.attach, 'attach')
       + cellNum(r.profit_target) + cellNum(r.baseline)
-      + cellNum(r.film_profit) + cellNum(r.gift_profit) + cellNum(r.total_profit)
+      + dnum('film_profit', r.film_profit) + dnum('gift_profit', r.gift_profit)
+      + dnum('total_profit', r.total_profit)
       + cellRate(r.profit_rate, 'profit')
       + cellRate(r.total_rate, 'rate')
-      + cellNum(r.gift_pkg) + cellNum(r.gift_done)
+      + cellNum(r.gift_pkg) + dnum('gift', r.gift_done)
       + cellRate(r.gift_rate, 'gift')
       + '<td class="num ' + filmAddonCls(r.avg_addon, r.baseline) + '">'
       + esc(filmFmt(r.avg_addon)) + '</td>'
@@ -2973,6 +2979,132 @@ document.addEventListener('click', (e) => {
   else filmOpenStores.add(store);
   if (filmData && filmData.ok !== false) renderFilm(filmData);
 });
+
+/* ── 明细下钻（增值两页 · 2026-09-29）──────────────────────────────
+   点**门店行上每个能下钻的数字**（新机 / 贴膜达成 / 礼包达成 / 三份毛利 ·
+   无忧 / Care+ / 合计 / 三份利润）→ 弹一张明细：销售单号 / 单据类型 / 商品名称 /
+   数量 / 销售时间 / **毛利**，**含退货**（源里是负数，合计已冲减）。
+
+   ⚠ 合口径与页面同一处：后端 `film/benefit.compute.row_kind()` 是「这行算哪个
+     指标」的唯一判据，`drill_rows()` 查出来的合计必须等于那格数字
+     （只有防护膜新机 ×0.9，其余不乘）。前端只负责**显示后端算好的合计**，
+     自己不重算口径 —— 两头各写一份迟早走散（AGENTS 坑 12 同类）。
+   ⚠ 只有**门店行**可点：区域/赛道/合计行不是「某家店」，没有单可列。 */
+function drillCell(page, kind, store, txt) {
+  return '<td class="num drill" data-drill="' + page + '" data-kind="' + kind + '"'
+    + ' data-store="' + esc(encodeURIComponent(store || '')) + '"'
+    + ' title="点一下看纳入统计的销售单（含退货）">' + esc(txt) + '</td>';
+}
+
+/** 明细里的数字：整数直接出、小数留 2 位（退货 −1 这类照原样显示负数）。 */
+function drillQty(v) {
+  const n = Number(v) || 0;
+  return String(Math.abs(n - Math.round(n)) < 1e-9 ? Math.round(n) : n.toFixed(2));
+}
+
+function closeDrill() {
+  const mask = $('#drill-mask');
+  if (mask) mask.hidden = true;
+}
+
+async function openDrill(page, kind, store, end) {
+  const mask = $('#drill-mask');
+  if (!mask || !store || !kind) return;
+  const title = $('#drill-title'), sub = $('#drill-sub'), body = $('#drill-body'),
+    legend = $('#drill-legend'), sum = $('#drill-sum');
+  if (title) title.textContent = '销售明细';
+  if (sub) sub.textContent = store;
+  if (legend) legend.textContent = '';
+  if (sum) sum.textContent = '';
+  if (body) {
+    body.innerHTML = '<div class="film-loading"><span class="film-spin"></span>'
+      + '正在从本地订单库读…</div>';
+  }
+  mask.hidden = false;
+  try {
+    const d = await api('/api/' + page + '/drill?store=' + encodeURIComponent(store)
+      + '&kind=' + encodeURIComponent(kind)
+      + (end ? '&end=' + encodeURIComponent(end) : ''));
+    renderDrill(d, store);
+  } catch (e) {
+    // ⚠ 失败要留在弹窗里说清（403 的文案后端已带「没有权限：…」）
+    if (body) body.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDrill(d, store) {
+  const title = $('#drill-title'), sub = $('#drill-sub'), body = $('#drill-body'),
+    legend = $('#drill-legend'), sum = $('#drill-sum');
+  if (!body) return;
+  if (!d || d.ok === false) {
+    body.innerHTML = '<div class="empty">'
+      + esc((d && (d.why || d.error)) || '读不出来') + '</div>';
+    return;
+  }
+  const rows = d.rows || [];
+  if (title) title.textContent = (d.label || '销售') + ' 明细';
+  if (sub) {
+    sub.textContent = (d.store || store || '')
+      + ' · ' + (d.start || '') + ' ~ ' + (d.end || '');
+  }
+  let h = rows.length ? '' : '<div class="empty">这段时间没有纳入统计的销售单</div>';
+  h += '<div class="table-scroll"><table class="film-table"><thead><tr>'
+    + '<th>销售单号</th><th>单据类型</th><th>商品名称</th>'
+    + '<th class="num">数量</th><th>销售时间</th><th class="num">毛利</th>'
+    + '</tr></thead><tbody>';
+  rows.forEach((r) => {
+    const neg = Number(r.qty) < 0, np = Number(r.profit) < 0;
+    h += '<tr>'
+      + '<td>' + esc(r.no || '（无单号）') + '</td>'
+      + '<td>' + esc(r.typ || '') + '</td>'
+      // 名字长（含机型/颜色）—— 定死列宽后会省略，`title` 留着看全文
+      + '<td title="' + esc(r.name || '') + '">' + esc(r.name || '') + '</td>'
+      + '<td class="num' + (neg ? ' drill-neg' : '') + '">'
+      + esc(drillQty(r.qty)) + '</td>'
+      + '<td>' + esc(r.ts || '') + '</td>'
+      + '<td class="num' + (np ? ' drill-neg' : '') + '">'
+      + esc(drillQty(r.profit)) + '</td>'
+      + '</tr>';
+  });
+  h += '</tbody></table></div>';
+  body.innerHTML = h;
+  if (legend) legend.textContent = d.note || '';
+  // 底部合计：台/件 → 那个指标的件数（新机还有折算）；元 → 毛利合计
+  const unit = d.unit || '台', field = d.field || 'qty',
+    factor = Number(d.factor) || 1, label = d.label || '';
+  let s = '共 ' + rows.length + ' 行 · ';
+  if (field === 'qty') {
+    s += '合计 ' + drillQty(d.total) + ' ' + unit;
+    if (Math.abs(factor - 1) > 1e-9) {
+      s += ' × ' + factor + ' = ' + drillQty(d.shown)
+        + '（页面上的「' + label + '」）';
+    } else {
+      s += '（就是页面上的「' + label + '」）';
+    }
+  } else {
+    s += '毛利合计 ' + drillQty(d.shown) + ' 元（就是页面上的「' + label + '」）';
+  }
+  if (sum) sum.textContent = s;
+}
+
+// 门店行上可下钻的数字可点 —— document 级委托（表每次 innerHTML 重画，同 film 门店名）
+document.addEventListener('click', (e) => {
+  const td = e.target && e.target.closest && e.target.closest('[data-drill]');
+  if (!td) return;
+  const page = td.getAttribute('data-drill') || '';
+  const kind = td.getAttribute('data-kind') || '';
+  const store = decodeURIComponent(td.getAttribute('data-store') || '');
+  if (!store || !kind || (page !== 'film' && page !== 'benefit')) return;
+  openDrill(page, kind, store, winEnd(page));
+});
+
+function bindDrillModal() {
+  $('#drill-close')?.addEventListener('click', closeDrill);
+  $('#drill-mask')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeDrill();
+  });
+}
+bindDrillModal();          // 静态元素（弹窗骨架在 index.html），绑一次
 
 /* ── 无忧会员权益（增值 · benefit）：一页四视图（店 / 区 / 人 / 赛道） ── */
 const benefitState = { view: 'stores', data: null };
@@ -3112,19 +3244,30 @@ function renderBenefitStores(d) {
     + '</tr></thead><tbody>';
 
   const tr = (r, leadHtml, cls) => {
+    // ⚠ 只有**门店行**上那几个数字可下钻（赛道小计 / 底部合计不是"某家店"）
+    //   —— 同一套 `drillCell`，只换 `kind`；显示格式跟 `benefitCell` 对齐
+    const isStore = !cls;
+    const dnum = (mk, val, kind2) => (isStore
+      ? drillCell('benefit', mk, r.store,
+        kind2 === 'int' ? benefitInt(val)
+          : kind2 === 'money' ? benefitMoney(val) : benefitNum(val))
+      : benefitCell(val, kind2));
     let x = '<tr' + (cls ? ' class="' + cls + '"' : '') + '>'
       + leadHtml
       + '<td>' + esc(r.store || '') + '</td>'
       + benefitCell(r.day_target, 'int') + benefitCell(r.slot_progress, 'int')
-      + benefitCell(r.new, 'int') + benefitCell(r.new_rate, 'pct', 'overall')
-      + benefitCell(r.goal) + benefitCell(r.wuyou) + benefitCell(r.care)
-      + benefitCell(r.total)
+      + dnum('new', r.new, 'int') + benefitCell(r.new_rate, 'pct', 'overall')
+      + benefitCell(r.goal) + dnum('wuyou', r.wuyou) + dnum('care', r.care)
+      + dnum('total', r.total)
       + benefitCell(r.attach, 'pct', 'attach')
       + benefitCell(r.attach_goal_rate, 'pct', 'goal')
       + benefitCell(r.overall, 'pct', 'overall');
     tiers.forEach((t) => { x += benefitCell((r.tiers || {})[t.key]); });
-    x += benefitCell(r.rebate, 'money') + benefitCell(r.care_profit, 'money')
-      + benefitCell(r.tier_profit, 'money') + benefitCell(r.profit_total, 'money')
+    // ⚠ 「利润合计」**不可点**：它是 后返 + 权益利润 + Care+利润（后返=台数×单价），
+    //   不是这些单的毛利之和 —— 点开会对不上（同 benefit.compute.DRILL_KINDS 注）
+    x += benefitCell(r.rebate, 'money') + dnum('care_profit', r.care_profit, 'money')
+      + dnum('tier_profit', r.tier_profit, 'money')
+      + benefitCell(r.profit_total, 'money')
       + benefitCell(r.avg_profit, 'money')
       + benefitCell(r.manager_bonus, 'money');
     return x + '</tr>';
@@ -4322,6 +4465,8 @@ async function loadDistBoard(kind) {
                   salesman: '#dist-salesman-board' }[kind];
   const box = $(boxId);
   if (box) box.innerHTML = '加载中…';
+  // 换区间 / 重画 ⇒ 上次下钻那批行作废（否则新窗口会点出旧窗口的单）
+  distDrillRows.clear();
   try {
     const d = await api(`/api/dist/board?kind=${kind}&${distQuery()}`);
     distNote(d);
@@ -4427,16 +4572,30 @@ function renderDistRegion(d) {
   }
 }
 
-function distCatTable(rows) {
-  const total = (rows || []).reduce((s, r) => s + Number(r.amount || 0), 0);
+function distCatTable(rows, field) {
+  const list = rows || [];
+  const total = list.reduce((s, r) => s + Number(r.amount || 0), 0);
+  if (!list.length) return '<div class="empty">没有记录</div>';
   // ⚠ 列序 = **图序**（销售额在左、销量在右）—— 用户 2026-09-29：
   //   「饼状图销售额在左边，列表里销售额在右边，不能对齐吗」⇒ 表跟图走。
-  return table(['分类', '行数', '金额', '数量', '占比'],
-    (rows || []).map((r) => {
-      const pct = total ? (Number(r.amount || 0) / total) : 0;
-      return [r.key, r.rows, distMoney(r.amount), distMoney(r.qty),
-        (pct * 100).toFixed(1) + '%'];
-    }));
+  // ⚠ 2026-09-30：**分类名可点** → 就地展开该档的销售单（用户：
+  //   「每个机型点开是具体的销售单信息、金额、数量信息」）。
+  // ⚠ 手拼、不再走 `table()`：要在行后插明细行，`table()` 一次拼完做不到。
+  const head = ['分类', '行数', '金额', '数量', '占比'];
+  let h = '<table><thead><tr>'
+    + head.map((t) => `<th>${t}</th>`).join('') + '</tr></thead><tbody>';
+  list.forEach((r) => {
+    const pct = total ? (Number(r.amount || 0) / total) : 0;
+    const key = distDrillKey(field, r.key);
+    h += '<tr>'
+      + `<td>${distDrillCell(key, { kind: 'rows', f: field, v: r.key, label: r.key })}</td>`
+      + `<td>${esc(String(r.rows))}</td>`
+      + `<td>${esc(distMoney(r.amount))}</td>`
+      + `<td>${esc(distMoney(r.qty))}</td>`
+      + `<td>${(pct * 100).toFixed(1)}%</td>`
+      + '</tr>';
+  });
+  return h + '</tbody></table>';
 }
 
 /** 「未分类」的展开明细（商品级）—— 用户 2026-09-29：「剩下的未分类加个展开」。
@@ -4461,10 +4620,11 @@ function renderDistModel(d) {
   if (meta) meta.textContent =
     `${t.rows} 行 · 净额 ${distMoney(t.amount)} · 销量 ${distMoney(t.qty)}`;
   const c1 = $('#dist-model-cat1'), c3 = $('#dist-model-cat3');
-  if (c1) c1.innerHTML = distCatTable(b.cat1);
+  // ⚠ field 点名 —— 下钻按**这一列**筛（后端 `DRILL_FIELDS` 白名单同名）
+  if (c1) c1.innerHTML = distCatTable(b.cat1, '一级分类');
   // 三级分类表 + 「未分类」展开（点开看是些什么商品）
   if (c3) {
-    c3.innerHTML = distCatTable(b.cat3)
+    c3.innerHTML = distCatTable(b.cat3, '三级分类')
       + distUnclosedDetails(b.cat3_unclassified);
   }
   // 条形图：销售额 / 销量 **两张并排**（一左一右），超出 top 档并成「其他」
@@ -4507,13 +4667,167 @@ function renderDistSalesman(d) {
     ).join('');
     const mixTxt = (p.mix || []).slice(0, 4).map((m) =>
       `${esc(m.cat)} ${(m.pct * 100).toFixed(0)}%`).join('、');
+    // ⚠ 2026-09-30：**人名可点** → 展开"品类折叠"，品类再点开是销售单
+    //   （用户：「每个人名这一行点开是不同品类占比的折叠，点开品类名是
+    //    具体各个品类的销售单信息、金额和数量」）。`kind: 'mix'` = 这一层
+    //   展开成品类表；品类那层的 cell 由 `distMixTable` 生成（`kind: 'rows'`）。
+    const key = distDrillKey('店员', p.name);
     // 列序跟图序一致：总销售额（左图）在前、数量（右图）在后（用户 2026-09-29）
-    return [p.name, p.rows, distMoney(p.amount), distMoney(p.qty),
+    return [{ html: distDrillCell(key, { kind: 'mix', f: '店员', v: p.name, label: p.name }) },
+      p.rows, distMoney(p.amount), distMoney(p.qty),
       { html: `<div style="min-width:160px" title="${esc(mixTxt)}">${bar}`
           + `<div class="hint" style="font-size:11px">${mixTxt}</div></div>` }];
   });
   box.innerHTML = table(['销售员（店员）', '行数', '总销售额', '数量', '品类占比'], rows);
 }
+
+/* ── 分销 · 行内下钻（2026-09-30）────────────────────────
+   机型行点开 = 该档的销售单；销售员行点开 = **品类折叠**；品类名再点开 = 该品类的
+   销售单（单号 / 时间 / 类型 / 商品 / 数量 / 金额 / 客户）—— 用户 2026-09-30。
+
+   ⚠ **每个 base key 只请求一次**：品类那层是**本地聚合 + 本地筛**（父那份行
+     已经在 `distDrillRows` 里），零请求；机型每档一次。
+   ⚠ 鉴权走 `/api/dist/detail` 那道统一 403（仅平台岗）—— 前端不做权限判断，
+     列名也由后端 `DRILL_FIELDS` 白名单把关（拼错会 400，不会静默给全表）。
+   ⚠ 展开态**不跨重画**（切页 / 刷新就收起）；换时间段在 `loadDistBoard` 里
+     清缓存 —— 否则旧区间那批行会被当成新区间点开的结果。 */
+const distDrillRows = new Map();
+
+function distDrillKey(...parts) {
+  return parts.filter((x) => x != null && x !== '').join('|');
+}
+
+/** 可点的那格（`span` 撑满整格，见 CSS `.dist-drill-open`）。 */
+function distDrillCell(key, o) {
+  return `<span class="dist-drill-open" data-dist-key="${esc(key)}"`
+    + ` data-dist-kind="${esc(o.kind || 'rows')}" data-dist-f="${esc(o.f || '')}"`
+    + ` data-dist-v="${esc(o.v == null ? '' : String(o.v))}"`
+    + (o.f2 ? ` data-dist-f2="${esc(o.f2)}" data-dist-v2="${esc(o.v2 == null ? '' : String(o.v2))}"` : '')
+    + `>${esc(o.label == null ? '' : String(o.label))}</span>`;
+}
+
+/** 明细小表 —— 销售单本身。 */
+function distDrillTable(rows) {
+  const head = ['支付时间', '单号', '类型', '商品', '数量', '金额', '客户'];
+  const body = (rows || []).map((r) => {
+    const nq = Number(r['数量']) < 0, na = Number(r['金额']) < 0;
+    return '<tr>'
+      + `<td class="nowrap">${esc(r['支付时间'] || '')}</td>`
+      + `<td class="mono">${esc(r['单号'] || '')}</td>`
+      + `<td>${esc(r['单据类型'] || '')}</td>`
+      + `<td>${esc(r['商品名称'] || '')}</td>`
+      + `<td class="num${nq ? ' dist-drill-neg' : ''}">${esc(distMoney(r['数量']))}</td>`
+      + `<td class="num${na ? ' dist-drill-neg' : ''}">${esc(distMoney(r['金额']))}</td>`
+      + `<td>${esc(r['客户/顾客'] || '')}</td>`
+      + '</tr>';
+  }).join('');
+  if (!body) return '<div class="empty">这一档没有销售单</div>';
+  return `<table><thead><tr>${head.map((t) => `<th>${t}</th>`).join('')}</tr></thead>`
+    + `<tbody>${body}</tbody></table>`;
+}
+
+/** 品类折叠 —— 把该店员的行按**一级分类**聚合成表（列跟机型表同构）。 */
+function distMixTable(rows, parentKey, f, v) {
+  const agg = new Map();
+  (rows || []).forEach((r) => {
+    const k = String(r['一级分类'] == null ? '' : r['一级分类']).trim() || '（空）';
+    const a = agg.get(k) || { key: k, rows: 0, qty: 0, amount: 0, abs: 0 };
+    a.rows += 1;
+    a.qty += Number(r['数量']) || 0;
+    a.amount += Number(r['金额']) || 0;
+    a.abs += Math.abs(Number(r['金额']) || 0);
+    agg.set(k, a);
+  });
+  const list = [...agg.values()].sort((x, y) => y.abs - x.abs);
+  const sumAbs = list.reduce((s, a) => s + a.abs, 0) || 1;
+  const head = ['分类', '行数', '金额', '数量', '占比'];
+  const body = list.map((a) => {
+    // 品类那层的 cell：**父的 f/v**（店员）+ 第二级（一级分类）—— 后端两个参数正好
+    const cell = distDrillCell(distDrillKey(parentKey, '一级分类', a.key),
+      { kind: 'rows', f, v, f2: '一级分类', v2: a.key, label: a.key });
+    return '<tr>'
+      + `<td>${cell}</td>`
+      + `<td>${esc(String(a.rows))}</td>`
+      + `<td>${esc(distMoney(a.amount))}</td>`
+      + `<td>${esc(distMoney(a.qty))}</td>`
+      // 占比按**绝对值**算 —— 跟看板那根堆叠条同一口径（退单是负金额）
+      + `<td>${((a.abs / sumAbs) * 100).toFixed(1)}%</td>`
+      + '</tr>';
+  }).join('');
+  if (!body) return '<div class="empty">这一档没有销售单</div>';
+  return `<table><thead><tr>${head.map((t) => `<th>${t}</th>`).join('')}</tr></thead>`
+    + `<tbody>${body}</tbody></table>`;
+}
+
+function distDrillStrip(key) {
+  document.querySelectorAll('tr.dist-drill').forEach((tr) => {
+    if (tr.getAttribute('data-parent') === key) tr.remove();
+  });
+}
+
+async function distDrillToggle(el) {
+  const key = el.getAttribute('data-dist-key') || '';
+  if (!key || el.classList.contains('dist-loading')) return;
+  const opened = [...document.querySelectorAll('tr.dist-drill')]
+    .some((tr) => tr.getAttribute('data-parent') === key);
+  if (opened) {                       // 再点一次 = 收起（连子孙一起没 —— 子在父 DOM 里）
+    distDrillStrip(key);
+    el.classList.remove('open');
+    return;
+  }
+  const f = el.getAttribute('data-dist-f') || '';
+  const v = el.getAttribute('data-dist-v') || '';
+  const f2 = el.getAttribute('data-dist-f2') || '';
+  const v2 = el.getAttribute('data-dist-v2') || '';
+  const kind = el.getAttribute('data-dist-kind') || 'rows';
+  const tr = el.closest('tr');
+  if (!tr || !f) return;
+  tr.insertAdjacentHTML('afterend',
+    `<tr class="dist-drill" data-parent="${esc(key)}"><td colspan="5">`
+    + '<span class="hint">读取中…</span></td></tr>');
+  el.classList.add('open', 'dist-loading');
+  try {
+    const base = distDrillKey(f, v);
+    let rows = distDrillRows.get(base);
+    if (!rows) {
+      const q = new URLSearchParams(distQuery());
+      q.set('field', f);
+      q.set('value', v);
+      const d = await api(`/api/dist/detail?${q}`);
+      if (d && d.ok === false) throw new Error(d.why || d.error || '读取失败');
+      rows = (d && d.rows) || [];
+      distDrillRows.set(base, rows);       // 品类那层要用它本地筛
+    }
+    let html;
+    if (kind === 'mix') {
+      html = distMixTable(rows, key, f, v);
+    } else {
+      let hit = rows;
+      if (f2) {
+        hit = rows.filter((r) =>
+          (String(r[f2] == null ? '' : r[f2]).trim() || '（空）') === v2);
+      }
+      html = distDrillTable(hit);
+    }
+    const ph = [...document.querySelectorAll('tr.dist-drill')]
+      .find((x) => x.getAttribute('data-parent') === key);
+    if (ph) ph.innerHTML = `<td colspan="5">${html}</td>`;
+  } catch (e) {
+    // ⚠ 失败要出声 —— 静默收起 = 用户以为「点了没反应」（这个项目最怕的失败）
+    distDrillStrip(key);
+    el.classList.remove('open');
+    toast('下钻读取失败：' + e.message, 'bad');
+  } finally {
+    el.classList.remove('dist-loading');
+  }
+}
+
+// 可点那格的委托 —— document 级（表每次 innerHTML 重画，同 film / 增值那两处）
+document.addEventListener('click', (e) => {
+  const el = e.target && e.target.closest && e.target.closest('[data-dist-key]');
+  if (!el) return;
+  distDrillToggle(el);
+});
 
 async function loadDistDetail() {
   const box = $('#dist-detail-table');

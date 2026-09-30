@@ -563,11 +563,13 @@ def _can_for(role: str) -> dict:
         "plan.export": not is_store,
         "film.export": not is_store,
         "benefit.export": not is_store,
-        # 分销看板（2.3.0，2026-09-29）：整页 `types="multi"`（区长/平台），
-        # 门店连菜单行都没有 ⇒ 改区域映射 / 导出明细都跟页面同口径。
-        # ⚠ 页面藏起来不算权限（坑 18）—— `/api/dist/*` 每条路由另有 403。
-        "dist.write": not is_store,
-        "dist.export": not is_store,
+        # 分销看板（2.3.0，2026-09-29；**2026-09-30 收紧成仅平台岗**）：
+        # 整页 `types="platform"` —— 区长和门店连菜单行都没有。
+        # ⚠ 页面藏起来不算权限（坑 18）—— `/api/dist/*` 路由层还有一道统一 403
+        #   （`role != ROLE_PLATFORM` 就拦），这里给的是**写/导出**那两下。
+        # ⚠ 别写回 `not is_store`：那个口径是"区长也行"，跟"仅平台岗"对不上。
+        "dist.write": role == ROLE_PLATFORM,
+        "dist.export": role == ROLE_PLATFORM,
     }
 
 
@@ -1605,8 +1607,23 @@ class App:
         from .features.valueadd.film import export as film_export_mod
         return film_export_mod.export(self.root, self.film(day=day), who=who, name=name)
 
+    def film_drill(self, store: str, kind: str, day=None) -> dict:
+        """防护膜页某一格数字的明细底稿（单号/品名/数量/支付时间/毛利，含退货）。
+
+        `kind` 见 `film.compute.DRILL_KINDS`（新机 / 贴膜达成 / 礼包达成 / 三份毛利）。
+
+        ⚠ **按店读的接口先问 `scope_store_ok`**（坑 18：菜单里能点到 ≠ 有权限）——
+          门店账号查别家店要 403，而不是把别家的销售单摊给他看。
+        """
+        from .features.valueadd.film import compute as film_compute
+        sc = role_scope(self)
+        if not scope_store_ok(sc, store):
+            return forbid(sc, "看销售明细", "只能看自己范围内的门店")
+        return film_compute.drill_rows(self.root, store=store, kind=kind, day=day)
+
     # ------------------------------------------------------------ 分销（2.3.0）
-    # ⚠ 这一组的可见性是 `types="multi"`（区长/平台），路由层每条另有 403
+    # ⚠ 这一组的可见性是 `types="platform"`（**仅平台岗**，2026-09-30 收紧；
+    #   原来是 `multi` = 区长/平台），路由层每条另有 403
     #   （坑 18：藏菜单从来不算权限）。数据范围=渠道分销部，**不走** `scope_store_ok`
     #   —— 它不在 `config/stores.yaml` 的 30 家名单里（那是门店名单，
     #   渠道分销部是职能部门），按名单判会把所有人拦成"没有数据"。
@@ -1672,11 +1689,18 @@ class App:
         return common
 
     def dist_detail(self, query: dict, limit: int = 2000) -> dict:
-        """明细底表：区间行 + 区标注（下拉就挂在这一页）。"""
+        """明细底表：区间行 + 区标注（下拉就挂在这一页）。
+
+        ⚠ 2026-09-30 起也当**下钻接口**用：机型行 / 销售员行点开时带
+          `field/value`（第二级 `field2/value2`）—— 只回那一档的销售单。
+          列名走 `DIST_DRILL_FIELDS` 白名单，没在名单里的**直接报错**
+          （不是静默忽略：前端拼错列名得看得见，否则下钻会"点开是全部行"）。
+        """
         from .features.distribution import TARGET_STORE as _dist_store_name
         from .features.distribution import metrics as dist_metrics
         from .features.distribution import region as dist_region
         from .features.distribution import store as dist_store
+        from .features.distribution import DRILL_FIELDS, drill_hit
         start, end, note = self._dist_range(query)
         zone = str((query.get("zone") or [""])[0] or "").strip()
         rows = dist_store.read_rows(self.root, start, end)
@@ -1686,11 +1710,25 @@ class App:
         dist_region.annotate(rows, mapping)
         if zone:
             rows = [r for r in rows if r["_zone"] == zone]
+        # —— 下钻筛选（机型 / 销售员 → 品类 → 销售单）
+        drill = {}
+        for f_key, v_key in (("field", "value"), ("field2", "value2")):
+            f = str((query.get(f_key) or [""])[0] or "").strip()
+            v = str((query.get(v_key) or [""])[0] or "").strip()
+            if not f and not v:
+                continue
+            if not f or not v:
+                return {"ok": False, "why": "%s 和 %s 要一起给" % (f_key, v_key)}
+            if f not in DRILL_FIELDS:
+                return {"ok": False, "why": "不能按这一列筛：%s" % f}
+            rows = [r for r in rows if drill_hit(r, f, v)]
+            drill[f] = v
         total = len(rows)
         return {"ok": True, "start": start.isoformat(), "end": end.isoformat(),
                 "range_note": note, "fetched": dist_store.range_covered(
                     self.root, start, end) is not None,
                 "store": _dist_store_name,
+                "drill": drill,
                 "total": total, "rows": rows[:limit], "truncated": total > limit,
                 "mapping": {k: v for k, v in mapping.items() if v}}
 
@@ -1824,6 +1862,20 @@ class App:
     def benefit_export(self, who: str = "", name: str = "", day=None) -> dict:
         from .features.valueadd.benefit import export as benefit_export_mod
         return benefit_export_mod.export(self.root, self.benefit(day=day), who=who, name=name)
+
+    def benefit_drill(self, store: str, kind: str, day=None) -> dict:
+        """权益页某一格数字的明细底稿 —— 范围同 `film_drill`（坑 18）。
+
+        `kind` 见 `benefit.compute.DRILL_KINDS`（新机 / 无忧 / Care+ / 合计 / 三份利润）。
+
+        ⚠ 这条路**不碰名册**（只查 sqlite）：明细不需要人店表，
+          省掉一次可能联网的 `load_people`。
+        """
+        from .features.valueadd.benefit import compute as benefit_compute
+        sc = role_scope(self)
+        if not scope_store_ok(sc, store):
+            return forbid(sc, "看销售明细", "只能看自己范围内的门店")
+        return benefit_compute.drill_rows(self.root, store=store, kind=kind, day=day)
 
     def claim_activities(self) -> dict:
         """「小工具 · 权益领取 · 活动一览」—— 只读配置，零网络。
@@ -3310,6 +3362,24 @@ class Handler(BaseHTTPRequestHandler):
                                   name=body.get("name") or "",
                                   day=parse_end_day(body.get("end")))
             return self._json(res)
+        # **增值 · 明细下钻**（2026-09-29）：点门店行上某个数字 → 这家店的销售单。
+        # ⚠ 与 `/api/film` 同一个 `?end=` 窗口；`?kind=` 决定看哪个指标
+        #   （合法值 = `film.compute.DRILL_KINDS` 的键）；`?store=` 的范围在
+        #   `App.film_drill` 里验（坑 18：藏菜单从来不算权限）。
+        if path == "/api/film/drill" and method == "GET":
+            store = (query.get("store") or [""])[0]
+            kind = (query.get("kind") or [""])[0]
+            if not str(store).strip():
+                return self._json({"ok": False, "error": "没指定门店"}, 400)
+            if not str(kind).strip():
+                return self._json({"ok": False, "error": "没指定要看的指标"}, 400)
+            res = app.film_drill(store, kind, day=parse_end_day(
+                (query.get("end") or [""])[0]))
+            if res.get("forbidden"):
+                return self._json(res, 403)
+            if not res.get("ok"):
+                return self._json(dict(res, error=res.get("why") or "读明细失败"), 400)
+            return self._json(res)
         # **增值 · 无忧会员权益**（2026-09-22）—— 本地库现算；范围在 App.benefit() 滤。
         if path == "/api/benefit" and method == "GET":
             end = parse_end_day((query.get("end") or [""])[0])
@@ -3322,6 +3392,20 @@ class Handler(BaseHTTPRequestHandler):
             res = app.benefit_export(who=scope.get("who") or scope.get("account") or "",
                                      name=body.get("name") or "",
                                      day=parse_end_day(body.get("end")))
+            return self._json(res)
+        if path == "/api/benefit/drill" and method == "GET":
+            store = (query.get("store") or [""])[0]
+            kind = (query.get("kind") or [""])[0]
+            if not str(store).strip():
+                return self._json({"ok": False, "error": "没指定门店"}, 400)
+            if not str(kind).strip():
+                return self._json({"ok": False, "error": "没指定要看的指标"}, 400)
+            res = app.benefit_drill(store, kind, day=parse_end_day(
+                (query.get("end") or [""])[0]))
+            if res.get("forbidden"):
+                return self._json(res, 403)
+            if not res.get("ok"):
+                return self._json(dict(res, error=res.get("why") or "读明细失败"), 400)
             return self._json(res)
         # **小工具 · 权益领取**（2026-09-22）—— 活动只读配置；待领滤店；状态写本机。
         if path == "/api/claim/activities" and method == "GET":
@@ -3373,18 +3457,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sn-trace" and method == "GET":
             code = (query.get("code") or [""])[0]
             return self._json(app.sn_trace(code))
-        # **分销（2.3.0，2026-09-29）** —— 渠道分销部四张看板。
-        # ⚠ 每条都有 403（坑 18：菜单 `types="multi"` 藏起来**不算权限**，
-        #   写个 curl 就进来了）；判据跟页面同一份：门店一律拦。
+        # **分销（2.3.0，2026-09-29；2026-09-30 收紧成仅平台岗）** —— 渠道分销部四张看板。
+        # ⚠ 这道统一 403 是**这一组唯一的身份门**（坑 18：菜单藏起来不算权限，
+        #   写个 curl 就进来了）—— 判据跟页面同一份：**不是平台岗一律拦**。
+        #   原来只拦门店（区长放行），2026-09-30 用户复核「分销仅平台岗可见」收紧。
         if path.startswith("/api/dist"):
-            if scope.get("role") == ROLE_STORE:
+            if scope.get("role") != ROLE_PLATFORM:
                 return self._json(forbid(scope, "看分销看板",
-                                         "这是区长/平台看的页面"), 403)
+                                         "这是平台岗看的页面"), 403)
             if path == "/api/dist/board" and method == "GET":
                 return self._json(app.dist_board(
                     (query.get("kind") or ["region"])[0], query))
             if path == "/api/dist/detail" and method == "GET":
-                return self._json(app.dist_detail(query))
+                # ⚠ 下钻参数错了（列名不在白名单 / 只给一半）必须 **400 + error**：
+                #   200 + `{ok:false}` 会让前端 `api()` 当成功、把 rows 当空表显示 ——
+                #   表现是「点开是空的」，没人查得出是列名拼错了。
+                res = app.dist_detail(query)
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "读明细失败"),
+                                      400)
+                return self._json(res)
             if path == "/api/dist/map" and method == "GET":
                 return self._json(app.dist_map(query))
             if path == "/api/dist/fetch" and method == "POST":

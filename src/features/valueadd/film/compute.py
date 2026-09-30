@@ -102,6 +102,61 @@ def _load_rows_sqlite(db: Path, start: str, end: str, stores=None):
         conn.close()
 
 
+def new_bucket(c1: str, typ: str, note: str) -> str:
+    """这行算不算「新机」—— `''` 不算 · `retail` 零售净 · `meituan` 美团分销净。
+
+    ⚠ **唯一判据**：行归类看 `row_kind()`，新机那一档由这里定 ——
+      `compute` 的累加和 `drill_rows()` 的明细底稿都走同一条路。
+      判据写两份迟早走散（页面数字和明细合计对不上 —— 那是最贵的一种走散）。
+    ⚠ `note` 必须是 `_load_rows_sqlite` 那份拼法（备注+单行备注+客户/顾客+付款方式）——
+      分销判「美团」时客户字段也算（万达备注不写美团、客户字段写）。
+    """
+    if c1 != "手机":
+        return ""
+    if typ in ("零售", "零售退"):
+        return "retail"
+    if typ in ("分销", "分销退") and "美团" in note:
+        return "meituan"
+    return ""
+
+
+def row_kind(c1: str, c2: str, typ: str, name: str, note: str) -> str:
+    """这行属于哪个指标 —— `''` 哪个都不算 · `new_retail`/`new_meituan` · `gift` · `film`。
+
+    ⚠ **唯一判据**：`compute` 的累加和 `drill_rows()` 的明细底稿**都走它**。
+      判据写两份迟早走散（页面数字和明细合计对不上 —— 那是最贵的一种走散）。
+    ⚠ 顺序跟原来一致：手机行**整行归新机**（不算新机也是 `''`，不落到礼包/贴膜分支）。
+    """
+    if c1 == "手机":
+        b = new_bucket(c1, typ, note)
+        if b == "retail":
+            return "new_retail"
+        if b == "meituan":
+            return "new_meituan"
+        return ""
+    if metric.is_gift(name):
+        return "gift" if typ in metric.SELL else ""
+    if c2 == "贴膜" and name != metric.SOFT and typ in metric.SELL:
+        return "film"
+    return ""
+
+
+#: 下钻指标表（**页面上能点的那些格**）—— kind → 归属行 / 取值字段 / 单位 / 标题 / 折算。
+#:
+#: ⚠ 金额类跟台数类**常常是同一批行换个取值字段**（贴膜台数 vs 贴膜毛利），
+#:   所以判据还是那一份 `row_kind()`，别为金额类另写一遍行判定。
+#: ⚠ `factor` 只有新机有（渠道折算 ×0.9），元类一律 1。
+DRILL_KINDS: Dict[str, tuple] = {
+    "new":          (frozenset(("new_retail", "new_meituan")), "qty", "台",
+                     "新机销售", metric.NEW_FACTOR),
+    "film":         (frozenset(("film",)), "qty", "台", "达成（贴膜）", 1.0),
+    "gift":         (frozenset(("gift",)), "qty", "台", "礼包达成", 1.0),
+    "film_profit":  (frozenset(("film",)), "profit", "元", "零售毛利达成", 1.0),
+    "gift_profit":  (frozenset(("gift",)), "profit", "元", "礼包毛利达成", 1.0),
+    "total_profit": (frozenset(("film", "gift")), "profit", "元", "总毛利达成", 1.0),
+}
+
+
 def _blank_acc() -> Dict[str, float]:
     return {"new_retail": 0.0, "new_meituan": 0.0,
             "film_qty": 0.0, "film_profit": 0.0,
@@ -186,24 +241,21 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         qty, profit, typ = r["数量"], r["毛利"], r["类型"]
         c1, c2, name, note = r["c1"], r["c2"], r["名称"], r["note"]
 
-        if c1 == "手机":
-            if typ in ("零售", "零售退"):
-                a["new_retail"] += qty
-                pa["new_retail"] += qty
-            elif typ in ("分销", "分销退") and "美团" in note:
-                a["new_meituan"] += qty
-                pa["new_meituan"] += qty
-            continue
-
-        if metric.is_gift(name):
-            if typ in metric.SELL:
-                a["gift_qty"] += qty
-                a["gift_profit"] += profit
-                pa["gift_qty"] += qty
-                pa["gift_profit"] += profit
-            continue
-
-        if c2 == "贴膜" and name != metric.SOFT and typ in metric.SELL:
+        # ⚠ 归类走 `row_kind()` —— 明细下钻（`drill_rows`）问的是同一个函数，
+        #   页面数字和明细合计才不会走散。
+        k = row_kind(c1, c2, typ, name, note)
+        if k == "new_retail":
+            a["new_retail"] += qty
+            pa["new_retail"] += qty
+        elif k == "new_meituan":
+            a["new_meituan"] += qty
+            pa["new_meituan"] += qty
+        elif k == "gift":
+            a["gift_qty"] += qty
+            a["gift_profit"] += profit
+            pa["gift_qty"] += qty
+            pa["gift_profit"] += profit
+        elif k == "film":
             a["film_qty"] += qty
             a["film_profit"] += profit
             pa["film_qty"] += qty
@@ -235,6 +287,86 @@ def compute(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         "summary": metric.summarize(rows),
         "source": src,
         "transfer_rows": transfer,
+        "note": note,
+    }
+
+
+def drill_rows(root=None, store: str = "", kind: str = "new", day=None) -> dict:
+    """某店本窗口**某个指标**纳入统计的销售行 —— 页面那一格数字的明细底稿。
+
+    `kind` 见 `DRILL_KINDS`（页面上能点的那些格：新机 / 贴膜达成 / 礼包达成 /
+    三份毛利）。列（用户 2026-09-29 点名，同日追加「带上毛利吧」）：
+    **销售单号 · 单据类型 · 商品名称 · 数量 · 销售时间 · 毛利**。
+    **含退货**：源数据里退货数量本来就是负数，进明细也进合计（直接相加）。
+
+    ⚠ 行判定 = `row_kind()`（与 `compute` 同一个）⇒ `合计 × factor` 必须
+      等于页面那一格的值。改口径只改 `row_kind` / `DRILL_KINDS`，别在这里另写一套。
+    ⚠ 老库可能没有 `单号` 列 —— `PRAGMA` 问一下，缺就补 `'' AS 单号`
+      （同 `_select_sql` 的兜底，别让整条接口 `no such column` 挂掉）。
+    """
+    spec = DRILL_KINDS.get(kind)
+    if spec is None:
+        return {"ok": False, "why": "不认识的指标：%s" % kind}
+    kinds, field, unit, label, factor = spec
+    root = Path(root or ROOT)
+    start, end = month_window(day)
+    store = str(store or "").strip()
+    if not store:
+        return {"ok": False, "why": "没指定门店"}
+    db = find_db(root)
+    if not (db and db.exists()):
+        return {"ok": False, "why": "找不到订单库（out/cbg-*.db）—— 先跑「抓数据」"}
+    end_ex = (datetime.date.fromisoformat(end)
+              + datetime.timedelta(days=1)).isoformat()
+    conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    rows: List[dict] = []
+    try:
+        conn.row_factory = sqlite3.Row
+        try:
+            have = {str(r[1]) for r in conn.execute("PRAGMA table_info(erp_sales)")}
+        except sqlite3.Error:
+            have = set()
+        no = '"单号"' if "单号" in have else "'' AS \"单号\""
+        cust = '"客户/顾客"' if "客户/顾客" in have else "'' AS \"客户/顾客\""
+        sql = ("SELECT " + no + ", 单据类型, 一级分类, 二级分类, 商品名称, 数量,"
+               " 零售考核毛利, 支付时间, 备注, 单行备注, " + cust + ", 付款方式"
+               " FROM erp_sales"
+               " WHERE 支付时间 >= ? AND 支付时间 < ? AND 门店 = ?")
+        for r in conn.execute(sql, (start, end_ex, store)):
+            # ⚠ 拼法必须跟 `_load_rows_sqlite` 一致 —— 分销判「美团」连客户字段一起看
+            note = " ".join(str(r[k] or "") for k in ("备注", "单行备注",
+                                                      "客户/顾客", "付款方式"))
+            k = row_kind(r["一级分类"] or "", r["二级分类"] or "",
+                         r["单据类型"] or "", r["商品名称"] or "", note)
+            if k not in kinds:
+                continue
+            rows.append({
+                "no": r["单号"] or "",
+                "typ": r["单据类型"] or "",
+                "name": r["商品名称"] or "",
+                "qty": _f(r["数量"]),
+                "profit": _f(r["零售考核毛利"]),
+                "ts": r["支付时间"] or "",
+            })
+    finally:
+        conn.close()
+    rows.sort(key=lambda x: (str(x["ts"]), str(x["no"])), reverse=True)
+    total = sum((x["qty"] if field == "qty" else x["profit"]) for x in rows)
+    shown = round(total * factor, 2)
+    if field == "qty":
+        note = "合计是原始%s数（退货是负数、已在合计里冲减）" % unit
+        if factor != 1:
+            note += ("；页面上的「%s」= 合计 ×%s（渠道折算）"
+                     % (label, ("%g" % factor)))
+        else:
+            note += "；就是页面上的「%s」" % label
+    else:
+        note = "合计是这些单的零售考核毛利之和，就是页面上的「%s」" % label
+    return {
+        "ok": True, "why": "",
+        "store": store, "start": start, "end": end,
+        "kind": kind, "label": label, "unit": unit, "field": field,
+        "rows": rows, "total": total, "factor": factor, "shown": shown,
         "note": note,
     }
 
