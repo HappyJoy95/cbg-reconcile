@@ -441,6 +441,18 @@ class Test页面接线(unittest.TestCase):
         blk = APP_JS[i:i + 1600]
         self.assertIn("cashierLookup(true)", blk, "回车没走'聚焦金额'那条路")
 
+    def test_卡片渲染和汇总接上了(self):
+        """表格换订单卡（Task 9）：三函数在、旧表格渲染删干净、汇总四要素有落点。"""
+        for fn in ("renderCashierCards", "cashierRenderSummary",
+                   "cashierCardHtml"):
+            with self.subTest(fn=fn):
+                self.assertIn("function %s" % fn, APP_JS)
+        self.assertNotIn("renderCashierTable", APP_JS, "旧表格渲染要删干净")
+        # 汇总四要素：笔数/件数/实收/配件 都有落点
+        for cid in ("cashier-count", "cashier-qty-sum",
+                    "cashier-amount-sum", "cashier-acc-sum"):
+            self.assertIn("'%s'" % cid, APP_JS)
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:

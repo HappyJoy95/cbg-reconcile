@@ -467,33 +467,87 @@ async function cashierRemove(id) {
   }
 }
 
-function renderCashierTable(rows) {
-  const host = $('#cashier-table');
-  const meta = $('#cashier-day-label');
+// ⚠ 拼 HTML 必须转义（坑 3）—— `esc` 已经做了，这里是空值兜底的同款包装
+function esc2(s) { return esc(s == null ? '' : String(s)); }
+
+function cashierPayViewHtml(r) {
+  const pays = (r.payments || []);
+  if (!pays.length) return '<div class="cc-muted">未记录</div>';
+  const sum = pays.reduce((a, x) => a + (Number(x.amount) || 0), 0);
+  const amt = Number(r.amount) || 0;
+  const warn = Math.abs(sum - amt) > 0.009
+    ? `<div class="pay-warn">已付 ¥${sum.toFixed(2)} ≠ 实收 ¥${amt.toFixed(2)}</div>` : '';
+  return '<div class="cc-row">'
+    + pays.map((p) => `<span>${esc2(p.method)} ¥${(Number(p.amount) || 0).toFixed(2)}</span>`)
+      .join('、')
+    + '</div>' + warn;
+}
+
+function cashierCardHtml(r) {
+  const acc = (r.accessories || []);
+  const sold = String(r.sold_at || '').slice(5, 16);
+  const src = r.source === 'linglong'
+    ? '<span class="cc-wait" title="修改只影响本机视图，不动华为原单">玲珑 '
+      + esc2(r.external_id || '') + '</span>' : '';
+  const accHtml = acc.length
+    ? '<div class="cc-acc"><b>配件</b>'
+      + acc.map((x) => `<div class="cc-acc-row"><span>${esc2(x.name)}</span>`
+        + `<span>¥${(Number(x.amount) || 0).toFixed(2)}</span></div>`).join('')
+      + '</div>'
+    : '';
+  return `<div class="cashier-card card" data-id="${r.id}">`
+    + `<div class="cc-main">`
+    + `<div class="cc-time">${esc2(sold)} ${src}</div>`
+    + `<div class="cc-name">${esc2(r.goods_name) || '（没填名称）'}</div>`
+    + `<div class="cc-meta">商品编码 ${esc2(r.goods_code) || '—'}`
+    + `<br>SN ${esc2(r.sn) || '—'}</div>`
+    + `<div class="cc-amount-row"><span class="cc-qty">数量 ${r.quantity}</span>`
+    + `<span class="cc-amount">¥${(Number(r.amount) || 0).toFixed(2)}</span></div>`
+    + accHtml
+    + `<div class="cc-actions">`
+    + `<button class="btn ghost small" data-cc-edit="${r.id}">改</button>`
+    + `</div>`
+    + `</div>`
+    + `<div class="cc-side">`
+    + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
+    + `<div class="cc-row"><span class="k">销售员</span>`
+    + `<span class="v">${esc2(r.seller) || '—'}</span></div>`
+    + `<div class="cc-row"><span class="k">备注</span>`
+    + `<span class="v">${esc2(r.note) || '—'}</span></div></div>`
+    + `<div class="cc-group cc-muted"><div class="cc-group-title">客户信息</div>`
+    + `会员/手机号<span class="cc-wait">待接入</span></div>`
+    + `<div class="cc-group"><div class="cc-group-title">支付方式</div>`
+    + cashierPayViewHtml(r)
+    + `</div>`
+    + `</div>`
+    + `<button class="cc-close" data-cc-close="${r.id}" title="删除这笔">✕</button>`
+    + `</div>`;
+}
+
+function cashierRenderSummary(rows, day) {
+  const n = rows.length;
+  const qty = rows.reduce((a, r) => a + (Number(r.quantity) || 0), 0);
+  const amt = rows.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+  const acc = rows.reduce((a, r) => a + (r.accessories || [])
+    .reduce((b, x) => b + (Number(x.amount) || 0), 0), 0);
+  const set = (id, v) => { const el = $('#' + id); if (el) el.textContent = v; };
+  set('cashier-count', n);
+  set('cashier-qty-sum', Math.round(qty * 100) / 100);
+  set('cashier-amount-sum', amt.toFixed(2));
+  set('cashier-acc-sum', acc.toFixed(2));
+  const lab = $('#cashier-day-label');
+  if (lab) lab.textContent = day || cashierToday();
+}
+
+function renderCashierCards(rows) {
+  const host = $('#cashier-cards');
   _cashierRows = {};
   (rows || []).forEach((r) => { _cashierRows[r.id] = r; });
   if (!rows || !rows.length) {
-    host.innerHTML = '<div class="empty">这天还没有流水</div>';
-    if (meta) meta.textContent = '';
+    if (host) host.innerHTML = '<div class="empty">这天还没有流水</div>';
     return;
   }
-  const sum = rows.reduce((a, r) => a + (Number(r.amount) || 0), 0);
-  if (meta) {
-    meta.textContent = `共 ${rows.length} 笔 · 合计 ¥${Math.round(sum * 100) / 100}`;
-  }
-  host.innerHTML = table(
-    ['时间', '编码', '商品', '数量', '金额', '销售员', '备注', '操作'],
-    rows.map((r) => [
-      String(r.sold_at || '').slice(5, 16),
-      r.goods_code || '',
-      r.goods_name || '',
-      r.quantity,
-      { html: '<b>¥' + esc(Number(r.amount).toFixed(2)) + '</b>' },
-      r.seller || '',
-      r.note || '',
-      { html: `<button class="btn ghost small" data-edit="${esc(r.id)}">改</button> `
-        + `<button class="btn ghost small" data-del="${esc(r.id)}">删</button>` },
-    ]));
+  if (host) host.innerHTML = rows.map(cashierCardHtml).join('');
 }
 
 async function loadCashier() {
@@ -517,9 +571,10 @@ async function loadCashier() {
       dl.innerHTML = (d.sellers || [])
         .map((s) => `<option value="${esc(s)}"></option>`).join('');
     }
-    renderCashierTable(d.rows || []);
+    renderCashierCards(d.rows || []);
+    cashierRenderSummary(d.rows || [], cashierDayValue());
   } catch (e) {
-    const host = $('#cashier-table');
+    const host = $('#cashier-cards');
     if (host) host.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
     toast('读取流水失败：' + e.message, 'bad');
   }
@@ -564,17 +619,8 @@ function bindCashierEvents() {
   $('#cashier-cancel').addEventListener('click', cashierResetForm);
   $('#cashier-day').addEventListener('change', loadCashier);
   $('#cashier-refresh').addEventListener('click', cashierRefreshPolicy);
-  // 表格按钮走事件委托（每次重画都会换掉节点，绑死的监听会跟着丢）
-  $('#cashier-table').addEventListener('click', (e) => {
-    const t = e.target.closest('[data-edit]');
-    if (t) {
-      const r = _cashierRows[t.dataset.edit];
-      if (r) { cashierFill(r); }
-      return;
-    }
-    const d = e.target.closest('[data-del]');
-    if (d) cashierRemove(Number(d.dataset.del));
-  });
+  // ⚠ 卡片容器（#cashier-cards）的点击委托**故意还没接** —— 编辑是 Task 10、
+  //   支付/✕ 是 Task 11 的事。本任务只做视图态渲染，点了没反应是计划内中间态。
 }
 
 /* ─────────────── 库存盘点：已拆 iframe、并进同文档（2026-09-22）───────────────
