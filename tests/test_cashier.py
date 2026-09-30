@@ -772,6 +772,12 @@ class Test导入接口(_RootCase):
         self.assertEqual(st, 400)
         self.assertIn("日期", d["error"])
 
+    def test_导入真路径_坏日期不500(self):
+        """⚠ 不 mock App.cashier_import —— 编排测试全绿也挡不住实现层崩（2026-09-30 实测教训）。"""
+        st, d = self.srv.request("POST", "/api/cashier/import", {"day": "not-a-date"})
+        self.assertEqual(st, 400)
+        self.assertIn("日期", d.get("error", ""))
+
     def test_排除接口_软排除走通(self):
         store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
                                      "amount": 1, "source": "linglong"})

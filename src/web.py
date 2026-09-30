@@ -2118,7 +2118,7 @@ class App:
         from .features.cashier import store as cashier_store
         day = str((body or {}).get("day") or "").strip()
         try:
-            datetime.strptime(day, "%Y-%m-%d")
+            datetime.datetime.strptime(day, "%Y-%m-%d")
         except ValueError:
             return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
         path = cashier_store.ensure(self.root)
