@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 from src import pmall                                                # noqa: E402
 from src import web                                                  # noqa: E402
 from src.features.cashier import store                               # noqa: E402
+from src.features.cashier import exporter                            # noqa: E402
 
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -1000,6 +1001,168 @@ class Test暂存与入库(_RootCase):
         self.assertEqual(res.get("imported"), 1, res)
         r = store.list_entries(self.root, day="2026-09-30")[0]
         self.assertEqual(r["status"], "staged", "导入的卡片是暂存，不直接入账")
+
+
+# ────────────────────────────────────── 保存并记录 / 导出 接口
+class Test入库与导出接口(_RootCase):
+    def setUp(self):
+        super().setUp()
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+        p = mock.patch.object(web, "setup_state",
+                              lambda app: {"ready": True, "need": "", "why": ""})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_commit接口转正当天暂存(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 1,
+                                     "status": "staged"})
+        st, d = self.srv.request("POST", "/api/cashier/commit",
+                                 {"day": "2026-09-30"})
+        self.assertEqual((st, d.get("saved")), (200, 1), d)
+
+    def test_commit日期不对_400带error(self):
+        st, d = self.srv.request("POST", "/api/cashier/commit", {"day": "x"})
+        self.assertEqual(st, 400)
+        self.assertIn("日期", d["error"])
+
+    def test_导出接口回file_文件真是xlsx_白名单认得(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 100,
+                                     "goods_name": "MatePad", "category": "平板"})
+        st, d = self.srv.request("POST", "/api/cashier/export",
+                                 {"month": "2026-09"})
+        self.assertEqual(st, 200, d)
+        self.assertTrue(d.get("file", "").endswith(".xlsx"), d)
+        head = Path(d["path"]).read_bytes()[:2]
+        self.assertEqual(head, b"PK", "导出件必须是真 xlsx（zip 头）")
+        # 下载接口认得（只许 out/exports 下的一个文件名 —— 走现成白名单）
+        self.assertIsNotNone(self.srv.app.export_file(d["file"]))
+
+    def test_导出月份不对_400带error(self):
+        st, d = self.srv.request("POST", "/api/cashier/export", {"month": "9月"})
+        self.assertEqual(st, 400)
+        self.assertTrue(d.get("error"), d)
+
+    def test_区长平台照样403(self):
+        with mock.patch.object(web, "role_scope", lambda _a: _scope("manager")):
+            for path in ("/api/cashier/commit", "/api/cashier/export"):
+                with self.subTest(path=path):
+                    st, d = self.srv.request("POST", path, {"day": "2026-09-30",
+                                                            "month": "2026-09"})
+                    self.assertEqual(st, 403)
+
+
+# ────────────────────────────────────── 导出内容（两 sheet，对齐参考表）
+class Test导出内容(_RootCase):
+    def _sheets(self, month="2026-09"):
+        return exporter.sheets(self.root, month)
+
+    def test_销售表列头逐列对齐参考表(self):
+        """列序 = 用户《9月份机场销售表》表头逐列（含空列占位）。"""
+        self.assertEqual(exporter.HEAD, [
+            "时间", "品类", "编码", "明细", "序列号", "数量", "合计", "金额",
+            "#", ".", "销售员",
+            "助手", "C扫B", "POS", "现金", "公对公",
+            "付以旧换新(旧)", "付以旧换新(新)", "预收款",
+            "企业微信", "支付宝直连", "微信直连",
+            "发票备注", "服务", "备注", "京东到家配送地址", "姓名", "电话",
+            "身份证号", "住址（送货地址）", "购买机型", "金额", "发票号",
+        ])
+
+    def test_手工单一行_成本反查_毛利相减(self):
+        store.save_policy(self.root, rows=[{
+            "商品名称": "MatePad", "商品编码": "6901",
+            "入库价": 1000, "无条件单台返利金额": 100,
+            "有条件最高单台返利金额": 50}])
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-03 10:00", "amount": 990, "quantity": 1,
+            "goods_code": "6901", "goods_name": "MatePad", "category": "平板",
+            "seller": "张三", "note": "老客户",
+            "payments": [{"method": "现金", "amount": 990}]})
+        sheets = self._sheets()
+        head, rows = sheets["9月份销售表"]
+        self.assertEqual(head, exporter.HEAD)
+        self.assertEqual(len(rows), 1)
+        r = dict(zip(head, rows[0]))
+        self.assertEqual(r["时间"], "9.3")
+        self.assertEqual(r["品类"], "平板")
+        self.assertEqual(r["合计"], 990)
+        self.assertEqual(r["金额"], 990)
+        self.assertEqual(r["#"], 850, "成本 = 入库价 − 无条件 − 有条件")
+        self.assertEqual(r["."], 140, "毛利 = 金额 − 成本")
+        self.assertEqual(r["销售员"], "张三")
+        self.assertEqual(r["现金"], 990)
+        self.assertEqual(r["备注"], "老客户")
+        # 没数据的列保留空占位
+        self.assertIn("姓名", head)
+        self.assertIsNone(r["姓名"])
+
+    def test_成本查不到就留空(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-03 10:00",
+                                     "amount": 100, "goods_code": "NO-POLICY"})
+        _, rows = self._sheets()["9月份销售表"]
+        r = dict(zip(exporter.HEAD, rows[0]))
+        self.assertIsNone(r["#"])
+        self.assertIsNone(r["."])
+
+    def test_玲珑多行单拆行_合计相同_支付只落首行(self):
+        path = store.ensure(self.root)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE IF NOT EXISTS orders (document_no TEXT PRIMARY KEY,"
+                     " doc_create_time TEXT, included_tax_amount REAL, remark TEXT,"
+                     " consumer_guide_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS order_lines (document_no TEXT,"
+                     " line_no INTEGER, sn TEXT, ean TEXT, item_name TEXT,"
+                     " quantity REAL, included_tax_amount REAL)")
+        conn.execute("INSERT INTO orders VALUES ('DN9','2026-09-05 14:32:00',"
+                     " 1000,'','张三')")
+        conn.execute("INSERT INTO order_lines VALUES ('DN9',1,'S1','6901','手机A',1,800)")
+        conn.execute("INSERT INTO order_lines VALUES ('DN9',2,'S2','6902','壳',1,200)")
+        conn.commit()
+        conn.close()
+        store.entries_from_orders(self.root, "2026-09-05")
+        # 给这张卡补支付（模拟人在卡里录了组合支付再入库）
+        rows0 = store.list_entries(self.root, day="2026-09-05")
+        store.save_entry(self.root, dict(rows0[0], amount=1000,
+                                         payments=[{"method": "现金", "amount": 400},
+                                                   {"method": "微信直连", "amount": 600}]),
+                         entry_id=rows0[0]["id"])
+        head, rows = self._sheets()["9月份销售表"]
+        self.assertEqual(len(rows), 2, "一个订单两个商品 = 两行")
+        a, b = dict(zip(head, rows[0])), dict(zip(head, rows[1]))
+        self.assertEqual(a["合计"], 1000)
+        self.assertEqual(b["合计"], 1000, "合计是订单合计，每行重复")
+        self.assertEqual(a["金额"] + b["金额"], 1000, "金额是各商品自己的")
+        self.assertEqual(a["编码"], "6901")
+        self.assertEqual(b["明细"], "壳")
+        self.assertEqual(a["现金"], 400, "支付只落首行，防止求和翻倍")
+        self.assertIsNone(b["现金"])
+        self.assertEqual(a["微信直连"], 600)
+        self.assertEqual(a["序列号"], "S1")
+
+    def test_政策表sheet带现行表(self):
+        store.save_policy(self.root, rows=[{
+            "商品名称": "MatePad", "商品编码": "6901", "入库价": 1000,
+            "无条件单台返利金额": 100, "有条件最高单台返利金额": 50}])
+        sheets = self._sheets()
+        self.assertIn("政策表", sheets)
+        head, rows = sheets["政策表"]
+        self.assertIn("商品编码", head)
+        self.assertNotIn("fetched_at", head, "记账列不进导出")
+        self.assertNotIn("goods_code", head, "记账列不进导出（原表头是商品编码）")
+        self.assertEqual(rows[0][head.index("商品编码")], "6901")
+
+    def test_当月过滤_别的月不导(self):
+        store.save_entry(self.root, {"sold_at": "2026-08-31 10:00", "amount": 1})
+        store.save_entry(self.root, {"sold_at": "2026-09-01 10:00", "amount": 2})
+        _, rows = self._sheets("2026-09")["9月份销售表"]
+        self.assertEqual(len(rows), 1)
+
+    def test_月份格式不对回why(self):
+        with self.assertRaises(ValueError) as cm:
+            exporter.sheets(self.root, "2026/09")
+        self.assertIn("月份", str(cm.exception))
 
 
 if __name__ == "__main__":

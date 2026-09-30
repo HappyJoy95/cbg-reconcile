@@ -595,22 +595,29 @@ def _setup_state_lifehall(app) -> dict:
     ⚠ 不卡自检（`check_ok`）—— 用户原话"抓到真实登录数据后就给登录"，
       抓取流程本身已经验过会话真假（`_capture_worker` 的 verify），这里再卡
       一道只会把"存好了但没点自检"的人挡在门外。
+
+    ⚠ **预览（跳过）也放行**（用户 2026-09-30：「登录页加个跳过按钮，让我直接进入」）——
+      早先"生活馆没有跳过看界面这回事"那条作废。语义跟 full 版一模一样：
+      `set_preview` 只写 `.secrets/preview.json`、**只放行界面**，
+      要会话的抓取/导入照常报错，顶上一直挂着预览横幅。
     """
     v = config_io.pick(config_io.load_raw(app.config_path))
     prof = config_io.store_profile(v, app.root)
     s = app.session_info()
     ling_ok = bool(s.get("exists"))
     ling_why = "已抓到玲珑会话" if ling_ok else "还没抓到玲珑会话"
+    prev = preview_on(app)
     return {
-        "ready": bool(ling_ok),
+        "ready": bool(ling_ok or prev),
         "lifehall": True,
-        "preview": False,
-        "preview_available": False,      # 生活馆没有"跳过看界面"这回事
+        "preview": bool(prev and not ling_ok),
+        # 还没会话 ⇒ 登录页上那个「跳过」按钮随时能用（预览开没开都给）
+        "preview_available": bool(not ling_ok),
         "erp": {"ok": True, "why": "生活馆版没有云商这一步", "username": "",
                 "has_token": False},
         "linglong": {"ok": bool(ling_ok), "why": ling_why},
         "profile": prof,
-        "need": ("" if ling_ok else "linglong"),
+        "need": ("" if (ling_ok or prev) else "linglong"),
     }
 
 
@@ -2171,6 +2178,26 @@ class App:
                 return {"ok": False, "why": "写不进去：%s" % e}
         return {"ok": True, "blacklist": import_cfg.load(self.root)}
 
+    def cashier_commit(self, body: dict) -> dict:
+        """「保存并记录」—— 把**那天**的暂存行批量转成已入库（两段式的第二段）。"""
+        from .features.cashier import store as cashier_store
+        day = str((body or {}).get("day") or "").strip()
+        try:
+            return cashier_store.commit_entries(self.root, day)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_export(self, body: dict = None, who: str = "") -> dict:
+        """当月导出（销售表 + 现行政策表两个 sheet）→ `out/exports/` 落盘。
+
+        月份缺省用**今天所在的月**（前端一般会点名传，这里只是别因为漏传就 400）。
+        """
+        from .features.cashier import exporter
+        month = str((body or {}).get("month") or "").strip()
+        if not month:
+            month = time.strftime("%Y-%m")
+        return exporter.export(self.root, month, who=who)
+
     def plan(self) -> dict:
         """「月度生意计划」的数据 —— **纯读盘，一个网络请求都不发**。
 
@@ -3522,6 +3549,20 @@ class Handler(BaseHTTPRequestHandler):
                 res = app.cashier_import_settings(self._read_json() or {}, save=True)
                 if not res.get("ok"):
                     return self._json(dict(res, error=res.get("why") or "保存失败"), 400)
+                return self._json(res)
+            # 「保存并记录」—— 当天暂存 → 已入库（两段式第二段）
+            if path == "/api/cashier/commit" and method == "POST":
+                res = app.cashier_commit(self._read_json() or {})
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "入库失败"), 400)
+                return self._json(res)
+            # 当月导出（销售表 + 政策表）—— 落盘后前端拿 file 触发浏览器下载
+            if path == "/api/cashier/export" and method == "POST":
+                res = app.cashier_export(
+                    self._read_json() or {},
+                    who=scope.get("who") or scope.get("account") or "")
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "导出失败"), 400)
                 return self._json(res)
             # 块内没登记的子路径 —— fail closed（别落到下面当普通 404 糊过去）
             return self._json({"error": "接口不存在"}, 404)
