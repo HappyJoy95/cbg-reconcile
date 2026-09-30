@@ -202,9 +202,12 @@ def _clean_entry(data: dict, entry_id=None):
             " 等%d件" % len(prod) if len(prod) > 1 else "")
         goods_code = "|".join([p["code"] for p in prod if p["code"]])
         sn = "|".join([p["sn"] for p in prod if p["sn"]])
-        # 应收 = Σ商品 + Σ配件（配件金额不进"件数"）
-        amount = round(sum(p["amount"] for p in prod)
-                       + sum(a["amount"] for a in acc), 2)
+        # 应收 = Σ(数量 × 金额) —— 商品和配件的「金额」框都是**单价**
+        # （用户 2026-09-30：「不是数量*金额之和吗，2台的时候不动啊」）
+        # 件数仍只算商品数量
+        amount = round(sum(p["quantity"] * p["amount"] for p in prod)
+                       + sum((a.get("quantity") or 1) * a["amount"] for a in acc),
+                       2)
         qty = float(sum(p["quantity"] for p in prod))
         category = prod[0]["category"]
     else:
@@ -492,13 +495,16 @@ def entries_from_orders(root=None, day: str = "") -> dict:
                         lqty = 1.0
                 if not math.isfinite(lqty) or lqty <= 0:
                     lqty = 1.0
+                # 商品行的 amount 是**单价**（订单行给的是行小计 ⇒ 除回去；
+                # 应收/导出都按 数量 × 单价 算，两边口径才一致）
+                unit = round(lamt / lqty, 2) if lqty else lamt
                 products.append({
                     "name": str(ln.get("item_name") or "").strip()
                     or (name if len(lines) == 1 else dn),
                     "code": str(ln.get("ean") or "").strip(),
                     "sn": str(ln.get("sn") or "").strip(),
                     "quantity": lqty,
-                    "amount": round(lamt, 2),
+                    "amount": unit,
                     "category": "",        # 订单行没有品类来源，录完人再选
                 })
             conn.execute(

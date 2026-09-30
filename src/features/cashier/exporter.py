@@ -212,6 +212,12 @@ def _so_of(code: str, sold_day: str, sos: Dict[str, list]) -> float:
 def _line_row(time_s: str, category: str, code, name, sn, qty, total,
               amount, seller, pays: dict, note: str,
               costs: dict, sos: dict = None, sold_day: str = "") -> list:
+    """一行 = 一个商品（或一个配件）。
+
+    ⚠ `amount` 进「金额」格的已经是**小计**（= 数量 × 单价，调用方算好）；
+      `#`/`-` 是**单台**政策值（成本/so）× 数量（用户第 12 条：数量>1 按小计）；
+      `.` = 金额 − #。
+    """
     d = {h: None for h in HEAD}
     d["时间"] = time_s
     if category:
@@ -225,13 +231,16 @@ def _line_row(time_s: str, category: str, code, name, sn, qty, total,
     d["数量"] = qty
     d["合计"] = total
     d["金额"] = amount
-    # `#` 成本：政策表没有就按 **0**（用户第 10 条 —— 不再留空）
+    q = _num(qty)
+    if q is None or q <= 0:
+        q = 1.0
+    # `#` 成本：政策表没有就按 **0**（用户第 10 条）；单台成本 × 数量
     cost = _cost_of(code, costs)
-    d["#"] = 0.0 if cost is None else cost
+    d["#"] = round((0.0 if cost is None else cost) * q, 2)
     if _num(amount) is not None:
         d["."] = round(float(amount) - float(d["#"]), 2)
-    # `-` so 奖励：窗内给值，拿不到给 **0**
-    d["-"] = _so_of(code, sold_day, sos or {})
+    # `-` so 奖励：窗内给值（单台）× 数量，拿不到给 **0**
+    d["-"] = round(_so_of(code, sold_day, sos or {}) * q, 2)
     if seller:
         d["销售员"] = seller
     for method, amt in (pays or {}).items():
@@ -275,10 +284,14 @@ def _entry_rows(e: dict, conn, costs: dict, sos: dict = None) -> List[list]:
     if prods:
         for i, p in enumerate(prods):
             # 支付只落首行：每行都填的话，把支付列求和会翻倍
+            # 金额格 = 数量 × 单价（金额框存的是单价，用户第 12 条按小计导）
+            pq = _num(p.get("quantity")) or 1.0
+            unit = _num(p.get("amount"))
             out.append(_line_row(
                 time_s, str(p.get("category") or "") or category,
                 p.get("code"), p.get("name"), p.get("sn"),
-                p.get("quantity"), total, p.get("amount"),
+                p.get("quantity"), total,
+                round(pq * unit, 2) if unit is not None else None,
                 seller, pays if i == 0 else {}, note, costs, sos, sold_day))
     else:
         lines: Sequence[dict] = []
@@ -323,11 +336,15 @@ def _entry_rows(e: dict, conn, costs: dict, sos: dict = None) -> List[list]:
                     total, amt, seller, pays if i == 0 else {}, note,
                     costs, sos, sold_day))
     # 配件：每个一行（品类恒「配件」，支付不再落 —— 首行商品已经有了）
+    # 金额格 = 数量 × 单价（同商品行口径）
     for acc in (e.get("accessories") or []):
         if not isinstance(acc, dict):
             continue
+        aq = _num(acc.get("quantity")) or 1.0
+        aunit = _num(acc.get("amount"))
         out.append(_line_row(time_s, "配件", None, acc.get("name"), None,
-                             acc.get("quantity") or 1, total, acc.get("amount"),
+                             acc.get("quantity") or 1, total,
+                             round(aq * aunit, 2) if aunit is not None else None,
                              seller, {}, note, costs, sos, sold_day))
     return out
 

@@ -160,7 +160,8 @@ class Test流水(_RootCase):
         self.assertEqual(after, before)
 
     def test_应收等于商品加配件(self):
-        """用户 2026-09-30：左上角应收 = 下面商品 + 配件的金额总和。"""
+        """用户 2026-09-30：应收 = **Σ(数量 × 金额)** —— 金额框是单价，
+        2 台就要翻倍（配件同口径）。"""
         store.save_entry(self.root, {
             "sold_at": "2026-09-30 10:00", "amount": 1,
             "products": [{"name": "A", "code": "", "sn": "", "quantity": 1,
@@ -169,8 +170,9 @@ class Test流水(_RootCase):
                           "amount": 50, "category": ""}],
             "accessories": [{"name": "壳", "amount": 60, "quantity": 2}]})
         r = store.list_entries(self.root, day="2026-09-30")[0]
-        self.assertEqual(r["amount"], 210.0, "150（商品）+ 60（配件）")
-        self.assertEqual(r["quantity"], 3.0, "件数还是只算商品")
+        self.assertEqual(r["amount"], 320.0,
+                         "100×1 + 50×2 + 60×2")
+        self.assertEqual(r["quantity"], 3.0, "件数还是只算商品数量")
 
     def test_配件带数量(self):
         store.save_entry(self.root, {
@@ -649,10 +651,11 @@ class Test页面接线(unittest.TestCase):
         self.assertIn("_cashierEditing = 0", APP_JS[i:i + 500])
 
     def test_应收连配件一起加_配件行带数量(self):
-        # prodSync 的 Σ 要把配件金额算进去
+        # 应收公式要写明 **数量 × 金额**（金额框=单价），商品和配件都算
+        self.assertIn("数量 × 金额", APP_JS)
         i = APP_JS.index("function cashierProdSync")
         self.assertIn("data-acc-f", APP_JS[i:i + 1000],
-                      "应收 = 商品 + 配件")
+                      "应收 = Σ(数量×金额)，商品和配件都算")
         # 配件编辑行有数量输入，落在与商品数量同一栅格列
         self.assertIn('class="ac-qty" data-acc-f="quantity"', APP_JS)
         css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
@@ -1352,17 +1355,34 @@ class Test导出内容(_RootCase):
         data = self._data(rows)
         self.assertEqual(len(data), 3, "2 商品 + 1 配件 = 3 行")
         a, b, c = (dict(zip(head, r)) for r in data)
-        # 商品行：品类跟行、合计=订单合计（应收=商品+配件=2597）、金额是各商品自己的
-        self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2597))
-        self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2597))
+        # 商品行：品类跟行；金额=数量×单价（这里都 qty1）；合计=订单应收
+        # = 1899 + 499 + 199×2 = 2796（应收按 数量×金额 算，配件同口径）
+        self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2796))
+        self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2796))
         self.assertEqual(a["编码"], "6901")
         self.assertIsNone(b["序列号"], "空 SN 就是空单元格（跟空列占位一个口径）")
-        # 配件行：品类恒「配件」、数量=配件自己的数量、编码/SN 空、合计=订单合计
-        self.assertEqual((c["品类"], c["金额"], c["数量"]), ("配件", 199, 2))
-        self.assertEqual(c["合计"], 2597)
+        # 配件行：品类恒「配件」、金额=199×2、数量=配件自己的数量、合计=订单应收
+        self.assertEqual((c["品类"], c["金额"], c["数量"]), ("配件", 398, 2))
+        self.assertEqual(c["合计"], 2796)
         self.assertIsNone(c["编码"])
         self.assertIsNone(c["序列号"])
         self.assertEqual(c["明细"], "碎屏险")
+
+    def test_数量2按小计导_成本也乘数量(self):
+        """第 12 条：数量>1 时 金额/​#/​. 都按小计（都乘数量）。"""
+        store.save_policy(self.root, [{"商品编码": "6950", "商品名称": "P",
+                                       "成本": 300}])
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-09 10:00", "amount": 1,
+            "products": [{"name": "P", "code": "6950", "sn": "",
+                          "quantity": 2, "amount": 500, "category": ""}]})
+        head, rows = self._sheets()["9月份销售表"]
+        r = dict(zip(head, self._data(rows)[0]))
+        self.assertEqual(r["数量"], 2)
+        self.assertEqual(r["金额"], 1000, "金额列 = 数量 × 单价")
+        self.assertEqual(r["#"], 600, "单台成本 300 × 2")
+        self.assertEqual(r["."], 400, ". = 金额 − #")
+        self.assertEqual(r["合计"], 1000)
 
     def test_商品行品类空了回退卡片品类(self):
         """行上没填品类（老口径后补的商品行）⇒ 用卡片品类兜底。"""
@@ -1476,7 +1496,7 @@ class Test商品行(_RootCase):
                                   dict(body["products"][1], amount=150)]})
         self.assertTrue(store.save_entry(self.root, body, entry_id=r["id"]).get("ok"))
         r2 = store.list_entries(self.root, day="2026-09-30")[0]
-        self.assertEqual(r2["amount"], 2049, "合计 = Σ商品金额（传进来的 9999 不算）")
+        self.assertEqual(r2["amount"], 2199, "应收 = Σ(数量×金额)：1899×1 + 150×2")
         self.assertEqual(r2["quantity"], 3)
         self.assertEqual(r2["category"], "平板", "顶层品类镜像首行")
 
@@ -1503,7 +1523,8 @@ class Test商品行(_RootCase):
         self.assertEqual(r["goods_name"], "A 等2件")
         self.assertEqual(r["goods_code"], "111|222")
         self.assertEqual(r["sn"], "S1|S2")
-        self.assertEqual((r["amount"], r["quantity"]), (150.0, 3.0))
+        self.assertEqual((r["amount"], r["quantity"]), (250.0, 3.0),
+                         "应收 = 100×2 + 50×1")
 
     def test_坏商品行回why不抛(self):
         base = {"sold_at": "2026-09-30 14:32", "amount": 100}
@@ -1548,6 +1569,31 @@ class Test商品行(_RootCase):
         self.assertEqual(r["products"][0]["amount"], 800.0)
         self.assertEqual(r["products"][1]["code"], "6902")
         self.assertEqual(r["amount"], 1000, "卡片合计仍是订单合计")
+
+
+    def test_多台的订单行存成单价(self):
+        """订单行给的是行小计，商品行 amount 存**单价**（= 小计 ÷ 数量）——
+        否则编辑态再乘一次数量就把应收翻倍了。"""
+        path = store.ensure(self.root)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE IF NOT EXISTS orders (document_no TEXT PRIMARY KEY,"
+                     " doc_create_time TEXT, included_tax_amount REAL, remark TEXT,"
+                     " consumer_guide_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS order_lines (document_no TEXT,"
+                     " line_no INTEGER, sn TEXT, ean TEXT, item_name TEXT,"
+                     " quantity REAL, included_tax_amount REAL)")
+        conn.execute("INSERT INTO orders VALUES ('DN-Q','2026-09-06 10:00:00',"
+                     " 400,'','张三')")
+        conn.execute("INSERT INTO order_lines VALUES"
+                     " ('DN-Q',1,'S1','6901','两台装',2,400)")
+        conn.commit()
+        conn.close()
+        store.entries_from_orders(self.root, "2026-09-06")
+        r = store.list_entries(self.root, day="2026-09-06")[0]
+        self.assertEqual(r["products"][0]["quantity"], 2.0)
+        self.assertEqual(r["products"][0]["amount"], 200.0, "400 ÷ 2 = 单价 200")
+        self.assertEqual(r["amount"], 400, "卡片合计仍是订单合计")
 
 
 if __name__ == "__main__":

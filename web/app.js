@@ -753,7 +753,8 @@ function cashierProdDel(i) {
   cashierRerenderEdit();
 }
 
-//: 派生值：应收 = Σ商品金额 + Σ配件金额（用户第 11 轮：营收 = 商品 + 配件）
+//: 派生值：**应收 = Σ(数量 × 金额)** —— 商品/配件的金额框都是单价（用户：
+//: 「不是数量*金额之和吗，2台的时候不动啊」）。件数仍只算商品数量。
 function cashierProdSync(card) {
   if (!card) return;
   const rows = card.querySelectorAll('[data-prod-i]');
@@ -764,13 +765,17 @@ function cashierProdSync(card) {
     if (a0) a0.value = '';
     return;
   }
+  const qtyOf = (q) => (q && String(q.value).trim() !== '') ? (Number(q.value) || 0) : 1;
   let sum = 0;
   rows.forEach((row) => {
     const a = row.querySelector('[data-prod-f="amount"]');
-    sum += Number(a ? a.value : 0) || 0;
+    const q = row.querySelector('[data-prod-f="quantity"]');
+    sum += qtyOf(q) * (Number(a ? a.value : 0) || 0);
   });
-  card.querySelectorAll('[data-acc-i] [data-acc-f="amount"]').forEach((a) => {
-    sum += Number(a.value) || 0;
+  card.querySelectorAll('[data-acc-i]').forEach((row) => {
+    const a = row.querySelector('[data-acc-f="amount"]');
+    const q = row.querySelector('[data-acc-f="quantity"]');
+    sum += qtyOf(q) * (Number(a ? a.value : 0) || 0);
   });
   const aEl = card.querySelector('[data-f="amount"]');
   if (aEl) aEl.value = (Math.round(sum * 100) / 100).toFixed(2);
@@ -877,12 +882,15 @@ function cashierCardEdit(id) {
   _cashierEditPay = JSON.parse(JSON.stringify(r.payments || []));
   // 商品行**打开就铺出来**（第三轮定的）：老卡没有商品行 ⇒ 把顶层字段补成
   // 第一行（首编保存后导出就以卡内行为准；没编过的老卡仍回退查 order_lines）
+  // ⚠ 金额框是**单价**：老卡顶层 amount 是合计 ⇒ 除以数量还原单价
+  //   （打开又保存不会把应收翻倍；改数量就是真的 数量 × 单价）
   _cashierEditProd = JSON.parse(JSON.stringify(r.products || []));
   if (!_cashierEditProd.length) {
+    const q0 = Number(r.quantity) > 0 ? Number(r.quantity) : 1;
     _cashierEditProd = [{
       name: r.goods_name || '', code: r.goods_code || '', sn: r.sn || '',
       quantity: r.quantity == null ? 1 : r.quantity,
-      amount: r.amount == null ? 0 : r.amount,
+      amount: Math.round(((Number(r.amount) || 0) / q0) * 100) / 100,
       category: r.category || '',
     }];
   }
