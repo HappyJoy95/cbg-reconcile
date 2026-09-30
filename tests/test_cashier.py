@@ -1115,13 +1115,18 @@ class Test导出内容(_RootCase):
     def _sheets(self, month="2026-09"):
         return exporter.sheets(self.root, month)
 
+    @staticmethod
+    def _data(rows):
+        """只留明细行（滤掉每天末尾的「M.D 合计」行）。"""
+        return [r for r in rows if not str(r[0] or "").endswith("合计")]
+
     def test_销售表列头逐列对齐参考表(self):
         """列序 = 用户《9月份机场销售表》表头逐列（含空列占位）。"""
         self.assertEqual(exporter.HEAD, [
             "时间", "品类", "编码", "明细", "序列号", "数量", "合计", "金额",
-            "#", ".", "销售员",
+            "#", ".", "-", "销售员",
             "助手", "C扫B", "POS", "现金", "公对公",
-            "付以旧换新(旧)", "付以旧换新(新)", "预收款",
+            "国补实付", "国补优惠", "预收款",
             "企业微信", "支付宝直连", "微信直连",
             "发票备注", "服务", "备注", "京东到家配送地址", "姓名", "电话",
             "身份证号", "住址（送货地址）", "购买机型", "金额", "发票号",
@@ -1140,14 +1145,16 @@ class Test导出内容(_RootCase):
         sheets = self._sheets()
         head, rows = sheets["9月份销售表"]
         self.assertEqual(head, exporter.HEAD)
-        self.assertEqual(len(rows), 1)
-        r = dict(zip(head, rows[0]))
+        data = self._data(rows)
+        self.assertEqual(len(data), 1, "明细 1 行（另有 1 条每日合计，被滤掉）")
+        r = dict(zip(head, data[0]))
         self.assertEqual(r["时间"], "9.3")
         self.assertEqual(r["品类"], "平板")
         self.assertEqual(r["合计"], 990)
         self.assertEqual(r["金额"], 990)
         self.assertEqual(r["#"], 850, "成本 = 入库价 − 无条件 − 有条件")
         self.assertEqual(r["."], 140, "毛利 = 金额 − 成本")
+        self.assertEqual(r["-"], 0.0, "没有 so 窗 → 0")
         self.assertEqual(r["销售员"], "张三")
         self.assertEqual(r["现金"], 990)
         self.assertEqual(r["备注"], "老客户")
@@ -1155,13 +1162,15 @@ class Test导出内容(_RootCase):
         self.assertIn("姓名", head)
         self.assertIsNone(r["姓名"])
 
-    def test_成本查不到就留空(self):
+    def test_政策表没有成本_按0算_毛利等于金额(self):
+        """用户第 10 条：政策表里没有成本 ⇒ # = 0（不猜不留空）。"""
         store.save_entry(self.root, {"sold_at": "2026-09-03 10:00",
                                      "amount": 100, "goods_code": "NO-POLICY"})
         _, rows = self._sheets()["9月份销售表"]
-        r = dict(zip(exporter.HEAD, rows[0]))
-        self.assertIsNone(r["#"])
-        self.assertIsNone(r["."])
+        r = dict(zip(exporter.HEAD, self._data(rows)[0]))
+        self.assertEqual(r["#"], 0.0)
+        self.assertEqual(r["."], 100.0, "毛利 = 金额 − 0")
+        self.assertEqual(r["-"], 0.0)
 
     def test_玲珑多行单拆行_合计相同_支付只落首行(self):
         path = store.ensure(self.root)
@@ -1187,8 +1196,9 @@ class Test导出内容(_RootCase):
                                                    {"method": "微信直连", "amount": 600}]),
                          entry_id=rows0[0]["id"])
         head, rows = self._sheets()["9月份销售表"]
-        self.assertEqual(len(rows), 2, "一个订单两个商品 = 两行")
-        a, b = dict(zip(head, rows[0])), dict(zip(head, rows[1]))
+        data = self._data(rows)
+        self.assertEqual(len(data), 2, "一个订单两个商品 = 两行")
+        a, b = dict(zip(head, data[0])), dict(zip(head, data[1]))
         self.assertEqual(a["合计"], 1000)
         self.assertEqual(b["合计"], 1000, "合计是订单合计，每行重复")
         self.assertEqual(a["金额"] + b["金额"], 1000, "金额是各商品自己的")
@@ -1215,7 +1225,7 @@ class Test导出内容(_RootCase):
         store.save_entry(self.root, {"sold_at": "2026-08-31 10:00", "amount": 1})
         store.save_entry(self.root, {"sold_at": "2026-09-01 10:00", "amount": 2})
         _, rows = self._sheets("2026-09")["9月份销售表"]
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(self._data(rows)), 1)
 
     def test_商品行跟卡片走_品类按行(self):
         """第三轮：导出用卡片里的商品行（人改了卡，导出跟着变），品类按行取。"""
@@ -1230,8 +1240,9 @@ class Test导出内容(_RootCase):
             "accessories": [{"name": "碎屏险", "amount": 199}],
         })
         head, rows = self._sheets()["9月份销售表"]
-        self.assertEqual(len(rows), 3, "2 商品 + 1 配件 = 3 行")
-        a, b, c = (dict(zip(head, r)) for r in rows)
+        data = self._data(rows)
+        self.assertEqual(len(data), 3, "2 商品 + 1 配件 = 3 行")
+        a, b, c = (dict(zip(head, r)) for r in data)
         # 商品行：品类跟行、合计=订单合计（=Σ商品）、金额是各商品自己的
         self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2398))
         self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2398))
@@ -1264,6 +1275,52 @@ class Test导出内容(_RootCase):
         with self.assertRaises(ValueError) as cm:
             exporter.sheets(self.root, "2026/09")
         self.assertIn("月份", str(cm.exception))
+
+    def test_每日下面有合计行_支付列一起加总(self):
+        """用户第 7 条：每天的行下面跟一条合计（含各支付列），第二天接着排。"""
+        store.save_entry(self.root, {"sold_at": "2026-09-01 10:00", "amount": 100,
+                                     "payments": [{"method": "现金", "amount": 100}]})
+        store.save_entry(self.root, {"sold_at": "2026-09-01 15:00", "amount": 50,
+                                     "payments": [{"method": "现金", "amount": 30},
+                                                  {"method": "微信直连", "amount": 20}]})
+        store.save_entry(self.root, {"sold_at": "2026-09-02 11:00", "amount": 200})
+        head, rows = self._sheets()["9月份销售表"]
+        labels = [str(r[0]) for r in rows]
+        self.assertEqual(labels, ["9.1", "9.1", "9.1 合计", "9.2", "9.2 合计"],
+                         "明细 → 当天合计 → 第二天明细 → 第二天合计")
+        t1 = dict(zip(head, rows[2]))
+        self.assertEqual((t1["金额"], t1["合计"]), (150, 150))
+        self.assertEqual(t1["现金"], 130, "支付列也要加总")
+        self.assertEqual(t1["微信直连"], 20)
+        self.assertIsNone(t1["销售员"], "合计行不冒充人名")
+        t2 = dict(zip(head, rows[4]))
+        self.assertEqual(t2["金额"], 200)
+        self.assertIsNone(t2["现金"], "这天没支付 ⇒ 合计行该列为空")
+
+    def test_so奖励_窗内给值窗外和未知都给0(self):
+        """用户第 10 条：`-` 列 = so —— 时间窗（时间段/具体日期都要认）
+        罩得住销售日且编码命中才给值，否则 0。"""
+        store.save_policy(self.root, [
+            {"商品编码": "6909", "商品名称": "X", "so": 420,
+             "时间": "2026.09.01-2026.09.10"},
+            {"商品编码": "6910", "商品名称": "Y", "so": 99,
+             "时间": "2026.09.05"},
+        ])
+        cases = [("6909", "2026-09-10", 420.0),   # 时间段内（末日）
+                 ("6909", "2026-09-15", 0.0),     # 时间段外（同月）
+                 ("6910", "2026-09-05", 99.0),    # 具体日期命中
+                 ("6910", "2026-09-06", 0.0),     # 具体日期不命中
+                 ("ZZZ99", "2026-09-05", 0.0)]    # 政策表没这个编码
+        for code, day, _w in cases:
+            store.save_entry(self.root, {"sold_at": day + " 10:00", "amount": 10,
+                                         "goods_code": code})
+        head, rows = self._sheets()["9月份销售表"]
+        got = {(str(r[0]), r[head.index("编码")]): r[head.index("-")]
+               for r in self._data(rows)}
+        for code, day, want in cases:
+            key = ("%d.%d" % (int(day[5:7]), int(day[8:10])), code)
+            with self.subTest(code=code, day=day):
+                self.assertEqual(got.get(key), want)
 
 
 # ────────────────────────────────────── 商品行（一张卡 = 一个订单，2026-09-30 第三轮）
