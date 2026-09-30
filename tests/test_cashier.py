@@ -448,6 +448,7 @@ class Test页面接线(unittest.TestCase):
             with self.subTest(fn=fn):
                 self.assertIn("function %s" % fn, APP_JS)
         self.assertNotIn("renderCashierTable", APP_JS, "旧表格渲染要删干净")
+        self.assertNotIn("cashier-code", APP_JS)
         # 汇总四要素：笔数/件数/实收/配件 都有落点
         for cid in ("cashier-count", "cashier-qty-sum",
                     "cashier-amount-sum", "cashier-acc-sum"):

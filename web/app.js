@@ -501,7 +501,8 @@ function cashierCardHtml(r) {
     + `<div class="cc-name">${esc2(r.goods_name) || '（没填名称）'}</div>`
     + `<div class="cc-meta">商品编码 ${esc2(r.goods_code) || '—'}`
     + `<br>SN ${esc2(r.sn) || '—'}</div>`
-    + `<div class="cc-amount-row"><span class="cc-qty">数量 ${r.quantity}</span>`
+    + `<div class="cc-amount-row"><span class="cc-qty">数量 `
+    + `${esc2(Math.round((Number(r.quantity) || 0) * 100) / 100)}</span>`
     + `<span class="cc-amount">¥${(Number(r.amount) || 0).toFixed(2)}</span></div>`
     + accHtml
     + `<div class="cc-actions">`
@@ -576,6 +577,11 @@ async function loadCashier() {
   } catch (e) {
     const host = $('#cashier-cards');
     if (host) host.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
+    // ⚠ 失败时汇总条不能留着上一天的 KPI —— 先对到请求日、再把四个数值
+    //   改成占位（cashierRenderSummary([], day) 会写 0/0.00，随后被 '—' 覆盖）
+    cashierRenderSummary([], cashierDayValue());
+    ['cashier-count', 'cashier-qty-sum', 'cashier-amount-sum', 'cashier-acc-sum']
+      .forEach((id) => { const el = $('#' + id); if (el) el.textContent = '—'; });
     toast('读取流水失败：' + e.message, 'bad');
   }
 }
