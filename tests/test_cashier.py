@@ -454,6 +454,14 @@ class Test页面接线(unittest.TestCase):
                     "cashier-amount-sum", "cashier-acc-sum"):
             self.assertIn("'%s'" % cid, APP_JS)
 
+    def test_卡内编辑接上了(self):
+        for fn in ("cashierCardEdit", "cashierCardSave", "cashierCardCancel",
+                   "cashierAccAdd", "cashierAccDel", "cashierEditState"):
+            with self.subTest(fn=fn):
+                self.assertIn("function %s" % fn, APP_JS)
+        # 卡内编辑读的是卡里的字段，不再回填顶部表单
+        self.assertNotIn("cashierFill(", APP_JS, "回填顶部表单的老路要拆")
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:

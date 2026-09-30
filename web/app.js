@@ -355,10 +355,11 @@ $$('.nav-item').forEach((item) => {
    ⚠ 政策刷新走 pmall A 案（活窗 → jar → 弹窗人工登录），接口会**阻塞到登录
      完成（最长 10 分钟）** —— 按钮必须禁用并说清，别让人以为卡死了狂点。 */
 
-let _cashierEditing = 0;      // 正在改的流水 id（0 = 新录）
+let _cashierEditing = 0;      // 正在改的流水 id（**number**，0 = 没在改）
+let _cashierEditAcc = [];     // 编辑中的配件草稿（深拷贝自原行，保存才提交）
 let _cashierAutoName = '';    // 最近一次反查自动带出的名 —— 用户手改过就不再覆盖
 let _cashierBound = false;    // 事件只绑一次（loadCashier 每次进来都调）
-let _cashierRows = {};        // id → 行（表格按钮回填表单用）
+let _cashierRows = {};        // id → 行（卡片按钮按 dataset.id 查行用）
 
 function cashierPad(n) { return String(n).padStart(2, '0'); }
 
@@ -380,7 +381,7 @@ function cashierResetForm() {
   _cashierAutoName = '';
   const sold = $('#cashier-sold-at');
   if (sold) sold.value = cashierNow();
-  for (const id of ['cashier-scan', 'cashier-amount', 'cashier-note']) {
+  for (const id of ['cashier-scan', 'cashier-sn', 'cashier-amount', 'cashier-note']) {
     const el = $('#' + id);
     if (el) el.value = '';
   }
@@ -392,19 +393,10 @@ function cashierResetForm() {
   if (cancel) cancel.hidden = true;
 }
 
-function cashierFill(r) {
-  _cashierEditing = r.id;
-  _cashierAutoName = '';          // 回填的是人写的名 —— 反查不许再覆盖它
-  $('#cashier-sold-at').value = String(r.sold_at || '').slice(0, 16).replace(' ', 'T');
-  $('#cashier-scan').value = r.goods_code || '';
-  $('#cashier-name').value = r.goods_name || '';
-  $('#cashier-qty').value = r.quantity != null ? r.quantity : 1;
-  $('#cashier-amount').value = r.amount != null ? r.amount : '';
-  $('#cashier-seller').value = r.seller || '';
-  $('#cashier-note').value = r.note || '';
-  $('#cashier-cancel').hidden = false;
-  $('#cashier-sold-at').focus();
-}
+/* ⚠ 原来这里有个把行回填进**顶部表单**的老函数（cashierFill）——
+   2026-09-30 卡内编辑（Task 10）拆掉了：编辑在卡里做，顶部表单只管新录。
+   留着它必然出现"两处都能改、状态互相打架"，所以整个函数删干净
+   （`tests/test_cashier.py::test_卡内编辑接上了` 断言那个调用串不在）。 */
 
 async function cashierLookup(focusAmount) {
   const codeEl = $('#cashier-scan');
@@ -430,16 +422,17 @@ async function cashierLookup(focusAmount) {
 }
 
 async function cashierSave() {
+  // ⚠ 顶部表单**只管新录** —— 改已有那笔在卡里（cashierCardSave），别再往这儿塞 id
   const body = {
     sold_at: $('#cashier-sold-at').value,
     goods_code: ($('#cashier-scan').value || '').trim(),
     goods_name: ($('#cashier-name').value || '').trim(),
+    sn: ($('#cashier-sn').value || '').trim(),
     quantity: $('#cashier-qty').value,
     amount: $('#cashier-amount').value,
     seller: ($('#cashier-seller').value || '').trim(),
     note: ($('#cashier-note').value || '').trim(),
   };
-  if (_cashierEditing) body.id = _cashierEditing;
   if (!String(body.amount).trim()) {
     toast('实收金额还没填（金额是手动匹配的那项）', 'bad');
     $('#cashier-amount').focus();
@@ -447,7 +440,7 @@ async function cashierSave() {
   }
   try {
     await api('/api/cashier/entry-save', { method: 'POST', body });
-    toast(_cashierEditing ? '已修改' : '已保存一笔', 'good');
+    toast('已保存一笔', 'good');
     cashierResetForm();
     await loadCashier();
   } catch (e) {
@@ -460,7 +453,7 @@ async function cashierRemove(id) {
   try {
     await api('/api/cashier/entry-delete', { method: 'POST', body: { id } });
     toast('已删除', 'good');
-    if (_cashierEditing === id) cashierResetForm();
+    if (_cashierEditing === Number(id)) cashierResetForm();
     await loadCashier();
   } catch (e) {
     toast('删除失败：' + e.message, 'bad');
@@ -525,6 +518,161 @@ function cashierCardHtml(r) {
     + `</div>`;
 }
 
+/* ───────────── 卡内编辑态（Task 10）─────────────
+
+   ⚠ `_cashierEditing` 必须是 **number**：`data-cc-edit` 从 dataset 拿到的是
+     string，直接赋进去的话 `_cashierEditing === r.id`（JSON number）**永远 false**
+     ⇒ `.cc-editing` 永远不加 ⇒ `cashierEditState()` 查不到卡返回 null
+     ⇒ 保存静默 no-op。所以入口 `cashierCardEdit(id)` 里 `Number(id)` 归一。
+   ⚠ 支付区**本任务只读**：不调 `cashierPayEditBlock`（Task 11 才有），
+     只留 `data-pay-blocks` 容器；没有 `[data-pay-block]` ⇒ `cashierEditState`
+     走原行兜底，**不会把已有 payments 清空**。 */
+function cashierCardEditHtml(r) {
+  const acc = _cashierEditAcc;
+  const inp = (f, v, type, w) => `<input data-f="${f}" type="${type || 'text'}"`
+    + ` value="${esc2(v == null ? '' : v)}"${w ? ` style="width:${w}"` : ''}>`;
+  return `<div class="cashier-card card cc-editing" data-id="${r.id}">`
+    + `<div class="cc-main">`
+    + `<div class="cc-time">编辑中</div>`
+    + `<div class="cc-name">${inp('goods_name', r.goods_name)}</div>`
+    + `<div class="cc-meta">商品编码 ${inp('goods_code', r.goods_code)}`
+    + `<br>SN ${inp('sn', r.sn)}</div>`
+    + `<div class="cc-amount-row"><span>数量 ${inp('quantity', r.quantity, 'number', '5em')}</span>`
+    + `<span>实收 ${inp('amount', r.amount, 'number', '8em')}</span></div>`
+    + `<div class="cc-acc"><b>配件区</b>`
+    + acc.map((x, i) => `<div class="cc-acc-row" data-acc-i="${i}">`
+        + `<input data-acc-f="name" value="${esc2(x.name)}" placeholder="配件名">`
+        + `<input data-acc-f="amount" type="number" step="0.01" value="${esc2(x.amount)}">`
+        + `<button class="btn ghost small" data-acc-del="${i}">删</button></div>`).join('')
+    + `<button class="btn ghost small" data-acc-add="1">+ 添加配件</button></div>`
+    + `<div class="cc-actions">`
+    + `<button class="btn primary small" data-cc-save="${r.id}">保存修改</button>`
+    + `<button class="btn ghost small" data-cc-cancel="1">取消</button>`
+    + `</div></div>`
+    + `<div class="cc-side">`
+    + `<div class="cc-group"><div class="cc-group-title">销售信息</div>`
+    + `<div class="cc-row"><span class="k">销售员</span>${inp('seller', r.seller)}</div>`
+    + `<div class="cc-row"><span class="k">备注</span>${inp('note', r.note)}</div>`
+    + `<div class="cc-row"><span class="k">销售时间</span>`
+    + `${inp('sold_at', String(r.sold_at || '').slice(0, 16).replace(' ', 'T'), 'datetime-local')}</div>`
+    + `</div>`
+    + `<div class="cc-group cc-muted"><div class="cc-group-title">客户信息</div>`
+    + `会员/手机号<span class="cc-wait">待接入</span></div>`
+    + `<div class="cc-group"><div class="cc-group-title">支付方式</div>`
+    + `<div class="pay-blocks" data-pay-blocks>`
+    + ((r.payments || []).length
+        ? `<div class="cc-muted">已录 ${r.payments.length} 种（Task 11 接编辑）</div>`
+        : '')
+    + `</div><button class="btn ghost small" data-pay-add="1" hidden>+ 添加支付</button>`
+    + `<div class="pay-sum" data-pay-sum></div></div>`
+    + `</div>`
+    + `<button class="cc-close" data-cc-close="${r.id}" title="删除这笔">✕</button>`
+    + `</div>`;
+}
+
+/** 从编辑态的卡里读出要提交的整条 —— 找不到卡就返回 null（调用方直接不发）。 */
+function cashierEditState() {
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card) return null;
+  const r = _cashierRows[card.dataset.id] || {};
+  const out = Object.assign(
+    { id: r.id, source: r.source, external_id: r.external_id },
+    cashierEditFields() || {});
+  // ⚠ 配件**以输入框为准**：`_cashierEditAcc` 只在增删时改，人手打的字还只在 DOM 里。
+  //   直接 `out.accessories = _cashierEditAcc` 会把刚敲的配件名静默丢掉。
+  const accs = [];
+  card.querySelectorAll('[data-acc-i]').forEach((row) => {
+    const name = ((row.querySelector('[data-acc-f="name"]') || {}).value || '').trim();
+    const amount = Number((row.querySelector('[data-acc-f="amount"]') || {}).value) || 0;
+    accs.push({ name, amount });
+  });
+  _cashierEditAcc = accs;
+  out.accessories = _cashierEditAcc;
+  // ⚠ 防清空：只有真出现支付块（Task 11）才读表单；否则**原样带回原行的 payments** ——
+  //   写成 `out.payments = cashierPayRead(card)` 的话，只读态会读出 [] 把原数据抹了
+  out.payments = card.querySelector('[data-pay-block]')
+    ? cashierPayRead(card) : (r.payments || []);
+  return out;
+}
+
+/** 编辑卡里 `[data-f]` 的当前值（→ 对象）。没有编辑卡返回 null。 */
+function cashierEditFields() {
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card) return null;
+  const out = {};
+  card.querySelectorAll('[data-f]').forEach((el) => { out[el.dataset.f] = el.value; });
+  return out;
+}
+
+/** 重画编辑卡（配件增删后用）—— **把还没提交的输入原样写回去**，
+ *  否则点一下「+ 添加配件」就把人刚敲的名称/金额整卡刷没了。 */
+function cashierRerenderEdit() {
+  const fields = cashierEditFields();
+  renderCashierCards(Object.values(_cashierRows));
+  if (!fields) return;
+  const card = document.querySelector('.cashier-card.cc-editing');
+  if (!card) return;
+  card.querySelectorAll('[data-f]').forEach((el) => {
+    if (fields[el.dataset.f] !== undefined) el.value = fields[el.dataset.f];
+  });
+}
+
+/** 读一组支付块 → `{method, amount}[]`。本任务没有块，恒返回 []（预期）。 */
+function cashierPayRead(card) {
+  const out = [];
+  card.querySelectorAll('[data-pay-block]').forEach((b) => {
+    const method = (b.querySelector('[data-pay-method]') || {}).value || '';
+    const amount = Number((b.querySelector('[data-pay-amount]') || {}).value);
+    if (method && amount) out.push({ method, amount });
+  });
+  return out;
+}
+
+function cashierCardEdit(id) {
+  const r = _cashierRows[id];
+  if (!r) return;
+  _cashierEditing = Number(id);          // ⚠ dataset 是 string，归一成 number 才 === r.id
+  _cashierEditAcc = JSON.parse(JSON.stringify(r.accessories || []));
+  renderCashierCards(Object.values(_cashierRows));
+}
+
+function cashierCardCancel() {
+  _cashierEditing = 0;
+  _cashierEditAcc = [];
+  renderCashierCards(Object.values(_cashierRows));
+}
+
+function cashierAccAdd() {
+  cashierEditState();            // 先把输入框里还没同步的字收进草稿
+  _cashierEditAcc.push({ name: '', amount: 0 });
+  cashierRerenderEdit();
+}
+
+function cashierAccDel(i) {
+  cashierEditState();            // 同上，别把其它配件刚敲的字刷掉
+  _cashierEditAcc.splice(Number(i), 1);
+  cashierRerenderEdit();
+}
+
+async function cashierCardSave(id) {
+  const body = cashierEditState();
+  if (!body) return;
+  body.id = Number(id);
+  if (!String(body.amount).trim()) {
+    toast('实收金额还没填', 'bad');
+    return;
+  }
+  try {
+    await api('/api/cashier/entry-save', { method: 'POST', body });
+    toast('已修改', 'good');
+    _cashierEditing = 0;
+    _cashierEditAcc = [];
+    await loadCashier();
+  } catch (e) {
+    toast('保存失败：' + e.message, 'bad');
+  }
+}
+
 function cashierRenderSummary(rows, day) {
   const n = rows.length;
   const qty = rows.reduce((a, r) => a + (Number(r.quantity) || 0), 0);
@@ -548,7 +696,10 @@ function renderCashierCards(rows) {
     if (host) host.innerHTML = '<div class="empty">这天还没有流水</div>';
     return;
   }
-  if (host) host.innerHTML = rows.map(cashierCardHtml).join('');
+  if (host) {
+    host.innerHTML = rows.map((r) => (_cashierEditing === r.id
+      ? cashierCardEditHtml(r) : cashierCardHtml(r))).join('');
+  }
 }
 
 async function loadCashier() {
@@ -622,11 +773,23 @@ function bindCashierEvents() {
   });
   $('#cashier-scan').addEventListener('blur', () => cashierLookup(false));
   $('#cashier-save').addEventListener('click', cashierSave);
-  $('#cashier-cancel').addEventListener('click', cashierResetForm);
+  // 「取消修改」= 取消**卡内编辑**（顶部表单只管新录，没有"改"这个状态了）
+  $('#cashier-cancel').addEventListener('click', cashierCardCancel);
   $('#cashier-day').addEventListener('change', loadCashier);
   $('#cashier-refresh').addEventListener('click', cashierRefreshPolicy);
-  // ⚠ 卡片容器（#cashier-cards）的点击委托**故意还没接** —— 编辑是 Task 10、
-  //   支付/✕ 是 Task 11 的事。本任务只做视图态渲染，点了没反应是计划内中间态。
+  // ⚠ 卡片是 innerHTML 重画的 ⇒ 只能**委托**到容器上（绑节点一次重画就没了）。
+  //   属性名一律 `data-cc-*` / `data-acc-*` —— 别用旧表格的 data-edit/data-del。
+  $('#cashier-cards').addEventListener('click', (e) => {
+    const t = e.target;
+    if (t.dataset.ccEdit) { cashierCardEdit(t.dataset.ccEdit); return; }
+    if (t.dataset.ccSave) { cashierCardSave(t.dataset.ccSave); return; }
+    if (t.dataset.ccCancel) { cashierCardCancel(); return; }
+    if (t.dataset.accAdd) { cashierAccAdd(); return; }
+    if (t.dataset.accDel !== undefined && t.dataset.accDel !== '') {
+      cashierAccDel(t.dataset.accDel); return;
+    }
+    // ⚠ data-cc-close / data-pay-* 的分发在 Task 11 接 —— 本任务点了没反应是计划内中间态
+  });
 }
 
 /* ─────────────── 库存盘点：已拆 iframe、并进同文档（2026-09-22）───────────────
