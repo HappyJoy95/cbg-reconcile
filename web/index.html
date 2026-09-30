@@ -975,8 +975,8 @@
         <label>商品名称 <input id="cashier-name" placeholder="编码查不到就手输"></label>
         <label>数量 <input type="number" id="cashier-qty" value="1" min="0.01" step="any"
                       style="width:5.5em"></label>
-        <label>实收金额 <input type="number" id="cashier-amount" step="0.01"
-                        placeholder="手动匹配" style="width:8em"></label>
+        <label>应收金额 <input type="number" id="cashier-amount" step="0.01"
+                        placeholder="这单的商品合计" style="width:8em"></label>
         <label>SN <input id="cashier-sn" placeholder="可空" style="width:10em"></label>
         <label>品类
           <select id="cashier-category" title="导出销售表的「品类」列 —— 录入时选">
@@ -999,13 +999,13 @@
       <span class="cs-date" id="cashier-day-label"></span>
       <span>今日 <b id="cashier-count">0</b> 笔</span>
       <span><b id="cashier-qty-sum">0</b> 件</span>
-      <span>实收 ¥<b id="cashier-amount-sum">0.00</b></span>
+      <span>应收 ¥<b id="cashier-amount-sum">0.00</b></span>
       <span>配件 ¥<b id="cashier-acc-sum">0.00</b></span>
       <button class="btn primary small" id="cashier-commit"
               title="把今天还没入库的记录（确认添加 / 导入来的）正式写进账">保存并记录</button>
       <span class="cs-gap"></span>
-      <button class="btn primary small" id="cashier-import"
-              title="拉当天玲珑销售单合并生成卡片（已导过的不会重复；生成的是暂存，要点保存并记录入库）">导入玲珑单</button>
+      <button class="btn ghost small" id="cashier-import"
+              title="拉当天玲珑销售单合并生成卡片（已导过的不会重复；生成的是暂存，要点保存并记录入库）">导入今日玲珑数据</button>
       <button class="btn ghost small" id="cashier-export"
               title="导出当月销售表 + 现行政策表两个 sheet，走浏览器下载">导出 Excel</button>
       <button class="btn ghost small" id="cashier-blacklist-open">排除关键词</button>

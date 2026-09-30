@@ -542,14 +542,51 @@ class Test页面接线(unittest.TestCase):
         self.assertIn("data-prod-blocks", APP_JS)
         self.assertNotIn('<span class="k">品类</span>', APP_JS,
                          "卡片右侧的品类行要撤（品类跟商品走）")
-        # 派生值：实收/数量只读，由商品行 Σ 出来
+        # 派生值：应收只读（Σ商品）；数量输入框整个撤了（第 1 条：左上角冗余）
         self.assertIn('data-f="amount" type="number" step="0.01" readonly',
                       APP_JS)
-        self.assertIn('data-f="quantity" type="number"', APP_JS)
+        self.assertNotIn('data-f="quantity"', APP_JS,
+                         "数量跟商品行走，顶层输入框撤掉")
+        self.assertNotIn("inp('goods_name'", APP_JS,
+                         "名称输入框撤掉（服务端照首行派生）")
         # 保存体带 products；草稿在编辑态铺出来
         i = APP_JS.index("function cashierEditState")
         self.assertIn("products", APP_JS[i:i + 1600])
         self.assertIn("_cashierEditProd", APP_JS)
+
+    def test_钱区支付渠道与导入按钮改版(self):
+        """第 1/3/4/5/6/9 条：左上角应收/实收、支付渠道文案与底色、导入按钮。"""
+        # 左上角钱区：应收（Σ商品）+ 实收（Σ支付渠道）
+        self.assertIn('class="cc-money"', APP_JS)
+        self.assertIn('cm-tag">应收', APP_JS)
+        self.assertIn("data-paid", APP_JS)
+        i = APP_JS.index("function cashierPaySync")
+        self.assertIn("data-paid", APP_JS[i:i + 900],
+                      "实收要在 paySync 里跟着支付渠道刷新")
+        # 第 5 条：添加支付渠道
+        self.assertIn("+ 添加支付渠道", APP_JS)
+        self.assertNotIn("+ 添加支付</button>", APP_JS)
+        # 第 6 条：支付清单改名（国补两列）
+        self.assertIn("国补实付", APP_JS)
+        self.assertIn("国补优惠", APP_JS)
+        self.assertNotIn("付以旧换新", APP_JS)
+        # 第 9 条：导入按钮改名 + 普通颜色
+        self.assertIn(">导入今日玲珑数据</button>", INDEX_HTML)
+        self.assertNotIn(">导入玲珑单<", INDEX_HTML)
+        self.assertIn('<button class="btn ghost small" id="cashier-import"',
+                      INDEX_HTML)
+        # 顶部表单与汇总条的「实收」都改「应收」
+        self.assertIn("应收金额", INDEX_HTML)
+        self.assertNotIn("实收金额", INDEX_HTML)
+        self.assertIn("应收 ¥", INDEX_HTML)
+        # 第 2 条：配件行与商品行共用栅格（名/金额/删各就各位）
+        css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".cc-acc-edit .ac-name", css)
+        self.assertIn(".cc-acc-edit .ac-amt", css)
+        seg = css[css.index(".cc-prod "):css.index(".cc-prod ") + 400]
+        self.assertIn("grid-template-columns", seg)
+        # 第 4 条：支付块底色回系统统一（六色 pastel 撤掉）
+        self.assertNotIn(".pay-block:nth-child", css)
 
     def test_node语法检查(self):
         node = shutil.which("node")
@@ -1379,6 +1416,22 @@ class Test商品行(_RootCase):
         self.assertEqual((r["amount"], r["quantity"], r["category"]),
                          (500.0, 2.0, "手机"))
         self.assertEqual(r["products"], [])
+
+    def test_商品行非空时顶层字段跟行走(self):
+        """卡内编辑撤了名/编码/SN 输入框（用户第 1 条）⇒ 顶层字段服务端派生。"""
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-30 10:00", "amount": 1, "quantity": 9,
+            "goods_name": "乱写的标题", "goods_code": "XX", "sn": "ZZ",
+            "products": [
+                {"name": "A", "code": "111", "sn": "S1", "quantity": 2,
+                 "amount": 100, "category": ""},
+                {"name": "B", "code": "222", "sn": "S2", "quantity": 1,
+                 "amount": 50, "category": ""}]})
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["goods_name"], "A 等2件")
+        self.assertEqual(r["goods_code"], "111|222")
+        self.assertEqual(r["sn"], "S1|S2")
+        self.assertEqual((r["amount"], r["quantity"]), (150.0, 3.0))
 
     def test_坏商品行回why不抛(self):
         base = {"sold_at": "2026-09-30 14:32", "amount": 100}

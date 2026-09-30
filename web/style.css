@@ -1815,14 +1815,26 @@ main.tools-frame-mode .subpanel.active {
   padding-top: 8px; font-size: 13px; }
 .cc-acc-row { display: flex; justify-content: space-between; gap: 12px;
   padding: 2px 0; }
-/* 商品行（一张卡 = 一个订单）：名/编码/SN/数量/金额/品类 一排，
-   窄屏自动换行 —— 输入框都收着宽度，别把卡撑破 */
-.cc-prod { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-  padding: 4px 0; border-bottom: 1px dashed var(--line); }
+/* 左上角钱区（用户第 3 条）：应收 = Σ商品（编辑态只读输入）；实收 = Σ支付渠道 */
+.cc-money { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 6px 0 4px; }
+.cc-money .cm-tag { font-size: 13px; color: var(--muted); }
+.cc-money input { width: 8.5em; font-size: 18px; font-weight: 700; }
+.cc-money .cc-amount { font-size: 21px; font-weight: 700; }
+.cc-money .cm-paid { font-size: 13px; color: var(--muted); }
+.cc-money .cm-paid b { color: var(--text); font-size: 15px; }
+.cc-money .cc-qty { font-size: 13px; color: var(--muted); }
+/* 商品行 / 配件编辑行**共用一套栅格**（用户第 2 条）：
+   配件名对齐商品名（列 1）、金额对齐商品金额（列 5）、删对齐（列 7） */
+.cc-prod { display: grid; gap: 6px; align-items: center; padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+  grid-template-columns: minmax(9em, 1fr) 7em 8em 4.5em 6em 7.5em auto; }
 .cc-prod input { min-width: 0; }
-.cc-prod input[data-prod-f="name"] { flex: 1 1 9em; }
-.cc-prod select { max-width: 7.5em; }
-.cc-prod .btn { margin-left: auto; }
+.cc-prod select { min-width: 0; max-width: 7.5em; }
+.cc-prod .btn { justify-self: end; }
+.cc-acc-edit .ac-name { grid-column: 1; }
+.cc-acc-edit .ac-amt { grid-column: 5; }
+.cc-acc-edit .ac-x { grid-column: 7; }
 .cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 .cc-editing { outline: 2px solid var(--brand); }
 
@@ -1844,23 +1856,17 @@ main.tools-frame-mode .subpanel.active {
 /* 支付方块（参考图彩色块）：块 + 下方金额框；软提醒不拦截。
    ⚠ 底色用纯 hex、不写 color-mix —— 门店 Win7 老 Chromium 不认 color-mix()。 */
 .pay-blocks { display: flex; flex-wrap: wrap; gap: 8px; }
-/* ⚠ 文字**钉死深色**、不用 var(--text)：六色底是固定的 pastel 浅色，
-   暗色主题（dark/dusk/dianye）的 --text 是浅色，落在 #eef2ff 这类底上
-   对比度不到 1.1:1 根本看不见。参考图的彩色块外观是用户拍板的视觉，
-   所以底保持不动，只把字锁成深色（可读性 > 主题令牌一致性）。 */
+/* ⚠ 用户第 4 条（2026-09-30）：六色 pastel 底改成**系统统一底色** ——
+   跟其它输入框一个样（--field），文字也回 --text（暗色主题可读）。
+   原来的"钉死深色字"是给 pastel 浅底配的，底换了就一起撤。 */
 .pay-block { position: relative; border: 1px solid var(--line); border-radius: 6px;
-  padding: 6px 8px; background: var(--card); min-width: 86px;
-  color: #334155; }
+  padding: 6px 8px; background: var(--field); min-width: 86px;
+  color: var(--text); }
 .pay-block .pb-name { font-size: 12.5px; font-weight: 600; padding-right: 14px; }
 .pay-block input { width: 76px; margin-top: 4px; }
+.pay-block select, .pay-block input { background: var(--card); color: var(--text); }
 .pay-block .pb-x { position: absolute; top: 2px; right: 3px; border: 0;
   background: none; cursor: pointer; color: var(--muted); font-size: 13px; }
-.pay-block:nth-child(6n+1) { background: #eef2ff; }
-.pay-block:nth-child(6n+2) { background: #eef6ff; }
-.pay-block:nth-child(6n+3) { background: #fff7e8; }
-.pay-block:nth-child(6n+4) { background: #eefaf0; }
-.pay-block:nth-child(6n+5) { background: #fdeeee; }
-.pay-block:nth-child(6n+6) { background: #f3f0ff; }
 .pay-sum { font-size: 12.5px; margin-top: 8px; color: var(--muted); }
 .pay-warn { color: var(--warn); background: var(--warn-bg);
   border: 1px solid var(--warn-line);

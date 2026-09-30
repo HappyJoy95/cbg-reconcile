@@ -174,7 +174,16 @@ def _clean_entry(data: dict, entry_id=None):
     prod, why = _clean_products(data.get("products"))
     if why:
         return None, why
+    # 顶层显示字段（名/编码/SN）在有商品行时**照首行派生** ——
+    # 卡内编辑撤掉了那三个输入框（用户第 1 条：左上角冗余），它们只能服务端算
+    goods_name = str(data.get("goods_name") or "").strip()
+    goods_code = str(data.get("goods_code") or "").strip()
+    sn = str(data.get("sn") or "").strip()
     if prod:
+        goods_name = prod[0]["name"] + (
+            " 等%d件" % len(prod) if len(prod) > 1 else "")
+        goods_code = "|".join([p["code"] for p in prod if p["code"]])
+        sn = "|".join([p["sn"] for p in prod if p["sn"]])
         amount = round(sum(p["amount"] for p in prod), 2)
         qty = float(sum(p["quantity"] for p in prod))
         category = prod[0]["category"]
@@ -202,7 +211,6 @@ def _clean_entry(data: dict, entry_id=None):
     source = str(data.get("source") or "manual").strip() or "manual"
     if source not in SOURCES:
         return None, "来源只认 %s" % "/".join(SOURCES)
-    sn = str(data.get("sn") or "").strip()
     acc, why = _clean_items(data.get("accessories"), "配件", "name")
     if why:
         return None, why
@@ -212,8 +220,8 @@ def _clean_entry(data: dict, entry_id=None):
     now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     return {
         "sold_at": sold_at,
-        "goods_code": str(data.get("goods_code") or "").strip(),
-        "goods_name": str(data.get("goods_name") or "").strip(),
+        "goods_code": goods_code,
+        "goods_name": goods_name,
         "quantity": qty,
         "amount": amount,
         "seller": str(data.get("seller") or "").strip(),
