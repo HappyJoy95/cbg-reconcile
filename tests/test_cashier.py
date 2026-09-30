@@ -478,6 +478,20 @@ class Test页面接线(unittest.TestCase):
         self.assertIn("cashierRemove", blk, "手工卡 ✕ 没走真删")
         self.assertIn("/api/cashier/entry-delete", APP_JS, "真删接口还接在")
 
+    def test_导入和黑名单入口接上了(self):
+        """Task 12：一键导入按钮（防连点）+ 排除关键词行内设置。"""
+        for fn in ("cashierImport", "cashierBlacklistOpen",
+                   "cashierBlacklistSave"):
+            with self.subTest(fn=fn):
+                self.assertIn("function %s" % fn, APP_JS)
+        for ep in ("/api/cashier/import", "/api/cashier/import-settings",
+                   "/api/cashier/exclude"):
+            with self.subTest(ep=ep):
+                self.assertIn(ep, APP_JS)
+        # 导入按钮跑的时候要禁用（拉单可能几十秒，防连点）
+        i = APP_JS.index("function cashierImport")
+        self.assertIn("disabled", APP_JS[i:i + 900])
+
     def test_node语法检查(self):
         node = shutil.which("node")
         if not node:

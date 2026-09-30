@@ -845,6 +845,59 @@ async function cashierRefreshPolicy() {
   }
 }
 
+/** 一键导入当天玲珑销售单 —— 拉单几十秒，跑的时候按钮禁用防连点。 */
+async function cashierImport() {
+  const btn = $('#cashier-import');
+  if (!btn || btn.disabled) return;
+  const day = cashierDayValue();
+  if (!window.confirm(`导入 ${day} 的玲珑销售单？\n已导过的不会重复，`
+    + `备注命中排除词的不进卡。`)) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '导入中…（拉单要一会儿）';
+  try {
+    const d = await api('/api/cashier/import', { method: 'POST', body: { day } });
+    toast(`导入完成：新增 ${d.imported} 笔`
+      + (d.skipped_blacklist ? `，排除词命中 ${d.skipped_blacklist}` : '')
+      + (d.skipped_dup ? `，已存在 ${d.skipped_dup}` : ''), 'good');
+    await loadCashier();
+  } catch (e) {
+    toast('导入失败：' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/** 排除关键词行内设置：展开时现读后端（别信页面上残留的旧值）。 */
+function cashierBlacklistOpen() {
+  const row = $('#cashier-blacklist-row');
+  if (!row) return;
+  row.hidden = !row.hidden;
+  if (row.hidden) return;
+  api('/api/cashier/import-settings').then((d) => {
+    const inp = $('#cashier-blacklist-input');
+    if (inp) inp.value = (d.blacklist || []).join(', ');
+    const hint = $('#cashier-blacklist-hint');
+    if (hint) hint.textContent = '改完点保存，立即生效';
+  }).catch((e) => { toast('读设置失败：' + e.message, 'bad'); });
+}
+
+async function cashierBlacklistSave() {
+  const inp = $('#cashier-blacklist-input');
+  const words = String((inp && inp.value) || '').split(/[,，]/)
+    .map((s) => s.trim()).filter(Boolean);
+  try {
+    const d = await api('/api/cashier/import-settings',
+      { method: 'PUT', body: { blacklist: words } });
+    toast(`已保存 ${d.blacklist.length} 个排除词`, 'good');
+    const row = $('#cashier-blacklist-row');
+    if (row) row.hidden = true;
+  } catch (e) {
+    toast('保存失败：' + e.message, 'bad');
+  }
+}
+
 function bindCashierEvents() {
   if (_cashierBound) return;
   _cashierBound = true;
@@ -861,6 +914,9 @@ function bindCashierEvents() {
   $('#cashier-cancel').addEventListener('click', cashierCardCancel);
   $('#cashier-day').addEventListener('change', loadCashier);
   $('#cashier-refresh').addEventListener('click', cashierRefreshPolicy);
+  $('#cashier-import').addEventListener('click', cashierImport);
+  $('#cashier-blacklist-open').addEventListener('click', cashierBlacklistOpen);
+  $('#cashier-blacklist-save').addEventListener('click', cashierBlacklistSave);
   // ⚠ 卡片是 innerHTML 重画的 ⇒ 只能**委托**到容器上（绑节点一次重画就没了）。
   //   属性名一律 `data-cc-*` / `data-acc-*` —— 别用旧表格的 data-edit/data-del。
   $('#cashier-cards').addEventListener('click', (e) => {
