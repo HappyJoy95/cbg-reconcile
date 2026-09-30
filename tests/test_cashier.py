@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -413,10 +414,14 @@ class Test页面接线(unittest.TestCase):
 
     def test_收银订单卡样式段在(self):
         css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
-        for token in (".cashier-top", ".cashier-card", ".cc-side",
-                      ".cc-group-title", ".pay-block", ".cc-close"):
+        # ⚠ 认「选择器 + {」，别裸认 token —— 注释里提到 .cc-side 也算命中，
+        #   会假绿（2026-09-30 code review 指出）。
+        for token in ("cashier-top", "cashier-card", "cc-side",
+                      "cc-group-title", "pay-block", "cc-close"):
             with self.subTest(token=token):
-                self.assertIn(token, css)
+                self.assertIsNotNone(
+                    re.search(r"\.%s\s*\{" % re.escape(token), css),
+                    "找不到选择器 .%s {" % token)
         self.assertIn("position: sticky",
                       css[css.index(".cashier-top"):css.index(".cashier-top") + 400])
 

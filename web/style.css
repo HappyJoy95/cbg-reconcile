@@ -1818,10 +1818,11 @@ main.tools-frame-mode .subpanel.active {
 .cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 .cc-editing { outline: 2px solid var(--brand); }
 
-/* 右侧信息栏 —— 参考图的蓝竖条分组标题；右 28px 给垂直居中的 ✕ 让位
-   （原计划写两条 .cc-side，已合并进这一条：padding 左14 右28）。 */
+/* 右侧信息栏 —— 参考图的蓝竖条分组标题；右 36px 给垂直居中的 ✕ 让位
+   （原计划写两条 .cc-side，已合并进这一条：padding 左14 右36 —— 28px 时
+   全角 ✕ 的最大字宽还会压到行尾，留足 36）。 */
 .cc-side { flex: 0 0 260px; border-left: 1px solid var(--line);
-  padding: 12px 28px 12px 14px; background: var(--field); font-size: 13px; }
+  padding: 12px 36px 12px 14px; background: var(--field); font-size: 13px; }
 .cc-group + .cc-group { margin-top: 12px; }
 .cc-group-title { font-weight: 650; margin-bottom: 6px; padding-left: 8px;
   border-left: 3px solid var(--brand); line-height: 1.2; }
@@ -1835,8 +1836,13 @@ main.tools-frame-mode .subpanel.active {
 /* 支付方块（参考图彩色块）：块 + 下方金额框；软提醒不拦截。
    ⚠ 底色用纯 hex、不写 color-mix —— 门店 Win7 老 Chromium 不认 color-mix()。 */
 .pay-blocks { display: flex; flex-wrap: wrap; gap: 8px; }
+/* ⚠ 文字**钉死深色**、不用 var(--text)：六色底是固定的 pastel 浅色，
+   暗色主题（dark/dusk/dianye）的 --text 是浅色，落在 #eef2ff 这类底上
+   对比度不到 1.1:1 根本看不见。参考图的彩色块外观是用户拍板的视觉，
+   所以底保持不动，只把字锁成深色（可读性 > 主题令牌一致性）。 */
 .pay-block { position: relative; border: 1px solid var(--line); border-radius: 6px;
-  padding: 6px 8px; background: var(--card); min-width: 86px; }
+  padding: 6px 8px; background: var(--card); min-width: 86px;
+  color: #334155; }
 .pay-block .pb-name { font-size: 12.5px; font-weight: 600; padding-right: 14px; }
 .pay-block input { width: 76px; margin-top: 4px; }
 .pay-block .pb-x { position: absolute; top: 2px; right: 3px; border: 0;
@@ -1848,7 +1854,8 @@ main.tools-frame-mode .subpanel.active {
 .pay-block:nth-child(6n+5) { background: #fdeeee; }
 .pay-block:nth-child(6n+6) { background: #f3f0ff; }
 .pay-sum { font-size: 12.5px; margin-top: 8px; color: var(--muted); }
-.pay-warn { color: #b45309; background: #fffbeb; border: 1px solid #fde68a;
+.pay-warn { color: var(--warn); background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
   border-radius: 5px; padding: 3px 8px; display: inline-block; margin-top: 6px; }
 
 /* 卡右侧垂直居中的 ✕（两类卡统一入口，语义在 JS 分叉） */
