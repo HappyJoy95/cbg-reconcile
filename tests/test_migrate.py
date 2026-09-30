@@ -73,10 +73,10 @@ class Test幂等(unittest.TestCase):
         conn.execute("INSERT INTO meta VALUES ('schema', '3')")
         conn.execute("CREATE TABLE erp_sales (sn TEXT, 制单时间 TEXT)")
         res = migrate.run(conn)
-        self.assertEqual([x["n"] for x in res["applied"]], [4, 5, 6, 7],
+        self.assertEqual([x["n"] for x in res["applied"]], [4, 5, 6, 7, 8],
                          "1..3 当已跑（按 schema 补账），只补新账")
-        self.assertEqual(migrate.applied(conn), {1, 2, 3, 4, 5, 6, 7})
-        self.assertEqual(migrate.current(conn), 7)
+        self.assertEqual(migrate.applied(conn), {1, 2, 3, 4, 5, 6, 7, 8})
+        self.assertEqual(migrate.current(conn), 8)
 
     def test_纯手动新建库一路到最新(self):
         """收银机可能**永远不跑抓取**：空库直接迁移，除了 003 全都要建出来

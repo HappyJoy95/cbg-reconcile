@@ -39,6 +39,14 @@ CST = datetime.timezone(datetime.timedelta(hours=8))
 #: 流水来源（手输 = manual；以后玲珑导入 = linglong，见开发目标"本版不做的"）
 SOURCES = ("manual", "linglong")
 
+#: 品类清单（2026-09-30 用户定：**录入时选**）—— 取值来自用户那份
+#: 《9月份机场销售表》的实测值，导出时原样落「品类」列。
+CATEGORIES = ("手机", "平板", "笔记本", "穿戴", "音频", "配件", "第三方配件", "服务")
+
+#: 暂存态（2026-09-30 两段式）：`staged` = 还没点「保存并记录」，`saved` = 已入账。
+STAGED = "staged"
+SAVED = "saved"
+
 
 # ------------------------------------------------------------------ 库
 def db_path(root=None) -> Path:
@@ -124,6 +132,9 @@ def _clean_entry(data: dict, entry_id=None):
     if source not in SOURCES:
         return None, "来源只认 %s" % "/".join(SOURCES)
     sn = str(data.get("sn") or "").strip()
+    category = str(data.get("category") or "").strip()
+    if category and category not in CATEGORIES:
+        return None, "品类只认：%s" % "、".join(CATEGORIES)
     acc, why = _clean_items(data.get("accessories"), "配件", "name")
     if why:
         return None, why
@@ -141,6 +152,10 @@ def _clean_entry(data: dict, entry_id=None):
         "note": str(data.get("note") or "").strip(),
         "source": source,
         "sn": sn,
+        "category": category,
+        # ⚠ 只认字面 `staged`，别的都当已入库 —— 调用方（前端「确认添加」/
+        #   导入）想暂存就显式给；改老行时这个键**根本不进 UPDATE**（见下）。
+        "status": STAGED if str(data.get("status") or "").strip() == STAGED else SAVED,
         "accessories": json.dumps(acc, ensure_ascii=False),
         "payments": json.dumps(pay, ensure_ascii=False),
     }, None
@@ -156,14 +171,17 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
     with _db.tx(str(path)) as conn:
         if entry_id:
             try:
+                # ⚠ UPDATE **故意不带 status**：改一笔不改变它入没入库
+                #   （已入库的编辑完还是已入库，暂存的还是暂存）——
+                #   前端编辑体里就算带着 status 也按本行原值走。
                 cur = conn.execute(
                     "UPDATE sale_entries SET sold_at=?, goods_code=?, goods_name=?,"
                     " quantity=?, amount=?, seller=?, note=?, source=?, sn=?,"
-                    " accessories=?, payments=?, updated_at=?"
+                    " category=?, accessories=?, payments=?, updated_at=?"
                     " WHERE id=?",
                     (row["sold_at"], row["goods_code"], row["goods_name"],
                      row["quantity"], row["amount"], row["seller"], row["note"],
-                     row["source"], row["sn"], row["accessories"],
+                     row["source"], row["sn"], row["category"], row["accessories"],
                      row["payments"], now, int(entry_id)))
             except (TypeError, ValueError):
                 return {"ok": False, "why": "id 不对"}
@@ -172,12 +190,13 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
             return {"ok": True, "id": int(entry_id)}
         cur = conn.execute(
             "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
-            " amount, seller, note, source, sn, accessories, payments,"
-            " created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " amount, seller, note, source, sn, category, status,"
+            " accessories, payments, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["sold_at"], row["goods_code"], row["goods_name"], row["quantity"],
              row["amount"], row["seller"], row["note"], row["source"], row["sn"],
-             row["accessories"], row["payments"], now, now))
+             row["category"], row["status"], row["accessories"], row["payments"],
+             now, now))
         return {"ok": True, "id": int(cur.lastrowid)}
 
 
@@ -221,6 +240,9 @@ def _row_out(r) -> dict:
     d["sn"] = d.get("sn") or ""
     d["external_id"] = d.get("external_id") or ""
     d["excluded"] = int(d.get("excluded") or 0)
+    d["category"] = d.get("category") or ""
+    # ⚠ 老行 status 是 NULL（m008 之前入的账）⇒ 当已入库，绝不能当暂存
+    d["status"] = STAGED if (d.get("status") or "") == STAGED else SAVED
     for k in ("accessories", "payments"):
         try:
             v = json.loads(d.get(k) or "[]")
@@ -250,6 +272,24 @@ def list_entries(root=None, day: str = "") -> List[dict]:
         conn.close()
 
 
+def commit_entries(root=None, day: str = "") -> dict:
+    """「保存并记录」—— 把**那天**的暂存行转成已入库（`status` staged → saved）。
+
+    ⚠ 只转点名那天：暂存是"今天这一屏还没结的账"，别的天的暂存不该被顺手结掉。
+    ⚠ 没有暂存也回 `ok`（重复点 / 空手点不该报错），`saved` 说清转了几条。
+    """
+    day = str(day or "").strip()
+    if len(day) != 10 or day[4] != "-" or day[7] != "-":
+        return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
+    now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    with _db.tx(str(ensure(root))) as conn:
+        cur = conn.execute(
+            "UPDATE sale_entries SET status=?, updated_at=?"
+            " WHERE status=? AND sold_at LIKE ?",
+            (SAVED, now, STAGED, day + "%"))
+        return {"ok": True, "saved": int(cur.rowcount or 0), "day": day}
+
+
 def sellers(root=None) -> List[str]:
     """出现过的销售员（**最近出现的排前面**）—— 收银下拉的唯一"名单"来源。"""
     conn = _db.open_db(str(ensure(root)))
@@ -272,6 +312,8 @@ def entries_from_orders(root=None, day: str = "") -> dict:
       ② `external_id` 已存在（**含软排除的** —— excluded 行不删）跳过 ⇒ 幂等。
       ⚠ 只匹配 orders.remark 一列 —— 状态/标签不在过滤范围（spec 口径就是「备注」）。
     ⚠ **单据一卡**：多行聚合（数量=Σ、名称=首行+等N件、编码/SN 拼接）。
+    ⚠ 生成的卡片是**暂存**（`status='staged'`）—— 2026-09-30 两段式：
+      导入不入账，等汇总条「保存并记录」那天一起转正。
     """
     day = str(day or "").strip()
     if len(day) != 10 or day[4] != "-" or day[7] != "-":
@@ -321,11 +363,11 @@ def entries_from_orders(root=None, day: str = "") -> dict:
             conn.execute(
                 "INSERT INTO sale_entries (sold_at, goods_code, goods_name,"
                 " quantity, amount, seller, note, source, sn, external_id,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (o["doc_create_time"], "|".join(codes), name.strip(),
                  qty, round(amount, 2),
                  str(o["consumer_guide_name"] or ""), remark,
-                 "linglong", "|".join(sns), dn, now, now))
+                 "linglong", "|".join(sns), dn, STAGED, now, now))
             have.add(dn)
             imported += 1
     return {"ok": True, "imported": imported,
@@ -392,8 +434,8 @@ def policy_meta(root=None) -> dict:
 
 
 __all__ = [
-    "SOURCES", "db_path", "ensure",
+    "SOURCES", "CATEGORIES", "STAGED", "SAVED", "db_path", "ensure",
     "save_entry", "delete_entry", "list_entries", "sellers",
-    "exclude_entry", "entries_from_orders",
+    "exclude_entry", "entries_from_orders", "commit_entries",
     "save_policy", "lookup", "policy_meta",
 ]

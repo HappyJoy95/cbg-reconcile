@@ -906,5 +906,101 @@ class Test导入接口(_RootCase):
         self.assertEqual(st, 403)
 
 
+# ────────────────────────────────────── 暂存两段式（2026-09-30）：确认添加 → 保存并记录
+class Test暂存与入库(_RootCase):
+    def test_迁移补两列_老行读出来是已入库(self):
+        import sqlite3
+        path = store.ensure(self.root)
+        conn = sqlite3.connect(str(path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+        self.assertIn("category", cols, "m008 没补 category")
+        self.assertIn("status", cols, "m008 没补 status")
+        conn.execute(
+            "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
+            " amount, seller, note, source, created_at, updated_at)"
+            " VALUES ('2026-09-30 10:00:00','c1','老货',1,99,'小张','',"
+            " 'manual','2026-09-30 10:00:00','2026-09-30 10:00:00')")
+        conn.commit()
+        conn.close()
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["status"], "saved", "老行（status 空）要当已入库")
+        self.assertEqual(r["category"], "")
+
+    def test_新录默认已入库_给了staged才暂存(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 1})
+        store.save_entry(self.root, {"sold_at": "2026-09-30 11:00", "amount": 2,
+                                     "status": "staged"})
+        rows = {str(r["sold_at"])[11:16]: r for r in
+                store.list_entries(self.root, day="2026-09-30")}
+        self.assertEqual(rows["10:00"]["status"], "saved")
+        self.assertEqual(rows["11:00"]["status"], "staged")
+
+    def test_保存并记录_只转当天的暂存(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 1,
+                                     "status": "staged"})
+        store.save_entry(self.root, {"sold_at": "2026-09-30 11:00", "amount": 2,
+                                     "status": "staged"})
+        store.save_entry(self.root, {"sold_at": "2026-10-01 11:00", "amount": 3,
+                                     "status": "staged"})
+        res = store.commit_entries(self.root, "2026-09-30")
+        self.assertEqual((res.get("ok"), res.get("saved")), (True, 2), res)
+        rows = {str(r["sold_at"]): r for r in store.list_entries(self.root)}
+        self.assertEqual(rows["2026-09-30 10:00"]["status"], "saved")
+        self.assertEqual(rows["2026-09-30 11:00"]["status"], "saved")
+        self.assertEqual(rows["2026-10-01 11:00"]["status"], "staged",
+                         "别的天的暂存不许被顺手转正")
+        # 没有暂存也要回 ok（第二次点、空手点）
+        self.assertEqual(store.commit_entries(self.root, "2026-09-30").get("saved"), 0)
+
+    def test_改状态不许被编辑带跑(self):
+        sid = store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
+                                           "amount": 1, "status": "staged"})["id"]
+        gid = store.save_entry(self.root, {"sold_at": "2026-09-30 11:00",
+                                           "amount": 2})["id"]
+        # 编辑时前端就算漏传 status，也不能把已入库的打回暂存
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 5,
+                                     "status": "staged"}, entry_id=gid)
+        rows = {r["id"]: r for r in store.list_entries(self.root, day="2026-09-30")}
+        self.assertEqual(rows[gid]["status"], "saved")
+        # 暂存行编辑完还是暂存
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 6},
+                         entry_id=sid)
+        self.assertEqual(rows[sid]["status"], "staged")
+        rows2 = {r["id"]: r for r in store.list_entries(self.root, day="2026-09-30")}
+        self.assertEqual(rows2[sid]["status"], "staged")
+        self.assertEqual(rows2[sid]["amount"], 6)
+
+    def test_品类只认清单(self):
+        ok = store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
+                                          "amount": 1, "category": "手机"})
+        self.assertTrue(ok.get("ok"), ok)
+        bad = store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
+                                           "amount": 1, "category": "电视机"})
+        self.assertFalse(bad.get("ok"))
+        self.assertIn("品类", bad.get("why", ""))
+        rows = store.list_entries(self.root, day="2026-09-30")
+        self.assertEqual(rows[0]["category"], "手机")
+
+    def test_导入生成的是暂存行(self):
+        path = store.ensure(self.root)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE IF NOT EXISTS orders (document_no TEXT PRIMARY KEY,"
+                     " doc_create_time TEXT, included_tax_amount REAL, remark TEXT,"
+                     " consumer_guide_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS order_lines (document_no TEXT,"
+                     " line_no INTEGER, sn TEXT, ean TEXT, item_name TEXT,"
+                     " quantity REAL)")
+        conn.execute(
+            "INSERT INTO orders VALUES ('DN1','2026-09-30 14:32:00',1899,'','张三')")
+        conn.execute("INSERT INTO order_lines VALUES ('DN1',1,'HXR1','6901','M',1)")
+        conn.commit()
+        conn.close()
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual(res.get("imported"), 1, res)
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["status"], "staged", "导入的卡片是暂存，不直接入账")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -203,6 +203,22 @@ def _m007(conn) -> None:
                  " WHERE external_id IS NOT NULL AND external_id != ''")
 
 
+def _m008(conn) -> None:
+    """收银流水补列（2026-09-30 两段式）—— `category` 品类 + `status` 暂存态。
+
+    ⚠ `status` 取值 `'staged'`（待「保存并记录」入库）/ `'saved'`（已入库）。
+      **老行的 status 是 NULL** ⇒ 读侧一律兜底成 `'saved'`
+      （`store._row_out` 负责）—— 没入库过的历史流水当然是已入库的。
+      同理不给 DEFAULT（ALTER 加列 + 非空默认在老 SQLite 上有坑）。
+    ⚠ 照 m007 的可重入惯例：PRAGMA 先查后加（ALTER autocommit，中断重跑
+      会撞 duplicate column）。
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+    for col, typ in (("category", "TEXT"), ("status", "TEXT")):
+        if col not in have:
+            conn.execute("ALTER TABLE sale_entries ADD COLUMN %s %s" % (col, typ))
+
+
 MIGRATIONS: List[Migration] = [
     Migration(n=1, name="结构基线", apply=_m001),
     Migration(n=2, name="采集尝试表 fetch_attempt", apply=_m002),
@@ -215,6 +231,7 @@ MIGRATIONS: List[Migration] = [
     Migration(n=5, name="收银流水 sale_entries", apply=_m005),
     Migration(n=6, name="政策快照 price_policy", apply=_m006),
     Migration(n=7, name="收银流水补列 SN/配件/支付/玲珑", apply=_m007),
+    Migration(n=8, name="收银流水补列 品类/暂存态", apply=_m008),
 ]
 
 
