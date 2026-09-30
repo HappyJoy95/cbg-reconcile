@@ -514,11 +514,66 @@ class Test新字段存取(_RootCase):
                 ({"accessories": [{"amount": 5}]}, "名字"),
                 ({"accessories": [{"name": "壳", "amount": "abc"}]}, "数字"),
                 ({"payments": [{"method": "现金", "amount": -1}]}, "负数"),
-                ({"payments": "不是列表"}, "列表")):
+                ({"payments": "不是列表"}, "列表"),
+                ({"accessories": [["壳"]]}, "不是对象"),
+                ({"payments": [{"method": "现金"}]}, "数字")):
             with self.subTest(frag=frag):
                 res = store.save_entry(self.root, dict(base, **bad))
                 self.assertFalse(res.get("ok"))
                 self.assertIn(frag, res.get("why", ""))
+
+    def test_明细接受JSON字符串入参(self):
+        """前端可能把明细当 JSON 字符串发过来 —— 存进去、读出来都得是 list。"""
+        res = store.save_entry(self.root, {
+            "sold_at": "2026-09-30 14:32", "amount": 109,
+            "accessories": '[{"name":"壳","amount":9}]',
+        })
+        self.assertTrue(res.get("ok"), res)
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["accessories"], [{"name": "壳", "amount": 9.0}])
+
+    def test_nan_inf不进库(self):
+        """nan/inf 过得了 `< 0` 检查（nan < 0 是 False），写进去 json.dumps
+        出 NaN → 前端 JSON.parse 挂 → 整页读挂且删不掉毒行。"""
+        base = {"sold_at": "2026-09-30 14:32"}
+        for bad, frag in (
+                ({"amount": "nan"}, "数字"),
+                ({"amount": "inf"}, "数字"),
+                ({"amount": "1e999"}, "数字"),          # 溢出成 inf
+                ({"amount": 100, "quantity": "nan"}, "数量"),
+                ({"amount": 100,
+                  "accessories": [{"name": "壳", "amount": "nan"}]}, "数字"),
+                ({"amount": 100,
+                  "payments": [{"method": "现金", "amount": "inf"}]}, "数字")):
+            with self.subTest(why=frag, bad=bad):
+                res = store.save_entry(self.root, dict(base, **bad))
+                self.assertFalse(res.get("ok"), res)
+                self.assertIn(frag, res.get("why", ""))
+
+    def test_毒JSON读侧钉子(self):
+        """读出去的流水必须是严格 JSON —— 不许 NaN/Infinity 常量（防回归）。"""
+        self.assertTrue(store.save_entry(self.root, {
+            "sold_at": "2026-09-30 14:32", "amount": 100,
+            "accessories": [{"name": "壳", "amount": 9}],
+            "payments": [{"method": "现金", "amount": 100}],
+        }).get("ok"))
+        raw = json.dumps(store.list_entries(self.root, day="2026-09-30"))
+
+        def _boom(c):
+            raise ValueError("毒常量 %s" % c)
+        json.loads(raw, parse_constant=_boom)   # NaN/Infinity 会在这里抛
+
+    def test_软排除两分支都过滤(self):
+        """excluded=1 的行不许出现在任何 list_entries 分支里。"""
+        self.assertTrue(store.save_entry(self.root, {
+            "sold_at": "2026-09-30 14:32", "amount": 100}).get("ok"))
+        import sqlite3
+        conn = sqlite3.connect(str(store.ensure(self.root)))
+        conn.execute("UPDATE sale_entries SET excluded=1")
+        conn.commit()
+        conn.close()
+        self.assertEqual(store.list_entries(self.root), [])
+        self.assertEqual(store.list_entries(self.root, day="2026-09-30"), [])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -87,6 +88,8 @@ def _clean_items(val, what: str, name_key: str):
             amt = round(float(item.get("amount")), 2)
         except (TypeError, ValueError):
             return None, "%s「%s」的金额得是数字" % (what, name)
+        if not math.isfinite(amt):
+            return None, "%s「%s」的金额得是数字" % (what, name)
         if amt < 0:
             return None, "%s「%s」的金额不能是负数" % (what, name)
         out.append({name_key: name, "amount": amt})
@@ -103,6 +106,8 @@ def _clean_entry(data: dict, entry_id=None):
         amount = round(float(data.get("amount")), 2)
     except (TypeError, ValueError):
         return None, "金额得是数字"
+    if not math.isfinite(amount):
+        return None, "金额得是数字"
     if amount < 0:
         return None, "金额不能是负数"
     qty_raw = data.get("quantity")
@@ -112,7 +117,7 @@ def _clean_entry(data: dict, entry_id=None):
         qty = float(qty_raw)
     except (TypeError, ValueError):
         return None, "数量得是数字"
-    if qty <= 0:
+    if not math.isfinite(qty) or qty <= 0:
         return None, "数量得大于 0"
     source = str(data.get("source") or "manual").strip() or "manual"
     if source not in SOURCES:
