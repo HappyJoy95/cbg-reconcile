@@ -105,36 +105,104 @@ def _clean_items(val, what: str, name_key: str):
     return out, None
 
 
+def _clean_products(val):
+    """商品行 `[{名, 编码, SN, 数量, 金额, 品类}]` → `(list, None)` / `(None, why)`。
+
+    跟配件（`_clean_items`）的区别：多 编码/SN/数量/品类，**缺名字就不收**。
+    ⚠ **品类跟着单条商品走**（2026-09-30 用户定）：行上校验，可空但只认
+      `CATEGORIES`。金额两位小数、不许负；数量必须 > 0。
+    """
+    if val in (None, ""):
+        return [], None
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except ValueError:
+            return None, "商品不是合法 JSON，得是列表"
+    if not isinstance(val, list):
+        return None, "商品得是列表"
+    out = []
+    for i, item in enumerate(val):
+        if not isinstance(item, dict):
+            return None, "商品第 %d 条不是对象" % (i + 1)
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return None, "商品第 %d 条没有名字" % (i + 1)
+        category = str(item.get("category") or "").strip()
+        if category and category not in CATEGORIES:
+            return None, "品类只认：%s" % "、".join(CATEGORIES)
+        qty_raw = item.get("quantity")
+        if qty_raw in (None, ""):
+            qty_raw = 1
+        try:
+            qty = float(qty_raw)
+        except (TypeError, ValueError):
+            return None, "商品「%s」的数量得是数字" % name
+        if not math.isfinite(qty) or qty <= 0:
+            return None, "商品「%s」的数量得大于 0" % name
+        try:
+            amt = round(float(item.get("amount")), 2)
+        except (TypeError, ValueError):
+            return None, "商品「%s」的金额得是数字" % name
+        if not math.isfinite(amt):
+            return None, "商品「%s」的金额得是数字" % name
+        if amt < 0:
+            return None, "商品「%s」的金额不能是负数" % name
+        out.append({
+            "name": name,
+            "code": str(item.get("code") or "").strip(),
+            "sn": str(item.get("sn") or "").strip(),
+            "quantity": qty,
+            "amount": amt,
+            "category": category,
+        })
+    return out, None
+
+
 def _clean_entry(data: dict, entry_id=None):
-    """校验 + 归一 —— 返回 `(行, None)` 或 `(None, why)`。"""
+    """校验 + 归一 —— 返回 `(行, None)` 或 `(None, why)`。
+
+    ⚠ **商品行优先**（2026-09-30 第三轮）：`products` 非空时，
+      合计 = Σ商品金额、件数 = Σ数量、顶层品类 = 首行品类
+ （传进来的 `amount` / `quantity` / `category` 都不作数 —— 界面上那三项
+      在有商品行时就是派生值）。`products` 空 = 老口径（顶层字段说了算）。
+    """
     data = data or {}
     sold_at = str(data.get("sold_at") or "").strip().replace("T", " ")
     if len(sold_at) < 10 or sold_at[4] != "-" or sold_at[7] != "-":
         return None, "销售时间格式不对（要 2026-09-29 这种）"
-    try:
-        amount = round(float(data.get("amount")), 2)
-    except (TypeError, ValueError):
-        return None, "金额得是数字"
-    if not math.isfinite(amount):
-        return None, "金额得是数字"
-    if amount < 0:
-        return None, "金额不能是负数"
-    qty_raw = data.get("quantity")
-    if qty_raw in (None, ""):
-        qty_raw = 1
-    try:
-        qty = float(qty_raw)
-    except (TypeError, ValueError):
-        return None, "数量得是数字"
-    if not math.isfinite(qty) or qty <= 0:
-        return None, "数量得大于 0"
+    prod, why = _clean_products(data.get("products"))
+    if why:
+        return None, why
+    if prod:
+        amount = round(sum(p["amount"] for p in prod), 2)
+        qty = float(sum(p["quantity"] for p in prod))
+        category = prod[0]["category"]
+    else:
+        try:
+            amount = round(float(data.get("amount")), 2)
+        except (TypeError, ValueError):
+            return None, "金额得是数字"
+        if not math.isfinite(amount):
+            return None, "金额得是数字"
+        if amount < 0:
+            return None, "金额不能是负数"
+        qty_raw = data.get("quantity")
+        if qty_raw in (None, ""):
+            qty_raw = 1
+        try:
+            qty = float(qty_raw)
+        except (TypeError, ValueError):
+            return None, "数量得是数字"
+        if not math.isfinite(qty) or qty <= 0:
+            return None, "数量得大于 0"
+        category = str(data.get("category") or "").strip()
+        if category and category not in CATEGORIES:
+            return None, "品类只认：%s" % "、".join(CATEGORIES)
     source = str(data.get("source") or "manual").strip() or "manual"
     if source not in SOURCES:
         return None, "来源只认 %s" % "/".join(SOURCES)
     sn = str(data.get("sn") or "").strip()
-    category = str(data.get("category") or "").strip()
-    if category and category not in CATEGORIES:
-        return None, "品类只认：%s" % "、".join(CATEGORIES)
     acc, why = _clean_items(data.get("accessories"), "配件", "name")
     if why:
         return None, why
@@ -156,6 +224,7 @@ def _clean_entry(data: dict, entry_id=None):
         # ⚠ 只认字面 `staged`，别的都当已入库 —— 调用方（前端「确认添加」/
         #   导入）想暂存就显式给；改老行时这个键**根本不进 UPDATE**（见下）。
         "status": STAGED if str(data.get("status") or "").strip() == STAGED else SAVED,
+        "products": json.dumps(prod, ensure_ascii=False),
         "accessories": json.dumps(acc, ensure_ascii=False),
         "payments": json.dumps(pay, ensure_ascii=False),
     }, None
@@ -177,12 +246,13 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
                 cur = conn.execute(
                     "UPDATE sale_entries SET sold_at=?, goods_code=?, goods_name=?,"
                     " quantity=?, amount=?, seller=?, note=?, source=?, sn=?,"
-                    " category=?, accessories=?, payments=?, updated_at=?"
+                    " category=?, products=?, accessories=?, payments=?,"
+                    " updated_at=?"
                     " WHERE id=?",
                     (row["sold_at"], row["goods_code"], row["goods_name"],
                      row["quantity"], row["amount"], row["seller"], row["note"],
-                     row["source"], row["sn"], row["category"], row["accessories"],
-                     row["payments"], now, int(entry_id)))
+                     row["source"], row["sn"], row["category"], row["products"],
+                     row["accessories"], row["payments"], now, int(entry_id)))
             except (TypeError, ValueError):
                 return {"ok": False, "why": "id 不对"}
             if cur.rowcount == 0:
@@ -190,13 +260,13 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
             return {"ok": True, "id": int(entry_id)}
         cur = conn.execute(
             "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
-            " amount, seller, note, source, sn, category, status,"
+            " amount, seller, note, source, sn, category, status, products,"
             " accessories, payments, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["sold_at"], row["goods_code"], row["goods_name"], row["quantity"],
              row["amount"], row["seller"], row["note"], row["source"], row["sn"],
-             row["category"], row["status"], row["accessories"], row["payments"],
-             now, now))
+             row["category"], row["status"], row["products"], row["accessories"],
+             row["payments"], now, now))
         return {"ok": True, "id": int(cur.lastrowid)}
 
 
@@ -243,7 +313,7 @@ def _row_out(r) -> dict:
     d["category"] = d.get("category") or ""
     # ⚠ 老行 status 是 NULL（m008 之前入的账）⇒ 当已入库，绝不能当暂存
     d["status"] = STAGED if (d.get("status") or "") == STAGED else SAVED
-    for k in ("accessories", "payments"):
+    for k in ("products", "accessories", "payments"):
         try:
             v = json.loads(d.get(k) or "[]")
         except ValueError:
@@ -311,7 +381,9 @@ def entries_from_orders(root=None, day: str = "") -> dict:
     ⚠ 过滤两道：① 备注命中黑名单（`import_cfg.load`）跳过；
       ② `external_id` 已存在（**含软排除的** —— excluded 行不删）跳过 ⇒ 幂等。
       ⚠ 只匹配 orders.remark 一列 —— 状态/标签不在过滤范围（spec 口径就是「备注」）。
-    ⚠ **单据一卡**：多行聚合（数量=Σ、名称=首行+等N件、编码/SN 拼接）。
+    ⚠ **单据一卡**：多行聚合（数量=Σ、名称=首行+等N件、编码/SN 拼接），
+      **同时把每个订单行写进 `products` 商品行**（2026-09-30 第三轮：
+      导出跟卡片商品行走，人改了卡导出就跟着变）。
     ⚠ 生成的卡片是**暂存**（`status='staged'`）—— 2026-09-30 两段式：
       导入不入账，等汇总条「保存并记录」那天一起转正。
     """
@@ -345,29 +417,68 @@ def entries_from_orders(root=None, day: str = "") -> dict:
             if not dn or dn in have:
                 skipped_dup += 1
                 continue
-            lines = conn.execute(
-                "SELECT sn, ean, item_name, quantity FROM order_lines"
-                " WHERE document_no=? ORDER BY line_no", (dn,)).fetchall()
-            qty = sum(float(ln["quantity"] or 0) for ln in lines) or 1
-            names = [str(ln["item_name"] or "") for ln in lines if ln["item_name"]]
+            # ⚠ SELECT * —— 测试/老库的 order_lines 可能只有精简列，
+            #   读的时候一律 .get()（缺列当没有，别炸整批导入）
+            lines = [dict(r) for r in conn.execute(
+                "SELECT * FROM order_lines WHERE document_no=? ORDER BY line_no",
+                (dn,)).fetchall()]
+            qty = sum(float(ln.get("quantity") or 0) for ln in lines) or 1
+            names = [str(ln.get("item_name") or "") for ln in lines
+                     if ln.get("item_name")]
             name = (names[0] if names else "") + (
                 " 等%d件" % len(lines) if len(lines) > 1 else "")
             if not name:
                 name = dn or "（无明细单）"
-            codes = [str(ln["ean"] or "") for ln in lines if ln["ean"]]
-            sns = [str(ln["sn"] or "") for ln in lines if ln["sn"]]
+            codes = [str(ln.get("ean") or "") for ln in lines if ln.get("ean")]
+            sns = [str(ln.get("sn") or "") for ln in lines if ln.get("sn")]
             amount = float(o["included_tax_amount"] or 0)
             if not math.isfinite(amount):
                 # _clean_entry 那边是拒收；导入路径拒收会废掉整批，归 0 保住页面
                 amount = 0.0
+            # 商品行：一个订单行一行（金额没给就退 单价×数量，再退 订单合计/
+            # 0）—— 后面 `_clean_products` 要求数字，这里必须落出数字。
+            products = []
+            for ln in lines:
+                lamt = None
+                if ln.get("included_tax_amount") not in (None, ""):
+                    try:
+                        lamt = float(ln["included_tax_amount"])
+                    except (TypeError, ValueError):
+                        lamt = None
+                if lamt is None or not math.isfinite(lamt):
+                    try:
+                        lamt = float(ln.get("unit_price")) * float(ln.get("quantity") or 1)
+                    except (TypeError, ValueError):
+                        lamt = None
+                if lamt is None or not math.isfinite(lamt):
+                    lamt = amount if len(lines) == 1 else 0.0
+                lqty = 1.0
+                if ln.get("quantity") not in (None, ""):
+                    try:
+                        lqty = float(ln["quantity"])
+                    except (TypeError, ValueError):
+                        lqty = 1.0
+                if not math.isfinite(lqty) or lqty <= 0:
+                    lqty = 1.0
+                products.append({
+                    "name": str(ln.get("item_name") or "").strip()
+                    or (name if len(lines) == 1 else dn),
+                    "code": str(ln.get("ean") or "").strip(),
+                    "sn": str(ln.get("sn") or "").strip(),
+                    "quantity": lqty,
+                    "amount": round(lamt, 2),
+                    "category": "",        # 订单行没有品类来源，录完人再选
+                })
             conn.execute(
                 "INSERT INTO sale_entries (sold_at, goods_code, goods_name,"
                 " quantity, amount, seller, note, source, sn, external_id,"
-                " status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " status, products, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (o["doc_create_time"], "|".join(codes), name.strip(),
                  qty, round(amount, 2),
                  str(o["consumer_guide_name"] or ""), remark,
-                 "linglong", "|".join(sns), dn, STAGED, now, now))
+                 "linglong", "|".join(sns), dn, STAGED,
+                 json.dumps(products, ensure_ascii=False), now, now))
             have.add(dn)
             imported += 1
     return {"ok": True, "imported": imported,

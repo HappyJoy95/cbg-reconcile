@@ -1195,5 +1195,107 @@ class Test导出内容(_RootCase):
         self.assertIn("月份", str(cm.exception))
 
 
+# ────────────────────────────────────── 商品行（一张卡 = 一个订单，2026-09-30 第三轮）
+class Test商品行(_RootCase):
+    def test_迁移补products列_老行读出来是空列表(self):
+        import sqlite3
+        path = store.ensure(self.root)
+        conn = sqlite3.connect(str(path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+        self.assertIn("products", cols, "m009 没补 products")
+        conn.execute(
+            "INSERT INTO sale_entries (sold_at, goods_code, goods_name, quantity,"
+            " amount, seller, note, source, created_at, updated_at)"
+            " VALUES ('2026-09-30 10:00:00','c1','老货',1,99,'小张','',"
+            " 'manual','2026-09-30 10:00:00','2026-09-30 10:00:00')")
+        conn.commit()
+        conn.close()
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["products"], [])
+
+    def test_存改查一条龙_每行带品类(self):
+        body = {
+            "sold_at": "2026-09-30 14:32", "goods_name": "MatePad", "quantity": 1,
+            "amount": 1899, "seller": "张三",
+            "products": [
+                {"name": "MatePad", "code": "6901", "sn": "S1",
+                 "quantity": 1, "amount": 1899, "category": "平板"},
+                {"name": "保护壳", "code": "6902", "sn": "",
+                 "quantity": 2, "amount": 198, "category": "配件"},
+            ],
+        }
+        res = store.save_entry(self.root, body)
+        self.assertTrue(res.get("ok"), res)
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(len(r["products"]), 2)
+        p0, p1 = r["products"]
+        self.assertEqual((p0["name"], p0["code"], p0["sn"], p0["category"]),
+                         ("MatePad", "6901", "S1", "平板"))
+        self.assertEqual((p1["quantity"], p1["amount"], p1["category"]),
+                         (2.0, 198.0, "配件"))
+        # 改第二行的金额 → 合计/件数跟着商品行走
+        body.update({"id": r["id"], "amount": 9999,
+                     "products": [body["products"][0],
+                                  dict(body["products"][1], amount=150)]})
+        self.assertTrue(store.save_entry(self.root, body, entry_id=r["id"]).get("ok"))
+        r2 = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r2["amount"], 2049, "合计 = Σ商品金额（传进来的 9999 不算）")
+        self.assertEqual(r2["quantity"], 3)
+        self.assertEqual(r2["category"], "平板", "顶层品类镜像首行")
+
+    def test_空商品行时金额件数还是老口径(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
+                                     "amount": 500, "quantity": 2,
+                                     "category": "手机"})
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual((r["amount"], r["quantity"], r["category"]),
+                         (500.0, 2.0, "手机"))
+        self.assertEqual(r["products"], [])
+
+    def test_坏商品行回why不抛(self):
+        base = {"sold_at": "2026-09-30 14:32", "amount": 100}
+        cases = (
+            ({"products": [{"code": "1", "amount": 5}]}, "名字"),
+            ({"products": [{"name": "A", "amount": "abc"}]}, "数字"),
+            ({"products": [{"name": "A", "amount": -1}]}, "负数"),
+            ({"products": [{"name": "A", "amount": 1, "quantity": 0}]}, "大于 0"),
+            ({"products": [{"name": "A", "amount": 1, "category": "电视机"}]},
+             "品类"),
+            ({"products": "不是列表"}, "列表"),
+        )
+        for bad, frag in cases:
+            with self.subTest(frag=frag):
+                res = store.save_entry(self.root, dict(base, **bad))
+                self.assertFalse(res.get("ok"))
+                self.assertIn(frag, res.get("why", ""))
+
+    def test_导入把order_lines写进商品行(self):
+        path = store.ensure(self.root)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE IF NOT EXISTS orders (document_no TEXT PRIMARY KEY,"
+                     " doc_create_time TEXT, included_tax_amount REAL, remark TEXT,"
+                     " consumer_guide_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS order_lines (document_no TEXT,"
+                     " line_no INTEGER, sn TEXT, ean TEXT, item_name TEXT,"
+                     " quantity REAL, included_tax_amount REAL)")
+        conn.execute("INSERT INTO orders VALUES ('DN-PROD','2026-09-06 10:00:00',"
+                     " 1000,'','张三')")
+        conn.execute("INSERT INTO order_lines VALUES"
+                     " ('DN-PROD',1,'S1','6901','手机A',1,800)")
+        conn.execute("INSERT INTO order_lines VALUES"
+                     " ('DN-PROD',2,'S2','6902','壳',1,200)")
+        conn.commit()
+        conn.close()
+        res = store.entries_from_orders(self.root, "2026-09-06")
+        self.assertTrue(res.get("ok"), res)
+        r = store.list_entries(self.root, day="2026-09-06")[0]
+        self.assertEqual(len(r["products"]), 2, "导入要按订单行铺商品行")
+        self.assertEqual(r["products"][0]["name"], "手机A")
+        self.assertEqual(r["products"][0]["amount"], 800.0)
+        self.assertEqual(r["products"][1]["code"], "6902")
+        self.assertEqual(r["amount"], 1000, "卡片合计仍是订单合计")
+
+
 if __name__ == "__main__":
     unittest.main()

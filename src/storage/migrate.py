@@ -219,6 +219,18 @@ def _m008(conn) -> None:
             conn.execute("ALTER TABLE sale_entries ADD COLUMN %s %s" % (col, typ))
 
 
+def _m009(conn) -> None:
+    """收银流水补列（2026-09-30 商品行）—— `products`：一张卡 = 一个订单。
+
+    `products` = JSON 列表 `[{name, code, sn, quantity, amount, category}, …]`；
+    空列表/NULL = 老口径（顶层字段就是那唯一一件商品）。
+    ⚠ 照 m007 的可重入惯例：PRAGMA 先查后加。
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+    if "products" not in have:
+        conn.execute("ALTER TABLE sale_entries ADD COLUMN products TEXT")
+
+
 MIGRATIONS: List[Migration] = [
     Migration(n=1, name="结构基线", apply=_m001),
     Migration(n=2, name="采集尝试表 fetch_attempt", apply=_m002),
@@ -232,6 +244,7 @@ MIGRATIONS: List[Migration] = [
     Migration(n=6, name="政策快照 price_policy", apply=_m006),
     Migration(n=7, name="收银流水补列 SN/配件/支付/玲珑", apply=_m007),
     Migration(n=8, name="收银流水补列 品类/暂存态", apply=_m008),
+    Migration(n=9, name="收银流水补列 商品行 products", apply=_m009),
 ]
 
 
