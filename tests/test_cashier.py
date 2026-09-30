@@ -452,6 +452,28 @@ class Test迁移新列(_RootCase):
         rows = store.list_entries(self.root, day="2026-09-30")
         self.assertEqual(len(rows), 1, "老行要能读出来")
 
+    def test_唯一索引只管非空_external_id(self):
+        """部分索引的行为钉子：NULL / 空串互不冲突，真单号重复才 IntegrityError。"""
+        import sqlite3
+        path = store.ensure(self.root)
+        conn = sqlite3.connect(str(path))
+        base = ("INSERT INTO sale_entries (sold_at, amount, external_id)"
+                " VALUES ('2026-09-30 10:00:00', 1, %s)")
+
+        # 两条 external_id 为 NULL 的行（手工单）都能插
+        conn.execute(base % "NULL")
+        conn.execute(base % "NULL")
+        # 两条 external_id='' 的行也能插（部分索引不参与）
+        conn.execute(base % "''")
+        conn.execute(base % "''")
+        conn.commit()
+        # 两条同 external_id 非空的行：第二条必报 IntegrityError（玲珑单幂等）
+        conn.execute(base % "'DOC-1'")
+        conn.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(base % "'DOC-1'")
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

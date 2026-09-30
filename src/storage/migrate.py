@@ -185,16 +185,22 @@ def _m007(conn) -> None:
 
     ⚠ `external_id` 上建唯一索引（玲珑 `document_no`）：SQLite 的 UNIQUE 索引
       **放行多个 NULL** ⇒ 手工单（external_id 空）互不冲突，玲珑单天然幂等。
+      索引带 `WHERE external_id IS NOT NULL AND external_id != ''`（部分索引）：
+      读侧 `_row_out` 把 NULL 映成 `""`，回写不设防的话两条空串会撞唯一 ——
+      `''` 干脆不参与唯一性，写侧即使漏判也安全。
     ⚠ `excluded` 不给 DEFAULT（ALTER 加列 + 非空默认在老 SQLite 上有坑）——
-      读侧一律 `excluded IS NULL OR =0` 兜底（`list_entries` 负责）。
+      读侧一律 `excluded IS NULL OR =0` 兜底（`list_entries` 负责，Task 3 兑现）。
+    ⚠ ALTER 逐条 autocommit 落盘，中断重跑会撞 duplicate column ⇒
+      先 PRAGMA 查再加，照 `schema.ensure_columns` 的惯例（可重入）。
     """
-    conn.execute("ALTER TABLE sale_entries ADD COLUMN sn TEXT")
-    conn.execute("ALTER TABLE sale_entries ADD COLUMN accessories TEXT")
-    conn.execute("ALTER TABLE sale_entries ADD COLUMN payments TEXT")
-    conn.execute("ALTER TABLE sale_entries ADD COLUMN external_id TEXT")
-    conn.execute("ALTER TABLE sale_entries ADD COLUMN excluded INTEGER")
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sale_entries)")}
+    for col, typ in (("sn", "TEXT"), ("accessories", "TEXT"), ("payments", "TEXT"),
+                     ("external_id", "TEXT"), ("excluded", "INTEGER")):
+        if col not in have:
+            conn.execute("ALTER TABLE sale_entries ADD COLUMN %s %s" % (col, typ))
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_sale_entries_external"
-                 " ON sale_entries(external_id)")
+                 " ON sale_entries(external_id)"
+                 " WHERE external_id IS NOT NULL AND external_id != ''")
 
 
 MIGRATIONS: List[Migration] = [
