@@ -267,6 +267,38 @@ class Test令牌覆盖得够不够(_Base):
                 self.assertIn(name, self.tokens, "配色在 themes/default.css")
 
 
+class Test提示条对比度(unittest.TestCase):
+    """暮山蓝 × 晚桃粉的 toast 看不见（用户 2026-09-30 截图「已修改」）。
+
+    两个根因各钉一条：
+    ① `toast()` 老代码传 `'good'`，CSS 只认 `ok`/`bad` ⇒ 落成**裸 toast**
+ （`--ink-2` 底 + `--on-brand` 字）—— 暮山蓝里两个令牌都是近黑，1:1 看不见；
+    ② 基础 `.toast` 的字色**不许用 `--on-brand`**（那是"主色底上的字"），
+      深色主题必跟 `--ink-2` 撞 —— 用 `--ink-text`（ink 底的配对字色）。
+    """
+
+    def setUp(self):
+        self.style = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_toast的good别名映射成ok(self):
+        i = self.js.index("function toast(")
+        blk = self.js[i:i + 400]
+        self.assertIn("'good'", blk, "good 要在 toast() 里被映射掉")
+        self.assertIn("'ok'", blk)
+
+    def test_基础toast字色用ink_text_okbad才用onbrand(self):
+        i = self.style.index(".toast {")
+        blk = self.style[i:i + 300]
+        self.assertIn("color: var(--ink-text)", blk)
+        self.assertNotIn("color: var(--on-brand)", blk)
+        for cls in (".toast.bad {", ".toast.ok {"):
+            with self.subTest(cls=cls):
+                j = self.style.index(cls)
+                self.assertIn("color: var(--on-brand)", self.style[j:j + 120],
+                              "%s 的底是状态色，字色单独钉 --on-brand" % cls.strip(" {"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

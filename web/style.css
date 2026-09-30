@@ -931,11 +931,14 @@ body.setup-locked .shell { visibility: hidden; }
 /* ───────────────────────── 提示 ───────────────────────── */
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: var(--ink-2); color: var(--on-brand); padding: 10px 18px; border-radius: 10px;
+  background: var(--ink-2); color: var(--ink-text); padding: 10px 18px; border-radius: 10px;
   font-size: 13.5px; box-shadow: var(--shadow-toast); z-index: 99; max-width: 80vw;
 }
-.toast.bad { background: var(--bad); }
-.toast.ok { background: var(--ok); }
+/* ⚠ 字色分两套：中性 toast 跟 ink 底配对（--ink-text）；
+   ok/bad 的底是**状态色**，字单独钉 --on-brand（暮山蓝里 --on-brand 是深字、
+   --ok/--bad 是亮底，反过来就又撞了）。 */
+.toast.bad { background: var(--bad); color: var(--on-brand); }
+.toast.ok { background: var(--ok); color: var(--on-brand); }
 
 /* 横幅右边那个「收起来」—— 别让它跟着文字换行跑到下一行去 */
 .banner-x { margin-left: auto; flex: 0 0 auto; }

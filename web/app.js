@@ -50,6 +50,10 @@ function esc(s) {
 }
 
 function toast(msg, kind = '') {
+  // ⚠ `good` 是老写法（收银那批调用点），CSS 只认 `ok`/`bad` ——
+  //   不映射就成了没样式的裸 toast：`--ink-2` 底 + `--on-brand` 字，
+  //   暮山蓝主题里俩都是近黑 ⇒ 1:1 看不见（用户 2026-09-30 截图那条「已修改」）。
+  if (kind === 'good') kind = 'ok';
   const t = $('#toast');
   t.textContent = msg;
   t.className = 'toast ' + kind;
