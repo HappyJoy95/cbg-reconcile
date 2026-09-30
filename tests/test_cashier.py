@@ -576,5 +576,22 @@ class Test新字段存取(_RootCase):
         self.assertEqual(store.list_entries(self.root, day="2026-09-30"), [])
 
 
+# ────────────────────────────────────── 导入黑名单（本机设置）
+class Test导入黑名单设置(_RootCase):
+    def test_默认空_存读往返(self):
+        from src.features.cashier import import_cfg
+        self.assertEqual(import_cfg.load(self.root), [])
+        self.assertTrue(import_cfg.save(self.root, ["样机", "展示机", "样机"]))
+        self.assertEqual(import_cfg.load(self.root), ["样机", "展示机"])
+
+    def test_空串过滤_坏文件当空(self):
+        from src.features.cashier import import_cfg
+        import_cfg.save(self.root, ["  ", "已退货", ""])
+        self.assertEqual(import_cfg.load(self.root), ["已退货"])
+        p = self.root / ".secrets" / "cashier-import.json"
+        p.write_text("{{{", encoding="utf-8")
+        self.assertEqual(import_cfg.load(self.root), [], "坏文件当没设置，不抛")
+
+
 if __name__ == "__main__":
     unittest.main()
