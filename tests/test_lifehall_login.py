@@ -61,7 +61,22 @@ class Test生活馆登录门禁(unittest.TestCase):
         self.assertEqual(st["need"], "linglong")
         self.assertTrue(st["lifehall"])
         self.assertTrue(st["erp"]["ok"])        # 云商那步直接算过
-        self.assertFalse(st["preview_available"])
+        # 没会话 ⇒ 登录页给「跳过」按钮（用户 2026-09-30 要的）
+        self.assertTrue(st["preview_available"])
+        self.assertFalse(st["preview"])         # 但还没真开预览
+
+    def test_跳过预览就放行_退出回登录页(self):
+        """「跳过按钮」只放行界面：ready 翻真、preview 挂标、need 清空。"""
+        self.assertTrue(web.set_preview(self.app, True)["ok"])
+        st = web.setup_state(self.app)
+        self.assertTrue(st["ready"])
+        self.assertTrue(st["preview"])          # 前端据此一直挂横幅
+        self.assertEqual(st["need"], "")
+        self.assertTrue(st["preview_available"])  # 还没会话 ⇒ 按钮还在（可退出）
+        web.set_preview(self.app, False)
+        st2 = web.setup_state(self.app)
+        self.assertFalse(st2["ready"])
+        self.assertEqual(st2["need"], "linglong")
 
     def test_有会话文件就放行_不卡自检(self):
         # ⚠ store_code 为空 ⇒ 会话文件是 cbg-default.json（`auth.session_path` 的
@@ -72,7 +87,7 @@ class Test生活馆登录门禁(unittest.TestCase):
         st = web.setup_state(self.app)
         self.assertTrue(st["ready"])
         self.assertEqual(st["need"], "")
-        self.assertFalse(st["preview_available"])   # 生活馆没有预览跳过
+        self.assertFalse(st["preview_available"])   # 有会话就不给跳过按钮
 
     def test_erp的why文案给抽屉和日志读(self):
         st = web.setup_state(self.app)
@@ -97,6 +112,11 @@ class Test前端接线(unittest.TestCase):
     def test_showSetup有生活馆分支(self):
         self.assertIn("setupState.lifehall", self.js)
         self.assertIn("$('#setup-step-erp').hidden = LH", self.js)
+
+    def test_登录页跳过按钮生活馆不藏(self):
+        # 老写法 `pv.hidden = LH || ...` 会把生活馆的跳过按钮藏掉 —— 钉死新写法
+        self.assertIn("pv.hidden = !(setupState && setupState.preview_available)",
+                      self.js)
 
     def test_首屏落地会找可见页签(self):
         self.assertIn("active.hidden", self.js)
