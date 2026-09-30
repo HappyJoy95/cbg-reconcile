@@ -955,43 +955,66 @@
        （会话走 A 案：活窗 → jar → 弹窗人工登录，可能要短信）。 -->
 <section class="panel" id="panel-cashier">
 <div class="subpanel" id="subpanel-cashier">
-  <div class="card">
-    <div class="card-head">
-      <h2>收银录入 <span class="hint" id="cashier-meta">政策表：读取中…</span></h2>
-      <div class="form-row" style="margin:0">
-        <button class="btn ghost small" id="cashier-refresh"
-                title="从华为 pmall 拉最新「价格与返利政策」；会话掉了会弹窗要人工登录">刷新政策数据</button>
+  <!-- 吸顶区：录入 + 汇总（滚动卡片列表时这两段钉在顶上） -->
+  <div class="cashier-top">
+    <div class="card">
+      <div class="card-head">
+        <h2>收银录入 <span class="hint" id="cashier-meta">政策表：读取中…</span></h2>
+        <div class="form-row" style="margin:0">
+          <button class="btn ghost small" id="cashier-refresh"
+                  title="从华为 pmall 拉最新「价格与返利政策」；会话掉了会弹窗要人工登录">刷新政策数据</button>
+        </div>
+      </div>
+      <div class="cashier-scan">
+        <input id="cashier-scan" placeholder="扫码或输入商品编码，回车反查"
+               autocomplete="off">
+        <button class="btn ghost" id="cashier-scan-ok">确定</button>
+      </div>
+      <div class="form-row">
+        <label>销售时间 <input type="datetime-local" id="cashier-sold-at"></label>
+        <label>商品名称 <input id="cashier-name" placeholder="编码查不到就手输"></label>
+        <label>数量 <input type="number" id="cashier-qty" value="1" min="0.01" step="any"
+                      style="width:5.5em"></label>
+        <label>实收金额 <input type="number" id="cashier-amount" step="0.01"
+                        placeholder="手动匹配" style="width:8em"></label>
+        <label>SN <input id="cashier-sn" placeholder="可空" style="width:10em"></label>
+        <label>销售员 <input id="cashier-seller" list="cashier-sellers"
+                        placeholder="选一个或新输">
+          <datalist id="cashier-sellers"></datalist></label>
+        <label>备注 <input id="cashier-note" placeholder="可空" style="width:11em"></label>
+        <button class="btn primary" id="cashier-save">保存一笔</button>
+        <button class="btn ghost" id="cashier-cancel" hidden>取消修改</button>
       </div>
     </div>
-    <div class="form-row">
-      <label>销售时间 <input type="datetime-local" id="cashier-sold-at"></label>
-      <label>商品编码 <input id="cashier-code" placeholder="扫码或手输，离开即反查"></label>
-      <label>商品名称 <input id="cashier-name" placeholder="编码查不到就手输"></label>
+
+    <div class="card cashier-summary" id="cashier-summary">
+      <span class="cs-date" id="cashier-day-label"></span>
+      <span>今日 <b id="cashier-count">0</b> 笔</span>
+      <span><b id="cashier-qty-sum">0</b> 件</span>
+      <span>实收 ¥<b id="cashier-amount-sum">0.00</b></span>
+      <span>配件 ¥<b id="cashier-acc-sum">0.00</b></span>
+      <span class="cs-gap"></span>
+      <button class="btn primary small" id="cashier-import"
+              title="拉当天玲珑销售单合并入库并生成卡片（已导过的不会重复）">导入玲珑单</button>
+      <button class="btn ghost small" id="cashier-blacklist-open">排除关键词</button>
+      <input type="date" id="cashier-day" title="看哪天的流水">
     </div>
-    <div class="form-row">
-      <label>数量 <input type="number" id="cashier-qty" value="1" min="0.01" step="any"
-                    style="width:5.5em"></label>
-      <label>实收金额 <input type="number" id="cashier-amount" step="0.01"
-                      placeholder="手动匹配" style="width:8em"></label>
-      <label>销售员 <input id="cashier-seller" list="cashier-sellers"
-                      placeholder="选一个或新输">
-        <datalist id="cashier-sellers"></datalist></label>
-      <label>备注 <input id="cashier-note" placeholder="可空" style="width:11em"></label>
-      <button class="btn primary" id="cashier-save">保存</button>
-      <button class="btn ghost" id="cashier-cancel" hidden>取消修改</button>
+    <div class="card cashier-blacklist" id="cashier-blacklist-row" hidden>
+      <label>备注含这些词的单不进卡（逗号分隔）
+        <input id="cashier-blacklist-input" placeholder="样机, 展示机"
+               style="width:28em"></label>
+      <button class="btn small" id="cashier-blacklist-save">保存</button>
+      <span class="hint" id="cashier-blacklist-hint"></span>
     </div>
-    <p class="hint" id="cashier-lookup" style="margin:4px 0 0 0">政策表没刷新过时，编码反查不到商品名 —— 手输名称也能存。</p>
   </div>
 
-  <div class="card">
-    <div class="card-head">
-      <h2>当日流水 <span class="hint" id="cashier-day-meta"></span></h2>
-      <div class="form-row" style="margin:0">
-        <input type="date" id="cashier-day" title="看哪天的流水">
-      </div>
-    </div>
-    <div id="cashier-table"><p class="hint">加载中…</p></div>
+  <!-- 滚动区：每笔订单一张卡 -->
+  <div id="cashier-cards" class="cashier-cards">
+    <p class="hint">加载中…</p>
   </div>
+  <!-- ⚠ 旧表格容器 id 保留为空占位：tests/test_cashier.py 的老断言与
+       test_web_ia 的 nav 对照都还认它，删了会红 -->
+  <div id="cashier-table" hidden></div>
 </div>
 </section>
 

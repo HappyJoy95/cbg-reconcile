@@ -383,12 +383,26 @@ class Test页面接线(unittest.TestCase):
                       "后者给 roles 的 HTML↔PAGE_RULES 双向对照")
 
     def test_表单关键控件在(self):
-        for cid in ("cashier-sold-at", "cashier-code", "cashier-name",
+        for cid in ("cashier-sold-at", "cashier-scan", "cashier-name",
                     "cashier-qty", "cashier-amount", "cashier-seller",
                     "cashier-note", "cashier-save", "cashier-day",
                     "cashier-table", "cashier-refresh"):
             with self.subTest(id=cid):
                 self.assertIn('id="%s"' % cid, INDEX_HTML)
+
+    def test_订单卡新结构的控件在(self):
+        """2026-09-30 改版：吸顶录入 + 汇总条 + 卡片容器 + 导入/黑名单入口。"""
+        for cid in ("cashier-scan", "cashier-summary", "cashier-count",
+                    "cashier-qty-sum", "cashier-amount-sum", "cashier-acc-sum",
+                    "cashier-cards", "cashier-import", "cashier-blacklist-open",
+                    "cashier-blacklist-row", "cashier-blacklist-input",
+                    "cashier-blacklist-save", "cashier-sn", "cashier-cancel"):
+            with self.subTest(id=cid):
+                self.assertIn('id="%s"' % cid, INDEX_HTML)
+        # 吸顶容器：录入区和汇总条都得在 .cashier-top 里
+        i = INDEX_HTML.index('id="subpanel-cashier"')
+        blk = INDEX_HTML[i:i + 4000]
+        self.assertIn('class="cashier-top"', blk)
 
     def test_SUBTABS和loader接上了(self):
         blk = APP_JS[APP_JS.index("const SUBTABS = {"):]
