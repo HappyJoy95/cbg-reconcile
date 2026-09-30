@@ -32,6 +32,7 @@ from ...paths import ROOT
 from ...storage import db as _db
 from ...storage import migrate as _migrate
 from ...storage import schema as _schema
+from . import import_cfg
 
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -193,6 +194,27 @@ def delete_entry(root=None, entry_id=None) -> dict:
         return {"ok": True, "id": eid}
 
 
+def exclude_entry(root=None, entry_id=None) -> dict:
+    """玲珑卡的 ✕ —— **软排除**（记标记，不删 dump 库的原单，再导入也不回来）。
+
+    手工单（source=manual）不许走这儿：它的 ✕ 是真删（`delete_entry`）。
+    """
+    try:
+        eid = int(entry_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "why": "id 不对"}
+    with _db.tx(str(ensure(root))) as conn:
+        row = conn.execute("SELECT source FROM sale_entries WHERE id=?",
+                           (eid,)).fetchone()
+        if not row:
+            return {"ok": False, "why": "没有这条流水（id=%s）" % eid}
+        if (row[0] or "manual") != "linglong":
+            return {"ok": False, "why": "手工流水请用删除，不是排除"}
+        conn.execute("UPDATE sale_entries SET excluded=1, updated_at=? WHERE id=?",
+                     (datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"), eid))
+        return {"ok": True, "id": eid}
+
+
 def _row_out(r) -> dict:
     """行 → 给界面的形状：JSON 列拆开、NULL 兜底（老行没有新列的值）。"""
     d = dict(r)
@@ -239,6 +261,73 @@ def sellers(root=None) -> List[str]:
         return [r["seller"] for r in rows]
     finally:
         conn.close()
+
+
+def entries_from_orders(root=None, day: str = "") -> dict:
+    """把 `orders` 表里那天的销售单变成当日卡片（`source='linglong'`）。
+
+    ⚠ **只读本机库**：拉网络在 web.App.cashier_import 那层做（先合并 orders，
+      再调这里）—— 这样本函数纯读、零网络，好测。
+    ⚠ 过滤两道：① 备注命中黑名单（`import_cfg.load`）跳过；
+      ② `external_id` 已存在（**含软排除的** —— excluded 行不删）跳过 ⇒ 幂等。
+    ⚠ **单据一卡**：多行聚合（数量=Σ、名称=首行+等N件、编码/SN 拼接）。
+    """
+    day = str(day or "").strip()
+    if len(day) != 10 or day[4] != "-" or day[7] != "-":
+        return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
+    path = ensure(root)
+    blacklist = import_cfg.load(root)
+    now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    imported = skipped_black = skipped_dup = 0
+    conn = _db.open_db(str(path))
+    try:
+        try:
+            orders = conn.execute(
+                "SELECT document_no, doc_create_time, included_tax_amount, remark,"
+                " consumer_guide_name FROM orders WHERE doc_create_time LIKE ?"
+                " ORDER BY doc_create_time",
+                (day + "%",)).fetchall()
+        except Exception:                                   # noqa: BLE001
+            return {"ok": False, "why": "还没有 orders 表（先点一次导入拉单）"}
+        have = {r[0] for r in conn.execute(
+            "SELECT external_id FROM sale_entries"
+            " WHERE external_id IS NOT NULL AND external_id != ''").fetchall()}
+        for o in orders:
+            dn = o["document_no"]
+            remark = str(o["remark"] or "")
+            if any(w and w in remark for w in blacklist):
+                skipped_black += 1
+                continue
+            if dn in have:
+                skipped_dup += 1
+                continue
+            lines = conn.execute(
+                "SELECT sn, ean, item_name, quantity FROM order_lines"
+                " WHERE document_no=? ORDER BY line_no", (dn,)).fetchall()
+            qty = sum(float(ln["quantity"] or 0) for ln in lines) or 1
+            names = [str(ln["item_name"] or "") for ln in lines if ln["item_name"]]
+            name = (names[0] if names else "") + (
+                " 等%d件" % len(lines) if len(lines) > 1 else "")
+            codes = [str(ln["ean"] or "") for ln in lines if ln["ean"]]
+            sns = [str(ln["sn"] or "") for ln in lines if ln["sn"]]
+            amount = float(o["included_tax_amount"] or 0)
+            if not math.isfinite(amount):
+                amount = 0.0            # 防 nan/inf 挂整页读（同 _clean_entry 口径）
+            conn.execute(
+                "INSERT INTO sale_entries (sold_at, goods_code, goods_name,"
+                " quantity, amount, seller, note, source, sn, external_id,"
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (o["doc_create_time"], "|".join(codes), name.strip(),
+                 qty, amount,
+                 str(o["consumer_guide_name"] or ""), remark,
+                 "linglong", "|".join(sns), dn, now, now))
+            have.add(dn)
+            imported += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "imported": imported,
+            "skipped_blacklist": skipped_black, "skipped_dup": skipped_dup}
 
 
 # ---------------------------------------------------------------- 政策
@@ -303,5 +392,6 @@ def policy_meta(root=None) -> dict:
 __all__ = [
     "SOURCES", "db_path", "ensure",
     "save_entry", "delete_entry", "list_entries", "sellers",
+    "exclude_entry", "entries_from_orders",
     "save_policy", "lookup", "policy_meta",
 ]

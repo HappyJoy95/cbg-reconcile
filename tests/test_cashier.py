@@ -593,5 +593,112 @@ class Test导入黑名单设置(_RootCase):
         self.assertEqual(import_cfg.load(self.root), [], "坏文件当没设置，不抛")
 
 
+# ────────────────────────────────────── 软排除 / 玲珑导入生成流水
+def _seed_order(conn, dn, day="2026-09-30", remark="", name="MatePad Air",
+                qty=1, sn="HXR001", amount=1899.0, guide="张三"):
+    """直接喂 orders / order_lines 两行（导入的读侧只认这两张表）。"""
+    conn.execute(
+        "INSERT INTO orders (document_no, doc_create_time, included_tax_amount,"
+        " remark, consumer_guide_name) VALUES (?,?,?,?,?)",
+        (dn, "%s 14:32:00" % day, amount, remark, guide))
+    conn.execute(
+        "INSERT INTO order_lines (document_no, line_no, sn, ean, item_name,"
+        " quantity) VALUES (?,?,?,?,?,?)", (dn, 1, sn, "6901234567890", name, qty))
+
+
+class Test排除与导入(_RootCase):
+    def _mk_orders_table(self, path):
+        # orders/order_lines 是 dump.SCHEMA 建的（m001 之前就存在），测试里手动补
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE IF NOT EXISTS orders (document_no TEXT PRIMARY KEY,"
+                     " doc_create_time TEXT, included_tax_amount REAL, remark TEXT,"
+                     " consumer_guide_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS order_lines (document_no TEXT,"
+                     " line_no INTEGER, sn TEXT, ean TEXT, item_name TEXT,"
+                     " quantity REAL)")
+        conn.commit()
+        conn.close()
+
+    def test_导入生成玲珑卡_再导不重复(self):
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        _seed_order(conn, "DN001")
+        _seed_order(conn, "DN002", name="Watch GT5", qty=2, sn="HXR002")
+        conn.commit()
+        conn.close()
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual((res["ok"], res["imported"]), (True, 2))
+        rows = store.list_entries(self.root, day="2026-09-30")
+        self.assertEqual(len(rows), 2)
+        r = {x["external_id"]: x for x in rows}["DN001"]
+        self.assertEqual((r["source"], r["sn"], r["seller"]),
+                         ("linglong", "HXR001", "张三"))
+        self.assertEqual(r["amount"], 1899.0)
+        # 再导一次：幂等
+        res2 = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual((res2["imported"], res2["skipped_dup"]), (0, 2))
+
+    def test_黑名单命中的单不入卡(self):
+        from src.features.cashier import import_cfg
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        _seed_order(conn, "DN003", remark="样机勿售")
+        _seed_order(conn, "DN004", remark="正常单")
+        conn.commit()
+        conn.close()
+        import_cfg.save(self.root, ["样机"])
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(res["skipped_blacklist"], 1)
+        ids = [x["external_id"] for x in store.list_entries(self.root, day="2026-09-30")]
+        self.assertEqual(ids, ["DN004"])
+
+    def test_多行单聚合_名称等N件编码拼接(self):
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        _seed_order(conn, "DN005")
+        conn.execute("INSERT INTO order_lines (document_no, line_no, sn, ean,"
+                     " item_name, quantity) VALUES (?,?,?,?,?,?)",
+                     ("DN005", 2, "HXR002", "69999", "碎屏险", 1))
+        conn.commit()
+        conn.close()
+        store.entries_from_orders(self.root, "2026-09-30")
+        r = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertEqual(r["quantity"], 2)
+        self.assertIn("等2件", r["goods_name"])
+        self.assertIn("6901234567890", r["goods_code"])
+        self.assertIn("69999", r["goods_code"])
+        self.assertEqual(r["sn"], "HXR001|HXR002")
+
+    def test_软排除后列表不见_再导不回来_手工单删不掉排除标记依赖(self):
+        path = store.ensure(self.root)
+        self._mk_orders_table(path)
+        import sqlite3
+        conn = sqlite3.connect(str(path))
+        _seed_order(conn, "DN006")
+        conn.commit()
+        conn.close()
+        store.entries_from_orders(self.root, "2026-09-30")
+        row = store.list_entries(self.root, day="2026-09-30")[0]
+        self.assertTrue(store.exclude_entry(self.root, row["id"]).get("ok"))
+        self.assertEqual(store.list_entries(self.root, day="2026-09-30"), [])
+        res = store.entries_from_orders(self.root, "2026-09-30")
+        self.assertEqual((res["imported"], res["skipped_dup"]), (0, 1),
+                         "已排除的 external_id 也要挡住重新导入")
+        # 手工单不允许走软排除（语义分叉：手工 ✕ = 真删）
+        mid = store.save_entry(self.root,
+                               {"sold_at": "2026-09-30 10:00", "amount": 1})["id"]
+        bad = store.exclude_entry(self.root, mid)
+        self.assertFalse(bad.get("ok"))
+        self.assertIn("手工", bad.get("why", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
