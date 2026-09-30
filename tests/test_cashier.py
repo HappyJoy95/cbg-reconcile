@@ -736,5 +736,58 @@ class Test排除与导入(_RootCase):
         self.assertEqual(rows["DN-OK"]["amount"], 1899.5)
 
 
+# ────────────────────────────────────── 导入 / 排除 / 黑名单 接口
+class Test导入接口(_RootCase):
+    def setUp(self):
+        super().setUp()
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+        p = mock.patch.object(web, "setup_state",
+                              lambda app: {"ready": True, "need": "", "why": ""})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_黑名单读写往返(self):
+        st, d = self.srv.request("PUT", "/api/cashier/import-settings",
+                                 {"blacklist": ["样机", " 展示 "]})
+        self.assertEqual(st, 200, d)
+        st, d = self.srv.request("GET", "/api/cashier/import-settings")
+        self.assertEqual((st, d["blacklist"]), (200, ["样机", "展示"]))
+
+    def test_导入把网络那步mock掉_只验编排(self):
+        def fake_import(self, body):
+            return {"ok": True, "day": body.get("day"),
+                    "imported": 3, "skipped_blacklist": 1, "skipped_dup": 2}
+        with mock.patch.object(web.App, "cashier_import", fake_import):
+            st, d = self.srv.request("POST", "/api/cashier/import",
+                                     {"day": "2026-09-30"})
+        self.assertEqual(st, 200, d)
+        self.assertEqual((d["imported"], d["skipped_blacklist"], d["skipped_dup"]),
+                         (3, 1, 2))
+
+    def test_导入日期不对_400带error(self):
+        with mock.patch.object(web.App, "cashier_import",
+                               lambda self, b: {"ok": False, "why": "日期格式不对"}):
+            st, d = self.srv.request("POST", "/api/cashier/import", {"day": "x"})
+        self.assertEqual(st, 400)
+        self.assertIn("日期", d["error"])
+
+    def test_排除接口_软排除走通(self):
+        store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
+                                     "amount": 1, "source": "linglong"})
+        _, rows = self.srv.request("GET", "/api/cashier/entries?day=2026-09-30")
+        eid = rows["rows"][0]["id"]
+        st, d = self.srv.request("POST", "/api/cashier/exclude", {"id": eid})
+        self.assertEqual(st, 200, d)
+        _, rows2 = self.srv.request("GET", "/api/cashier/entries?day=2026-09-30")
+        self.assertEqual(rows2["rows"], [])
+
+    def test_区长平台照样403(self):
+        with mock.patch.object(web, "role_scope", lambda _a: _scope("manager")):
+            st, d = self.srv.request("POST", "/api/cashier/import",
+                                     {"day": "2026-09-30"})
+        self.assertEqual(st, 403)
+
+
 if __name__ == "__main__":
     unittest.main()
