@@ -166,55 +166,78 @@ def _pay_map(payments) -> dict:
 
 
 def _entry_rows(e: dict, conn, costs: dict) -> List[list]:
-    """一条流水 → 一到多行（玲珑单按 `order_lines` 拆，其它一行）。"""
+    """一条流水（= 一个订单）→ 一到多行。
+
+    优先级（2026-09-30 第三轮，用户定「导出跟卡片商品行走」）：
+    ① 卡片有 `products` → 每行商品一行（**品类取行上的**，空了回退卡片品类）；
+    ② 老玲珑卡没商品行 → 查 `order_lines` 拆行；
+    ③ 都没有 → 整卡一行（老口径）。
+    之后 **每个配件再补一行**：品类恒「配件」、数量 1、编码/SN 空、
+    合计 = 订单合计（用户选项：配件自成一行）。
+    """
     time_s = _t(e.get("sold_at"))
     category = str(e.get("category") or "")
     seller = str(e.get("seller") or "")
     note = str(e.get("note") or "")
     pays = _pay_map(e.get("payments"))
     total = e.get("amount")
-    lines: Sequence[dict] = []
-    dn = str(e.get("external_id") or "")
-    if e.get("source") == "linglong" and dn:
-        try:
-            lines = [dict(r) for r in conn.execute(
-                "SELECT * FROM order_lines WHERE document_no=? ORDER BY line_no",
-                (dn,)).fetchall()]
-        except Exception:                                   # noqa: BLE001
-            lines = []
-        if lines:
+    prods = e.get("products") or []
+    out: List[list] = []
+    if prods:
+        for i, p in enumerate(prods):
+            # 支付只落首行：每行都填的话，把支付列求和会翻倍
+            out.append(_line_row(
+                time_s, str(p.get("category") or "") or category,
+                p.get("code"), p.get("name"), p.get("sn"),
+                p.get("quantity"), total, p.get("amount"),
+                seller, pays if i == 0 else {}, note, costs))
+    else:
+        lines: Sequence[dict] = []
+        dn = str(e.get("external_id") or "")
+        if e.get("source") == "linglong" and dn:
             try:
-                o = conn.execute(
-                    "SELECT included_tax_amount FROM orders WHERE document_no=?",
-                    (dn,)).fetchone()
-                if o and _num(o[0]) is not None:
-                    total = _num(o[0])          # 合计 = 订单合计（每行重复）
-            except Exception:                               # noqa: BLE001
-                pass
-    if not lines:
-        return [_line_row(time_s, category, e.get("goods_code"),
-                          e.get("goods_name"), e.get("sn"),
-                          e.get("quantity"), total, e.get("amount"),
-                          seller, pays, note, costs)]
-    out = []
-    for i, ln in enumerate(lines):
-        amt = _num(ln.get("included_tax_amount"))
-        if amt is None:
-            up = _num(ln.get("unit_price"))
-            q = _num(ln.get("quantity"))
-            if up is not None:
-                amt = round(up * (q if q is not None else 1), 2)
-        if amt is None and len(lines) == 1:
-            amt = _num(e.get("amount"))
-        # 支付只落首行：每行都填的话，把支付列求和会翻倍
-        row_pays = pays if i == 0 else {}
-        out.append(_line_row(
-            time_s, category,
-            ln.get("ean") or ln.get("sku") or "",
-            ln.get("item_name") or "", ln.get("sn") or "",
-            _num(ln.get("quantity")) if _num(ln.get("quantity")) is not None
-            else e.get("quantity"),
-            total, amt, seller, row_pays, note, costs))
+                lines = [dict(r) for r in conn.execute(
+                    "SELECT * FROM order_lines WHERE document_no=? ORDER BY line_no",
+                    (dn,)).fetchall()]
+            except Exception:                                   # noqa: BLE001
+                lines = []
+            if lines:
+                try:
+                    o = conn.execute(
+                        "SELECT included_tax_amount FROM orders WHERE document_no=?",
+                        (dn,)).fetchone()
+                    if o and _num(o[0]) is not None:
+                        total = _num(o[0])      # 合计 = 订单合计（每行重复）
+                except Exception:                               # noqa: BLE001
+                    pass
+        if not lines:
+            out.append(_line_row(time_s, category, e.get("goods_code"),
+                                 e.get("goods_name"), e.get("sn"),
+                                 e.get("quantity"), total, e.get("amount"),
+                                 seller, pays, note, costs))
+        else:
+            for i, ln in enumerate(lines):
+                amt = _num(ln.get("included_tax_amount"))
+                if amt is None:
+                    up = _num(ln.get("unit_price"))
+                    q = _num(ln.get("quantity"))
+                    if up is not None:
+                        amt = round(up * (q if q is not None else 1), 2)
+                if amt is None and len(lines) == 1:
+                    amt = _num(e.get("amount"))
+                out.append(_line_row(
+                    time_s, category,
+                    ln.get("ean") or ln.get("sku") or "",
+                    ln.get("item_name") or "", ln.get("sn") or "",
+                    _num(ln.get("quantity")) if _num(ln.get("quantity")) is not None
+                    else e.get("quantity"),
+                    total, amt, seller, pays if i == 0 else {}, note, costs))
+    # 配件：每个一行（品类恒「配件」，支付不再落 —— 首行商品已经有了）
+    for acc in (e.get("accessories") or []):
+        if not isinstance(acc, dict):
+            continue
+        out.append(_line_row(time_s, "配件", None, acc.get("name"), None,
+                             1, total, acc.get("amount"), seller, {}, note, costs))
     return out
 
 

@@ -1189,6 +1189,49 @@ class Test导出内容(_RootCase):
         _, rows = self._sheets("2026-09")["9月份销售表"]
         self.assertEqual(len(rows), 1)
 
+    def test_商品行跟卡片走_品类按行(self):
+        """第三轮：导出用卡片里的商品行（人改了卡，导出跟着变），品类按行取。"""
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-07 10:00", "amount": 1, "seller": "张三",
+            "products": [
+                {"name": "MatePad", "code": "6901", "sn": "S1",
+                 "quantity": 1, "amount": 1899, "category": "平板"},
+                {"name": "键盘", "code": "6903", "sn": "",
+                 "quantity": 1, "amount": 499, "category": "配件"},
+            ],
+            "accessories": [{"name": "碎屏险", "amount": 199}],
+        })
+        head, rows = self._sheets()["9月份销售表"]
+        self.assertEqual(len(rows), 3, "2 商品 + 1 配件 = 3 行")
+        a, b, c = (dict(zip(head, r)) for r in rows)
+        # 商品行：品类跟行、合计=订单合计（=Σ商品）、金额是各商品自己的
+        self.assertEqual((a["品类"], a["金额"], a["合计"]), ("平板", 1899, 2398))
+        self.assertEqual((b["品类"], b["金额"], b["合计"]), ("配件", 499, 2398))
+        self.assertEqual(a["编码"], "6901")
+        self.assertIsNone(b["序列号"], "空 SN 就是空单元格（跟空列占位一个口径）")
+        # 配件行：品类恒「配件」、数量 1、编码/SN 空、合计=订单合计
+        self.assertEqual((c["品类"], c["金额"], c["数量"]), ("配件", 199, 1))
+        self.assertEqual(c["合计"], 2398)
+        self.assertIsNone(c["编码"])
+        self.assertIsNone(c["序列号"])
+        self.assertEqual(c["明细"], "碎屏险")
+
+    def test_商品行品类空了回退卡片品类(self):
+        """行上没填品类（老口径后补的商品行）⇒ 用卡片品类兜底。"""
+        import sqlite3
+        store.save_entry(self.root, {
+            "sold_at": "2026-09-08 10:00", "amount": 1,
+            "products": [{"name": "Mate70", "code": "6901", "sn": "",
+                          "quantity": 1, "amount": 5499, "category": ""}]})
+        path = store.ensure(self.root)
+        conn = sqlite3.connect(str(path))
+        conn.execute("UPDATE sale_entries SET category='手机'")
+        conn.commit()
+        conn.close()
+        _, rows = self._sheets()["9月份销售表"]
+        r = dict(zip(exporter.HEAD, rows[0]))
+        self.assertEqual(r["品类"], "手机")
+
     def test_月份格式不对回why(self):
         with self.assertRaises(ValueError) as cm:
             exporter.sheets(self.root, "2026/09")
