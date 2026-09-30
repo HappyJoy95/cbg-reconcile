@@ -171,7 +171,8 @@ def _m006(conn) -> None:
     ⚠ 只钉键列 + `fetched_at`：政策那 9 列（`基准提货价*` 带星号那种表头）
       由 `ensure_columns` 按导出**原样**长 —— 接口改名不用动编号迁移
       （跟 `_m004` 的动态列同一口径）。
-    ⚠ 不设主键去重：整表快照"先清后写"（同四池快照的道理）；
+    ⚠ 不设主键去重：整表快照按 `fetched_at` 分份**保留**（2026-09-30 起
+      「老的也保留可查」，不再先清后写）；
       `goods_code` 上建索引给收银界面的编码反查用。
     """
     conn.execute("""CREATE TABLE IF NOT EXISTS price_policy (

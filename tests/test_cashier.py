@@ -4,7 +4,8 @@
 开发目标见 `.dsh/docs/2026-09-29-生活馆收银界面-开发目标.md`。钉的都是
 "错了没人会报"的那类：
 
-* 政策整表**覆盖**不留旧（政策是"当前版"，第二次存要能清掉第一次的）；
+* 政策**按快照保留**（2026-09-30 用户：「老的也保留可查」）——
+  反查/新鲜度都认**最新一份**（`fetched_at DESC, rowid DESC`）；
 * 编码反查认 `基准提货价*` **带星表头**（xlsx 原样，别"顺手"洗掉）；
 * 接口门禁：**区长/平台 403**（收银是门店本机操作）、块内未知子路径 **404**；
 * 政策刷新的类锁：失败后必须**释放**（否则一次失败永久卡死）；
@@ -147,14 +148,22 @@ class Test政策快照(_RootCase):
         return [{"商品编码": c, "商品名称": "货" + c, "基准提货价*": "399.0",
                  "无条件单台返利金额": "75.012"} for c in codes]
 
-    def test_整表覆盖不留旧(self):
-        r1 = store.save_policy(self.root, self._rows("A", "B", "C"))
-        self.assertEqual((r1["ok"], r1["rows"]), (True, 3))
-        r2 = store.save_policy(self.root, self._rows("D"))
+    def test_快照保留老的_反查认最新(self):
+        """2026-09-30 用户：「老的也保留可查」—— **不再先清后写**。
+
+        同编码存两次 ⇒ 反查回最新那份（`fetched_at DESC, rowid DESC`）；
+        上一份里独有的编码（B）不许被清掉。
+        """
+        store.save_policy(self.root, self._rows("A", "B"))
+        r2 = store.save_policy(self.root, [{"商品编码": "A", "商品名称": "新A",
+                                            "基准提货价*": "459.0"}])
         self.assertEqual(r2["rows"], 1)
-        self.assertIsNone(store.lookup(self.root, "A"),
-                          "第二次存是**覆盖** —— 旧政策行不许残留")
-        self.assertIsNotNone(store.lookup(self.root, "D"))
+        self.assertIsNotNone(store.lookup(self.root, "B"),
+                             "老快照的行要留着（可查）")
+        self.assertEqual(store.lookup(self.root, "A")["商品名称"], "新A",
+                         "同编码反查认最新一份")
+        # 最新那份几行 = policy_meta 的口径（老快照行不掺进来）
+        self.assertEqual(store.policy_meta(self.root)["rows"], 1)
 
     def test_没编码的行不进库(self):
         rows = [{"商品名称": "没有编码的"}, {"商品编码": " X ", "商品名称": "带空格"}]

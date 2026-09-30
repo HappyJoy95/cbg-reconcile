@@ -487,18 +487,32 @@ def entries_from_orders(root=None, day: str = "") -> dict:
 
 # ---------------------------------------------------------------- 政策
 def save_policy(root=None, rows: list = None, fetched_at: str = "") -> dict:
-    """政策整表快照（**先清后写** —— 政策是"当前版"，不留历史）。
+    """存一份政策快照（**按快照保留，不再先清后写** —— 用户 2026-09-30：
+    「老的也保留可查」）。
 
     `rows` = `pmall.parse_policy` 的 dict 列表（表头原样，金额是文本不转）。
+    每次调用 = 一份新快照（`fetched_at` 打时间戳）；反查 / 新鲜度 /
+    导出的政策表都只认**最新那份**（见 `lookup` / `policy_meta`）。
     """
     rows = rows or []
     if not rows:
         return {"ok": False, "why": "没有行可存"}
-    fetched = (fetched_at or datetime.datetime.now(CST)
-               .strftime("%Y-%m-%d %H:%M:%S"))
+    fmt = "%Y-%m-%d %H:%M:%S"
+    fetched = (fetched_at or datetime.datetime.now(CST).strftime(fmt))
     written = 0
     with _db.tx(str(ensure(root))) as conn:
-        conn.execute("DELETE FROM price_policy")
+        # ⚠ 快照边界 = `fetched_at`：**同一秒存两份会打平**（连点两次刷新、
+        #   测试连存两份）⇒ 撞上就往后挪一秒，别让"最新一份"数不清。
+        try:
+            mx = conn.execute("SELECT MAX(fetched_at) FROM price_policy").fetchone()[0]
+        except Exception:                                   # noqa: BLE001
+            mx = None
+        if mx and str(mx) >= fetched:
+            try:
+                fetched = (datetime.datetime.strptime(str(mx), fmt)
+                           + datetime.timedelta(seconds=1)).strftime(fmt)
+            except ValueError:
+                pass                                        # 老格式认不出就并列（lookup 有 rowid 兜底）
         for r in rows:
             if not isinstance(r, dict):
                 continue
@@ -514,7 +528,10 @@ def save_policy(root=None, rows: list = None, fetched_at: str = "") -> dict:
 
 
 def lookup(root=None, code: str = "") -> Optional[dict]:
-    """按商品编码反查政策（最新一份快照）。查不到回 `None`。"""
+    """按商品编码反查政策 —— **最新一份快照**。查不到回 `None`。
+
+    ⚠ `rowid DESC` 是同一秒存两份时的兜底（`fetched_at` 打平了也认后写的）。
+    """
     code = str(code or "").strip()
     if not code:
         return None
@@ -522,21 +539,27 @@ def lookup(root=None, code: str = "") -> Optional[dict]:
     try:
         row = conn.execute(
             "SELECT * FROM price_policy WHERE goods_code=?"
-            " ORDER BY fetched_at DESC LIMIT 1", (code,)).fetchone()
+            " ORDER BY fetched_at DESC, rowid DESC LIMIT 1", (code,)).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
 
 def policy_meta(root=None) -> dict:
-    """政策表新鲜度（页面显示"上次刷新 + 多少行"）。没表/空表也回得体面值。"""
+    """政策表新鲜度（页面显示"上次刷新 + 多少行"）。没表/空表也回得体面值。
+
+    ⚠ 行数 = **最新那份快照**的行数 —— 快照保留之后总数会随份数涨，
+      报总数会让人以为政策本身变长了。
+    """
     try:
         conn = _db.open_db(str(ensure(root)))
     except Exception:                                     # noqa: BLE001
         return {"rows": 0, "fetched_at": ""}
     try:
         row = conn.execute(
-            "SELECT COUNT(*) AS n, MAX(fetched_at) AS f FROM price_policy").fetchone()
+            "SELECT COUNT(*) AS n, MAX(fetched_at) AS f FROM price_policy"
+            " WHERE fetched_at = (SELECT MAX(fetched_at) FROM price_policy)"
+        ).fetchone()
         return {"rows": int(row["n"] or 0), "fetched_at": row["f"] or ""}
     except Exception:                                     # noqa: BLE001
         return {"rows": 0, "fetched_at": ""}
