@@ -585,6 +585,42 @@ class TestCaptureSession(unittest.TestCase):
         self.assertIn("打开浏览器抓取", str(ctx.exception),
                       "无头失败要说清改用哪个按钮")
 
+    def test_自检原因变了要再说一次(self):
+        """⚠ 登录前后的底层报错常常**不是同一句** —— 只说第一次那句，新线索就被吞了。
+
+        2026-09-27 生活馆抓取超时排查：日志从头到尾只有第一句「会话没验过」，
+        登录完成后的真因（403 / 「没有门店或数据范围」）一句没露，
+        五个假设一个都分不开 —— 所以原因换了必须再吼一次（有上限，别刷屏）。
+        """
+        msgs = []
+        whys = ["会话没验过（登录还没完成）",
+                "会话/权限问题：没有门店或数据范围 SCN9 的权限"]
+        calls = []
+
+        def verify(_s):
+            i = min(len(calls), len(whys) - 1)
+            calls.append(i)
+            return False, whys[i]
+
+        with ExitStack() as stack:
+            for p in self._nav_watch():
+                stack.enter_context(p)
+            # _nav_watch 的 cookie 没有登录名 —— 覆盖成带登录 cookie 的
+            stack.enter_context(mock.patch.object(
+                browser, "cookies_from_browser",
+                return_value=("JSESSIONID=S; hwssot3=1", {})))
+            stack.enter_context(mock.patch.object(
+                browser, "csrf_from_page", return_value="CSRF1"))
+            with self.assertRaises(CbgAuthError):
+                browser.capture_session(Path("/x"), headless=True, timeout=30,
+                                        verify=verify, on_step=msgs.append)
+        joined = "\n".join(msgs)
+        self.assertGreaterEqual(len(calls), 2, "要跑够两轮才会出现第二个原因")
+        self.assertIn("已拿到 cookie，但自检没过", joined)
+        self.assertIn("原因变了", joined)
+        self.assertIn("没有门店或数据范围 SCN9 的权限", joined,
+                      "第二个原因的原文必须出现在日志里")
+
     def _nav_watch(self, loops=8):
         """把 time 换成假时钟，让循环真走到"12 秒没跳登录页"那个兜底。
 

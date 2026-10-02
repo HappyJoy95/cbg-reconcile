@@ -8,7 +8,9 @@
 import datetime
 import io
 import json
+import os
 import re
+import shutil
 import sqlite3
 import tempfile
 import textwrap
@@ -64,6 +66,117 @@ class TestFrontendWiring(unittest.TestCase):
         """删按钮得绑在**每一行**上，并且把任务名带去后端。"""
         self.assertIn("data-sched-del", APP_JS)
         self.assertIn("/api/schedule?name=", APP_JS)
+
+    def test_手输店码仅生活馆展示并接到保存接口(self):
+        self.assertIn("/api/session/store-code", APP_JS)
+        i = APP_JS.index("function storeCodeBox()")
+        block = APP_JS[i:APP_JS.index("function bindStoreCodeBtn()", i)]
+        self.assertIn("setupState.lifehall", block)
+
+    def test_生活馆登录前和设置页都有店码入口(self):
+        self.assertIn('id="setup-store-code-host"', INDEX_HTML)
+        self.assertIn('id="store-code-settings"', INDEX_HTML)
+        self.assertIn("data-store-code-input", APP_JS)
+        self.assertIn("data-save-store-code", APP_JS)
+        self.assertIn("setup-store-code-host", APP_JS)
+        self.assertIn("store-code-settings", APP_JS)
+
+    def test_店码设置卡住在玲珑授权页(self):
+        """⭐ 用户 2026-09-29：「把门店编码设置放到玲珑授权里面吧」——
+        它管的是"认哪家店、抓会话怎么自检"，跟会话同去向。
+        ⚠ 两个方向都钉：进了玲珑授权、**不在**通用设置 —— 少一边，
+        下次谁"顺手挪回去"这里当场红。"""
+        ll = INDEX_HTML.split('id="subpanel-linglong"', 1)[1]
+        ll = ll.split('</section>', 1)[0]
+        self.assertIn('id="store-code-settings-card"', ll,
+                      "店码设置卡不在玲珑授权页里")
+        # ⚠ 截界用**下一个 subpanel**，不能用 </section> —— general 和 linglong
+        #   同在一个 panel-settings 里，按 section 切会把玲珑段也圈进 general。
+        gen = INDEX_HTML.split('id="subpanel-general"', 1)[1]
+        gen = gen.split('id="subpanel-', 1)[0]
+        self.assertNotIn('id="store-code-settings-card"', gen,
+                         "店码设置卡怎么又回到了通用设置")
+
+    def test_登录门禁不在概览加载前误画会话状态(self):
+        i = APP_JS.index("async function checkSetup()")
+        j = APP_JS.index("/* ⚠ 原来这里有个", i)
+        block = APP_JS[i:j]
+        self.assertIn("renderStoreCodeForms();", block)
+        self.assertNotIn("renderSession();", block)
+
+    def test_生活馆设置页保留邮件企微配置和业务推送空状态(self):
+        self.assertIn('data-foot="general"', INDEX_HTML)
+        self.assertIn('id="mail-paths"', INDEX_HTML)
+        self.assertIn('id="wecom-paths"', INDEX_HTML)
+        self.assertIn("生活馆版当前没有单独配置的业务推送项", APP_JS)
+
+    def test_生活馆设置页不加载云商账号或后台服务(self):
+        i = APP_JS.index("async function loadConfig()")
+        j = APP_JS.index("// 收集设置页所有可改字段", i)
+        block = APP_JS[i:j]
+        self.assertIn("const lifehall = !!(setupState && setupState.lifehall)", block)
+        self.assertIn("if (!lifehall)", block)
+        self.assertIn("loadStoreAccount();", block)
+        self.assertIn("loadService();", block)
+
+
+class TestLifehallNotifyPreferences(unittest.TestCase):
+    """生活馆推送偏好只含真实通道；旧版业务开关不显示也不可写。"""
+
+    def setUp(self):
+        from src import edition
+        self._old_edition = os.environ.get("CBG_EDITION")
+        os.environ["CBG_EDITION"] = "lifehall"
+        edition.reload()
+        self.addCleanup(self._restore_edition)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def _restore_edition(self):
+        from src import edition
+        if self._old_edition is None:
+            os.environ.pop("CBG_EDITION", None)
+        else:
+            os.environ["CBG_EDITION"] = self._old_edition
+        edition.reload()
+
+    def _request_ready(self, method, path, body=None):
+        with mock.patch.object(web, "setup_state",
+                               return_value={"ready": True, "need": ""}):
+            return self.srv.request(method, path, body)
+
+    def test_GET只返回通道偏好不返回full业务项(self):
+        status, body = self._request_ready("GET", "/api/notify-pref")
+        self.assertEqual(status, 200, body)
+        prefs = body["prefs"]
+        self.assertEqual(set(prefs), {"plat:mail", "plat:wecom"})
+        self.assertFalse(any(p.get("kind") == "feature" for p in prefs.values()))
+
+    def test_PUT拒绝旧版业务开关且不落盘(self):
+        status, body = self._request_ready(
+            "PUT", "/api/notify-pref", {"key": "attain", "enabled": False})
+        self.assertEqual(status, 400, body)
+        self.assertFalse((self.root / ".secrets" / "notify-prefs.json").exists())
+
+    def test_full版仍允许原业务推送偏好(self):
+        from src import edition
+        os.environ["CBG_EDITION"] = "full"
+        edition.reload()
+        try:
+            status, body = self._request_ready("GET", "/api/notify-pref")
+            self.assertEqual(status, 200, body)
+            self.assertIn("attain", body["prefs"])
+            status, body = self._request_ready(
+                "PUT", "/api/notify-pref", {"key": "attain", "enabled": False})
+            self.assertEqual(status, 200, body)
+            self.assertFalse(body["prefs"]["attain"]["enabled"])
+        finally:
+            os.environ["CBG_EDITION"] = "lifehall"
+            edition.reload()
 
     def test_提权删发的是叶子名(self):
         """⚠ 提权删那条发的是 **叶子名**（`t.name`），不是 `full_name`。
@@ -1285,6 +1398,130 @@ class TestCaptchaInCaptureWorker(unittest.TestCase):
         self.assertTrue(self.profile.exists(), "不是验证码就别删 profile")
 
 
+class TestLifehall保存点自检(unittest.TestCase):
+    """0 订单新店（认不出店码）：保存点要显示「已保存」。
+
+    2026-09-27 毛刺：店码空着时保存点照样 `ping()`，`store_detail` 必报
+    「接口异常：没给 storeCode，无法查门店详情」→ 界面把成功显示成
+    「已保存，但自检没过」。判据只许走 `store_identity.check_after_save`。
+    """
+
+    def setUp(self):
+        self.addCleanup(web.capture_job.reset)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "config").mkdir()
+
+    def test_没店码时保存点放行并说清(self):
+        from src import store_identity
+
+        app = mock.Mock()
+        app.root = self.root
+        app.config_path = self.root / "config" / "store-x.yaml"
+        app.session_path = lambda cfg: self.root / "sess.json"
+        app.record_check = lambda *a, **k: None
+
+        class _Sess:
+            def save(self, p):
+                Path(p).write_text("{}", encoding="utf-8")
+                return Path(p)
+
+        with mock.patch.object(web._edition, "is_lifehall", return_value=True), \
+                mock.patch.object(store_identity, "identify",
+                                  return_value={"ok": False, "probe": "empty",
+                                                "why": "这 30 天没有查到本店订单，"
+                                                       "认不出店码（不影响使用）"}), \
+                mock.patch.object(web.config_io, "load_raw", lambda p: {}), \
+                mock.patch.object(web.browser, "find_browser",
+                                  lambda cfg: ("edge", "/x")), \
+                mock.patch.object(web.browser, "profile_path",
+                                  lambda cfg, r: self.root / "prof"), \
+                mock.patch.object(web.browser, "login_url", lambda cfg: "http://x"), \
+                mock.patch.object(web.browser, "load_login_credentials",
+                                  lambda c, r: ("u", "p")), \
+                mock.patch.object(web.browser, "capture_session",
+                                  lambda profile, **kw: _Sess()):
+            web.capture_job.reset()
+            web.capture_job.running = True
+            web._capture_worker(app, headless=False)
+            snap = dict(web.capture_job.snapshot())
+
+        self.assertEqual(snap["state"], "ok",
+                         "empty 是真会话 —— 不该被 ping 打成没过")
+        self.assertIn("店码还没认出来", snap["message"])
+        self.assertNotIn("没给 storeCode", snap["message"])
+
+
+class Test手输店码接口(unittest.TestCase):
+    """手输店码从真实 HTTP 路由写入本机配置，并在登录前可用。"""
+
+    def setUp(self):
+        from src import edition
+        self._old_edition = os.environ.get("CBG_EDITION")
+        os.environ["CBG_EDITION"] = "lifehall"
+        edition.reload()
+        self.addCleanup(self._restore_edition)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "config").mkdir(parents=True)
+        shutil.copy(ROOT / "config" / "stores.yaml",
+                    self.root / "config" / "stores.yaml")
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def _restore_edition(self):
+        from src import edition
+        if self._old_edition is None:
+            os.environ.pop("CBG_EDITION", None)
+        else:
+            os.environ["CBG_EDITION"] = self._old_edition
+        edition.reload()
+
+    def test_PUT成功且配置文件真实写入(self):
+        from src import config_io
+        status, body = self.srv.request(
+            "PUT", "/api/session/store-code", {"store_code": "SCN328987"})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["found"])
+        self.assertEqual(body["store_name"], "青岛CBD万达店")
+        v = config_io.pick(config_io.load_raw(self.root / "config" / "store-X.yaml"))
+        self.assertEqual(v["store_code"], "SCN328987")
+        self.assertEqual(v["erp_store_name"], "青岛CBD万达店")
+
+    def test_非法输入返回400(self):
+        status, body = self.srv.request(
+            "PUT", "/api/session/store-code", {"store_code": "A B"})
+        self.assertEqual(status, 400, body)
+        self.assertIn("error", body)
+
+    def test_登录尚未就绪时仍可保存店码(self):
+        status, setup = self.srv.request("GET", "/api/setup")
+        self.assertEqual(status, 200)
+        self.assertFalse(setup["ready"], "夹具必须处于未登录状态")
+        status, body = self.srv.request(
+            "PUT", "/api/session/store-code", {"store_code": "SCN328987"})
+        self.assertEqual(status, 200, body)
+
+    def test_full版不开放生活馆手输接口(self):
+        from src import edition
+        config_path = self.root / "config" / "store-X.yaml"
+        before = config_path.read_bytes()
+        os.environ["CBG_EDITION"] = "full"
+        edition.reload()
+        try:
+            status, body = self.srv.request(
+                "PUT", "/api/session/store-code", {"store_code": "SCN328987"})
+        finally:
+            os.environ["CBG_EDITION"] = "lifehall"
+            edition.reload()
+        self.assertEqual(status, 404, body)
+        self.assertEqual(config_path.read_bytes(), before,
+                         "full 版拒绝接口时不得改门店配置")
+
+
 class TestRunnerScriptSelfHeal(unittest.TestCase):
     """⚠ **发版阻断的解法**（方案 B）：概览页顺手自愈 `run.bat`。
 
@@ -2080,6 +2317,39 @@ class Test历史记录接口(unittest.TestCase):
                 self.assertNotEqual(code, 200, "%s 竟然被受理了" % method)
 
 
+class _FrozenTimerClock:
+    """`src.modules.timer` 眼里的 `datetime` —— `now()` 钉在 `FROZEN`（上午 10:00）。
+
+    ⚠ 为什么要有它：`/api/timer` 的 `next_run` **走真实时钟**（那层没有 now 注入口，
+      `timer.next_run()` 自己 `datetime.datetime.now()`），而「下一次」的断言写的是
+      "21:00 那一批（dump…）"。每天 **21:00–21:30** 这半小时，最近的一趟是
+      「数据交换」（21:15 上报 / 21:30 收取）⇒ 断言**必红** —— 2026-09-29 21:07
+      跑三头当场抓到（main 同时段一样红：是断言跟钟点耦合，不是功能坏了）。
+    ⚠ 只换 `src.modules.timer` 包里 `import datetime` 那**一个绑定**：
+      `when.py` / `once.py` 各有自己的 import（when 在这条路径上不读 now、
+      once 根本不在 GET /api/timer 上）—— 不动全局 `datetime` 模块，
+      `runlog` 和测试自己照常用真实时间。
+    """
+
+    FROZEN = datetime.datetime(2026, 9, 29, 10, 0, 0)
+
+    class _DT(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            at = _FrozenTimerClock.FROZEN
+            return at if tz is None else at.replace(tzinfo=tz)
+
+    def __getattr__(self, name):
+        if name == "datetime":
+            return _FrozenTimerClock._DT
+        return getattr(datetime, name)
+
+
+def _freeze_timer_clock():
+    """把 `src.modules.timer.datetime` 换成 `_FrozenTimerClock`（`addCleanup` 停）。"""
+    return mock.patch("src.modules.timer.datetime", _FrozenTimerClock())
+
+
 class Test定时器的那一屏(unittest.TestCase):
     """用户 2026-09-20：「加一个**定时器执行日志**，记录什么时间唤醒了什么，成功了没。
     然后定时器设置页面**最上面大字**写着**下一次执行的是啥，什么时间**。
@@ -2107,6 +2377,10 @@ class Test定时器的那一屏(unittest.TestCase):
         conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         conn.close()
+        # ⚠ 「下一次」的断言跟钟点耦合（21:00–21:30 那半小时必红，见 _FrozenTimerClock）
+        p = _freeze_timer_clock()
+        p.start()
+        self.addCleanup(p.stop)
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 
@@ -2137,15 +2411,11 @@ class Test定时器的那一屏(unittest.TestCase):
         _, body = self.srv.request("GET", "/api/timer")
         nxt = body["next_run"]
         self.assertIn("上报数据", nxt["labels"], "调到同一刻了，这行字还是不带它")
-        # ⚠ `/api/timer` 走的是**真实时钟**（这一层没有注入口）⇒ "今天/明天"得按当前时间推：
-        #   21:00 一过，"下一个 21:00"就是明天 —— 写死"今天 21:00"的话**每天 21 点后必红**
-        #   （2026-09-21 21:42 跑三头就是这么红的，看着像代码坏了）。
-        now = datetime.datetime.now()
-        at = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        if at <= now:
-            at += datetime.timedelta(days=1)
-        expect = ("今天 " if at.date() == now.date() else "明天 ") + "21:00"
-        self.assertEqual(nxt["at_text"], expect)
+        # ⚠ 时钟被钉在上午 10:00（_FrozenTimerClock）⇒ 下一个 21:00 恒是"今天"。
+        #   原来这段按真实 now 推"今天/明天"：21:00 一过就变"明天"，可 next_run
+        #   那时挑中的根本不是 21:00 那批（是 21:15/21:30 的数据交换）⇒ 推了也红
+        #   （2026-09-29 21:07 跑三头实测）。冻结时钟后两种红一起没了。
+        self.assertEqual(nxt["at_text"], "今天 21:00")
         # 再调回自己的 21:15 ⇒ 它不该再挤进 21:00 那一趟
         timer.set_whens(self.root, "report",
                         [{"kind": "daily", "time": "21:15"}])
@@ -2482,6 +2752,10 @@ class Test自动更新不进前端(unittest.TestCase):
         conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         conn.close()
+        # ⚠ `test_下一次是每天那趟` 的断言跟钟点耦合（21:00–21:30 必红，见 _FrozenTimerClock）
+        p = _freeze_timer_clock()
+        p.start()
+        self.addCleanup(p.stop)
         self.srv = _Server(self.root)
         self.addCleanup(self.srv.close)
 

@@ -1096,6 +1096,7 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
     specific = ""               # 循环里查到的**更具体**的卡点（见下面的 csrf 那条）
     csrf_src = ""
     said_invalid = False
+    said_reasons = set()          # 说过的失败原因 —— **原因变了要再吼一句**
     tries = 0
     nav_at = time.time()
     nav_done = False
@@ -1152,6 +1153,15 @@ def capture_session(profile_dir: Path, *, headless: bool = False, timeout: float
                             + (f"：{why}" if why else "（原因未知）")
                             + " —— 继续等登录完成…")
                         said_invalid = True
+                        said_reasons.add(why)
+                    elif why and why not in said_reasons and len(said_reasons) < 4:
+                        # ⚠ 原因**换了**就再说一次：登录前后的底层报错常常不是
+                        #   同一句（登录前 403 / 登录后「没有门店或数据范围」），
+                        #   只说第一次那句等于把新线索吞掉 —— 2026-09-27 生活馆
+                        #   抓取超时就卡在这：日志从头到尾只有「会话没验过」。
+                        #   ⚠ 上限 4 句：别让来回横跳的原因刷屏。
+                        said_reasons.add(why)
+                        say(f"自检仍没过（原因变了）：{why}")
                 else:
                     specific = (f"cookie 有了（{len(names)} 个），但 csrf 取不到 —— "
                                 "页面 localStorage 和接口两条路都试过了")

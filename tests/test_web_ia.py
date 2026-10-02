@@ -52,8 +52,20 @@ BODY = _strip_html_comments(INDEX_HTML)
 
 
 def _nav_item(tab, nxt=None):
-    """切出某个导航项的 HTML（含它的下拉菜单）。"""
-    i = INDEX_HTML.index('class="nav-item" data-tab="%s"' % tab)
+    """切出某个导航项的 HTML（含它的下拉菜单）。
+
+    ⚠ 两种 class 都要认得（2026-09-29 收银入口起）：
+    `class="nav-item"`（带下拉的标准页签）和 `class="nav-item nav-lifehall"`
+    （生活馆直连块 —— 价签/权益/收银那种**故意没有下拉**的平铺入口）。
+    老写法只认前者，生活馆块会 `ValueError: substring not found`。
+    """
+    for prefix in ('class="nav-item" data-tab="%s"' % tab,
+                   'class="nav-item nav-lifehall" data-tab="%s"' % tab):
+        if prefix in INDEX_HTML:
+            i = INDEX_HTML.index(prefix)
+            break
+    else:
+        raise ValueError("导航里没有 data-tab=%s 的 nav-item" % tab)
     j = (INDEX_HTML.index('data-tab="%s"' % nxt) if nxt
          else INDEX_HTML.index("</nav>", i))
     return INDEX_HTML[i:j]
@@ -112,9 +124,12 @@ class Test一级页签(unittest.TestCase):
         # ⭐ 2026-09-29（2.3.0）：**分销** —— 渠道分销部四张看板（区域/机型/销售员/明细），
         #   注册表 `order=45` 排在小工具后面；可见性 `types="multi"`（区长/平台）
         #   归 `tests/test_roles.py` 管，这里只钉**顺序和名字**。
+        # ⭐ 2026-09-29：**收银**（生活馆利润核算录入端）—— 用户拍板
+        #   「第三个平级入口」。⚠ 它是 `nav-lifehall` **直连块**（同价签/权益，
+        #   full 版 CSS 藏、生活馆平铺一键直达），own tab = own key。
         self.assertEqual(NAV_IDS,
                          ["sales", "plan", "compliance", "inventory", "valueadd",
-                          "tools", "distribution"])
+                          "tools", "distribution", "cashier"])
 
     def test_每个都有对应的_panel(self):
         for tab in NAV_IDS:
@@ -680,6 +695,16 @@ class Test二级标签接线(unittest.TestCase):
             menu = _nav_item(tab, nxt=None) if tab == NAV_IDS[-1] else _nav_item(
                 tab, nxt=NAV_IDS[NAV_IDS.index(tab) + 1])
             with self.subTest(tab=tab):
+                # ⚠ 生活馆**直连块**（`nav-lifehall`，2026-09-26 起）是另一种
+                #   有版权威的形态：价签/权益/收银 —— 平铺、一键直达、**故意没有
+                #   下拉**（一个入口一个动作）。判据换成"direct-subtab 在不在"，
+                #   顺手钉死"不许给直连块偷偷加下拉"。
+                if menu.startswith('class="nav-item nav-lifehall"'):
+                    self.assertIn('data-direct-subtab', menu,
+                                  "%s 是生活馆直连块，却丢了 direct-subtab" % tab)
+                    self.assertNotIn('class="nav-menu"', menu,
+                                     "%s 是直连块，不该长出下拉（形态别分叉）" % tab)
+                    continue
                 self.assertIn('class="nav-menu"', menu, "%s 没有下拉菜单" % tab)
                 self.assertTrue(re.findall(r'data-subtab="([a-z-]+)"', menu),
                                 "%s 的下拉是空的" % tab)

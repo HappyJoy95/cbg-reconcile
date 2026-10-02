@@ -99,6 +99,16 @@ class CbgSession:
 
     # ---- 使用 ----
     def headers(self, role: str = "Store_Manager") -> dict:
+        """业务请求头。`role-code` 默认**店长**（Store_Manager）——
+        老门店账号清一色店长，一直没出过事。
+
+        ⚠ 2026-09-29 测试机定案（cndl0205028，用户：「不需要店长角色啊，
+        其他角色也可以看到的」）：**非店长账号**会被 `store-detail` 按这个头拒
+        （「用户没有对应的角色 店长」），而订单接口不受影响。
+        ⇒ 自检改走 `CbgClient.ping()` 的**订单接口回退**、门店档案改**非致命**
+        （见各自注释）。这里**不改成"猜账号角色"** —— 角色词表我们没有，
+        猜错比现在的后果更糟；要真按角色发头，得先有发现机制（下一轮）。
+        """
         return {
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-CN,zh;q=0.9",

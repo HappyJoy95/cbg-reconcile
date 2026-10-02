@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""待领清单 —— 查本地 `erp_sales`，按活动机型×日期匹配，并 join 领取状态。
+"""待领清单 —— 按版本读取本地销售池，匹配活动机型、日期与领取状态。
 
-⚠ **只读 erp_sales**（fetch 落的），不读桌面 Excel。
-⚠ 退货行不进待领；无串号行也列（`status_key` 回落 row:…）。
+正式版读 `erp_sales`，生活馆版读 `orders` × `order_lines`；均只读本地库。
+⚠ 退货行不进待领；正式版可列无串号行，生活馆版只列有真 SN 的整机。
 范围：调用方传 `stores=`（来自 `role_scope()`）。
 """
 
@@ -89,6 +89,18 @@ SN_SQL_CANDIDATES = (
     "Imei", "IMEI1", "Imei2", "Imei3",
 )
 NEVER_AS_SN = frozenset({"串号标识", "OldFlag", "old_flag", "发票号码", "单号"})
+
+# 玲珑销售明细的 category_id 是内部编码。礼品等行即使填了串号、
+# 商品名碰巧含活动机型，也不能成为待领商品；未知新编码仍交给机型与真 SN 判定。
+LINGLONG_NON_DEVICE_CATEGORIES = frozenset({
+    "ISRP12000001",          # 礼品
+    "CMCG10000040",          # Care+
+    "CMCG10000034",          # 移动电源
+    "CMCG10000024",          # 路由器
+    "CMCG10000140",          # 手机壳
+    "CMCG10000037",          # 体脂秤
+    "HWExclusiveAccessories",  # 专属配件
+})
 
 
 def _select_sql(conn: sqlite3.Connection) -> str:
@@ -181,6 +193,68 @@ def load_sales(db: Path, start: str, end: str, stores=None,
         conn.close()
 
 
+def load_sales_linglong(db: Path, start: str, end: str) -> List[dict]:
+    """生活馆版：玲珑销售单（`orders` × `order_lines`，池A）→ 与
+    `load_sales` **同形状**的行，喂给同一个 `build_rows`。
+
+    过滤口径（对齐 erp 侧语义，字段对玲珑）：
+    * 窗口：`doc_create_time`（≈ 支付时间）在 [start, end+1)；
+    * 有效单：`pay_status=2`（已付）且 `return_status=0`，
+      且单号不在 `returns.related_doc_no` 里（部分退货的单）；
+    * **整机**：排除已知礼品/服务/配件品类，且必须有可用的真 SN。
+      礼品的 43 位标识虽然非空，却不能拿去领取；
+    * 退货单不进待领（权益跟着原单）—— 有效单过滤已挡。
+
+    `category_id` 不直接传给中文品类白名单；机型命中仍看商品名称。
+    未知新编码保留真 SN + 机型匹配的机会，避免新品静默消失。
+    """
+    end_ex = (datetime.date.fromisoformat(end)
+              + datetime.timedelta(days=1)).isoformat()
+    conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        line_cols = {str(col[1]) for col in conn.execute(
+            "PRAGMA table_info(order_lines)")}
+        category_sql = ("l.category_id AS category_id" if "category_id" in line_cols
+                        else "'' AS category_id")
+        sql = (
+            "SELECT o.document_no AS doc, o.store_name AS store,"
+            " o.consumer_guide_name AS who, o.doc_create_time AS ts,"
+            " l.item_name AS name, l.quantity AS qty, l.sn AS sn, %s"
+            " FROM orders o JOIN order_lines l"
+            "   ON l.document_no = o.document_no"
+            " WHERE o.doc_create_time >= ? AND o.doc_create_time < ?"
+            "   AND o.pay_status = 2 AND o.return_status = 0"
+            "   AND l.sn <> ''"
+            "   AND NOT EXISTS (SELECT 1 FROM returns r"
+            "                    WHERE r.related_doc_no = o.document_no)"
+        ) % category_sql
+        out = []
+        for r in conn.execute(sql, (start, end_ex)):
+            category_id = str(r["category_id"] or "").strip()
+            if category_id in LINGLONG_NON_DEVICE_CATEGORIES:
+                continue
+            sn = metric.pick_true_sn(r["sn"])
+            if not sn:
+                continue
+            if metric.hard_excluded(r["name"] or ""):
+                continue
+            out.append({
+                "store": r["store"] or "", "who": (r["who"] or "").strip(),
+                "typ": "销售",              # 有效单已滤掉退货行
+                "name": r["name"] or "", "qty": _f(r["qty"]),
+                "ts": r["ts"] or "", "doc": r["doc"] or "",
+                "sn": sn,
+                "claim_sn": sn,
+                "sn_kind": metric.sn_kind(sn),
+                "c1": "", "c2": "",          # 内部编码进不了中文白名单（见 docstring）
+                "note": "",
+            })
+        return out
+    finally:
+        conn.close()
+
+
 def build_rows(sales: List[dict], activities: List[dict],
                statuses: Optional[dict] = None) -> Tuple[List[dict], List[dict]]:
     """销售行 → 待领行 + 被排除的退货行（方便 note 报数）。
@@ -225,6 +299,8 @@ def build_rows(sales: List[dict], activities: List[dict],
 
 def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
     """一页数据：活动 + 待领行 + 合计。"""
+    from ..... import edition as _edition          # ⚠ 5 个点 = src（本文件在 pending/ 下）
+    lifehall = _edition.is_lifehall()
     root = Path(root or ROOT)
     acts = catalog.load_activities(root)
     statuses = status_mod.load(root)
@@ -235,7 +311,8 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
             "rows": [],
             "summary": metric.summarize([]),
             "activities": acts,
-            "note": "还没有本地销售库 —— 先跑「抓取云商数据」。",
+            "note": ("还没有本地销售库 —— 先跑「抓取玲珑数据」。" if lifehall
+                     else "还没有本地销售库 —— 先跑「抓取云商数据」。"),
             "src": "missing",
             "as_of": "",
         }
@@ -248,11 +325,18 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
     if end > today.isoformat():
         end = today.isoformat()
     try:
-        stock_map = load_stock_sn_map(db)
-        sales = load_sales(db, start, end, stores=stores, stock_map=stock_map)
+        if lifehall:
+            sales = load_sales_linglong(db, start, end)
+            stock_map = {}                       # 没有云商库存表，86码反查不存在
+        else:
+            stock_map = load_stock_sn_map(db)
+            sales = load_sales(db, start, end, stores=stores,
+                               stock_map=stock_map)
     except Exception as e:  # noqa: BLE001 —— 说清楚，不拿空表假装成功
         return {
-            "ok": False, "why": "读 erp_sales 失败：%s" % e,
+            "ok": False,
+            "why": ("读玲珑销售单失败：%s" % e if lifehall
+                    else "读 erp_sales 失败：%s" % e),
             "rows": [], "summary": metric.summarize([]), "activities": acts,
             "src": "failed", "as_of": "",
         }
@@ -262,11 +346,16 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
     n_imei = sum(1 for r in rows if r.get("sn_kind") == "imei")
     n_resolved = sum(1 for r in rows
                      if r.get("sn_kind") == "imei" and r.get("claim_sn"))
-    note = ("源：仅 erp_sales（SQLite）。匹配 = **整机品类** + 商品名命中活动机型 + 支付日在赠送期内；"
-            "手提袋/周边/延保单、退货不进待领。")
-    if n_imei:
-        note += (" 串号是 86 码的 %d 条：库存三列反查到真 SN %d 条可在线领，"
-                 "其余只能手动领取/标已领。" % (n_imei, n_resolved))
+    if lifehall:
+        note = ("源：玲珑销售单（orders × order_lines）。匹配 = 商品名命中活动机型"
+                " + 订单时间在赠送期内 + 有效设备 SN；排除礼品、服务、配件品类，"
+                "退货不进待领。")
+    else:
+        note = ("源：仅 erp_sales（SQLite）。匹配 = **整机品类** + 商品名命中活动机型 + 支付日在赠送期内；"
+                "手提袋/周边/延保单、退货不进待领。")
+        if n_imei:
+            note += (" 串号是 86 码的 %d 条：库存三列反查到真 SN %d 条可在线领，"
+                     "其余只能手动领取/标已领。" % (n_imei, n_resolved))
     if skipped:
         note += " 另有 %d 笔退货命中机型（已排除）。" % len(skipped)
     return {
@@ -275,7 +364,7 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         "summary": metric.summarize(rows),
         "activities": acts,
         "note": note,
-        "src": "erp_sales",
+        "src": "orders" if lifehall else "erp_sales",
         "as_of": as_of,
         "window": {"start": start, "end": end},
         "skipped_returns": len(skipped),

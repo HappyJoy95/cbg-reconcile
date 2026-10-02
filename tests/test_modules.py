@@ -772,9 +772,16 @@ class Test六个模块的规矩(unittest.TestCase):
 
     def test_健康模块能看见其它模块(self):
         """启动自检要一次说清"登录/数据/计时/推送/界面"各什么状态 ——
-        这五项正好是五个模块的出口（用户要的启动流程）。"""
+        这五项正好是五个模块的出口（用户要的启动流程）。
+
+        ⚠ **root 必须是临时目录**（2026-09-29 收银那轮，conftest 的
+        "改已有文件"监视抓到的）：`check_schema` 默认 `apply=True`（门店升级
+        自愈，生产设计没错），拿 `ROOT` 跑就会把**新迁移真写进开发机
+        `out/cbg-2026.db`** —— 004 那次、005/006 这次都这么写进去的。
+        空临时 root 下 `find_db` 找不到库 → 走 "missing" 警告分支，不写任何东西。"""
         from src.modules import health
-        boot = health.boot(ROOT)
+        with tempfile.TemporaryDirectory() as d:
+            boot = health.boot(Path(d))
         groups = {i["group"] for i in boot["items"]}
         for want in ("auth", "data", "timer", "notify", "theme"):
             self.assertIn(want, groups)
@@ -782,9 +789,12 @@ class Test六个模块的规矩(unittest.TestCase):
 
     def test_登录和界面都不拦启动(self):
         """⚠ 用户 2026-09-19 的原话是「自检不过就**弹登录**」——
-        不是"不许启动"。硬挡的后果是门店连"上报 bug"都点不了。"""
+        不是"不许启动"。硬挡的后果是门店连"上报 bug"都点不了。
+
+        （root 换临时目录的原因见上一条 —— 同一处，别改回 `ROOT`。）"""
         from src.modules import health
-        boot = health.boot(ROOT)
+        with tempfile.TemporaryDirectory() as d:
+            boot = health.boot(Path(d))
         for i in boot["items"]:
             if i["group"] in ("auth", "theme", "timer", "notify"):
                 self.assertNotIn(i, boot["blocking"], "%s 不该拦启动" % i["group"])
@@ -870,7 +880,10 @@ class Test启动流程接上了(unittest.TestCase):
         `sys.stdout.encoding` 就是 gbk）—— 编不过去的字符这里立刻红。
         """
         from src.modules import health
-        lines = health.boot_lines(health.boot(ROOT))
+        # 临时 root：别让 check_schema 的 apply=True 把迁移写进开发机真库
+        # （原因见 `test_健康模块能看见其它模块` 的注释）
+        with tempfile.TemporaryDirectory() as d:
+            lines = health.boot_lines(health.boot(Path(d)))
         self.assertTrue(lines)
         for line in lines:
             line.encode("gbk")
@@ -916,9 +929,13 @@ class Test功能注册这项自检(unittest.TestCase):
 
     def test_它在启动自检的第一段里(self):
         """静态的（代码 / 结构 / 注册表）排在最前面 —— 这三样不对，
-        后面"数据新不新鲜"根本没有意义。"""
+        后面"数据新不新鲜"根本没有意义。
+
+        （顺序是 `snapshot()` 里写死的，跟 root 无关；临时 root 只为
+        别让 check_schema 把迁移写进开发机真库 —— 见上面同款注释。）"""
         from src.modules import health
-        groups = [i["group"] for i in health.boot(ROOT)["items"]]
+        with tempfile.TemporaryDirectory() as d:
+            groups = [i["group"] for i in health.boot(Path(d))["items"]]
         self.assertIn("features", groups)
         self.assertLess(groups.index("code"), groups.index("data"))
 

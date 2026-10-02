@@ -96,6 +96,14 @@ TASKS: List[Tuple[str, Callable]] = [
 ]
 
 
+def tasks() -> List[Tuple[str, Callable]]:
+    """按版本给启动刷新清单；生活馆不加载云商人员链。"""
+    from . import edition
+    if edition.is_lifehall():
+        return [task for task in TASKS if task[0] != "门店组织架构 / 本店人员"]
+    return list(TASKS)
+
+
 def run_once(app, force: bool = False, say=print) -> dict:
     """今天还没跑过就跑一轮。返回 `{"ran": bool, "results": {名字: 结果}}`。
 
@@ -104,7 +112,7 @@ def run_once(app, force: bool = False, say=print) -> dict:
     if not force and not should_run(app.root):
         return {"ran": False, "results": {}, "reason": "今天已经刷过了"}
     results = {}
-    for name, fn in TASKS:
+    for name, fn in tasks():
         try:
             results[name] = fn(app) or "好了"
         except Exception as e:                                 # noqa: BLE001

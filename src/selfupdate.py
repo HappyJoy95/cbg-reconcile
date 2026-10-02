@@ -76,7 +76,16 @@ RELEASE_ASSET = "cbg-reconcile-update.zip.sealed"
 
 # 源码仓。**发行仓排在它前面**（见模块文档里那条"顺序绝对不能反"）。
 REPO = "HappyJoy95/cbg-reconcile"
-BRANCH = "main"
+
+# ⚠ 下面两行必须待在所有 `def` **之前**：`BRANCH` 被 `_version_api_url(ref=BRANCH)`、
+#   `download(ref=BRANCH)`、`apply_update(ref=BRANCH)` 等的**默认参数在
+#   import 那一刻捕获** —— 放到 def 后面再改分支，那些默认值还停在旧分支上。
+#   `from . import edition` 也必须在这行之前（否则 `is_lifehall` 还没进来）。
+from . import edition as _edition                           # noqa: E402
+#: 更新渠道 —— 生活馆机器读 lifehall 分支（独立版本号、独立下发内容）。
+#: ⚠ 这是 **lifehall 分支私有段**：合回 main 时要连同 `_targets` 的 PRUNE
+#:   过滤、`whatsnew.LIFEHALL_SKIP` 一起处理，别单独把这一行合过去。
+BRANCH = "lifehall" if _edition.is_lifehall() else "main"
 
 # 版本源：`(标签, api 地址, raw 地址)`，**按可靠性排序**。
 #
@@ -217,13 +226,17 @@ def _log(msg: str) -> None:
 #:   跟 `out` 一样是"这台电脑自己的"，自更新一根手指都不许碰。
 #:   它跟 `out` 是一对：`out` 是我生出来的，`in` 是别人发来的。
 NEVER_TOUCH = ("config", ".secrets", "out", "in", "dist", "tools", "__pycache__", ".dsh",
-               "agent.md")
+               "agent.md", "docs")
 
 # ⚠ `.dsh/` 也在名单里：它是**工作区隔离区**（记忆日志 / 备份 / 临时任务 /
 #   本机 venv），跟 `.secrets/` 一样是"这台电脑自己的东西"。
 #   它本来就在 `.gitignore` 里、进不了仓库，所以自更新拿到的 zip 里不会有它；
 #   列在这里是**明说这件事**，顺便让 `tools/build_package.sh` 的排除项
 #   跟这里对得上（那边以前漏了 `.dsh/`，把本机 venv 打进过包，被自检逮住）。
+#
+# ⚠ `docs/`（2026-09-29 收银那轮加）：根目录的**开发计划笔记**，同 `.dsh` 待遇
+#   —— 打包 rsync 排除 + 自检反查 + 这里，三处对得上。它还没入 git，
+#   但没被 ignore：哪天有人顺手 commit，没有这道镜子就会把开发笔记铺进门店。
 #
 # ⚠ `agent.md` 是名单里**唯一一个文件**（其余都是顶层目录）。
 #   它是"给 AI agent 看的开发/部署指令"，2026-09-16 用户要求挡在门店外面。
@@ -617,7 +630,8 @@ def _iter_files(zip_root: Path) -> list:
 
 
 def _targets(zip_root: Path) -> list:
-    """(zip 里的文件, 安装目录里的相对路径) —— 照原样铺，除了 NEVER_TOUCH / SKIP_APPLY。"""
+    """(zip 里的文件, 安装目录里的相对路径) —— 照原样铺，除了 NEVER_TOUCH / SKIP_APPLY
+    （lifehall 版再加一道 `edition.PRUNE`，见函数尾）。"""
     out = []
     for f in _iter_files(zip_root):
         if not f.is_file():
@@ -631,6 +645,12 @@ def _targets(zip_root: Path) -> list:
         if rel.name.startswith(".") and rel.name not in (".gitattributes", ".gitignore"):
             continue
         out.append((f, rel))
+    if _edition.is_lifehall():
+        # 生活馆机器只铺保留的代码 —— 生活馆分支的 zip 是**全量仓库**，
+        # 里面仍有被裁文件；不滤掉的话，第一次自更新就把云商/对账代码
+        # 从 zip 里铺回来了（等于裁剪白做）。清单是 `edition.PRUNE` 单源，
+        # 打包脚本 `tools/build_package.sh` 的 rsync 排除读同一份，谁也不许另抄一张。
+        out = [(f, rel) for f, rel in out if not _edition.pruned(_rel_key(rel))]
     return out
 
 
@@ -1233,6 +1253,14 @@ def prune_candidates(root, zip_root, have) -> dict:
 
     返回 `{"files": [...], "skipped": {rel: 原因}, "total": 本机文件数, "blocked": bool}`。
     **只看不算改** —— 真正搬走是 `_prune()` 的事。
+
+    ⚠ 候选一律从**本机文件**出发（`_local_code_files`）—— "zip 里有、本地没有"
+      的文件压根不进循环，报不出候选（Task 8 核对过的生活馆情形：lifehall 的
+      zip 里带着 `edition.PRUNE` 那些被裁文件、而 `_targets()` 已把它们滤出
+      `have`，本机又没有 ⇒ 双向都碰不到，不会误报）。反过来本机真残留被裁
+      文件时，`prune_reason` 还会先问一次文件系统（zip 里还有它 ⇒ "按存在
+      处理"、不删）—— 两道闸都指向"宁可不删"。行为钉在
+      `tests/test_edition_update.py::Test_prune候选只看本机`。
     """
     files, skipped = [], {}
     for rel in _local_code_files(root):

@@ -106,18 +106,44 @@ mkdir -p "${STAGE}" "${DIST}"
 #   门店装了这种包、下一次自更新就被"清理旧文件"当成残留删掉（新版里没有它），
 #   等于发了一个**短命包**。
 #   "发布必须来自已提交状态"本来就是发版纪律，这里只是把它变成机器拦得住的。
-if command -v git >/dev/null 2>&1 && [ -d "${ROOT}/.git" ]; then
+if command -v git >/dev/null 2>&1 && git -C "${ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   _dirty="$(git -C "${ROOT}" status --porcelain 2>/dev/null || true)"
   if [ -n "${_dirty}" ]; then
-    echo "    ✗ 工作区不干净 —— 打出来的包会跟仓库里的不一致："
+    echo "    ! 工作区不干净 —— 打出来的包会跟远端仓库不一致："
     echo "${_dirty}" | sed 's/^/       /'
-    echo "    先 commit（或 stash）再打包；确要跳过就设 CBG_ALLOW_DIRTY=1。"
-    [ "${CBG_ALLOW_DIRTY:-}" = "1" ] || exit 1
-    echo "    （CBG_ALLOW_DIRTY=1，继续打包 —— 这份包**只能自己测**，别发门店）"
+    if [ -n "${BETA_N}" ]; then
+      echo "    beta 测试包可供门店手工安装测试；测试期间不要执行自更新。"
+    else
+      echo "    正式包先 commit（或 stash）再打；确要跳过就设 CBG_ALLOW_DIRTY=1。"
+      [ "${CBG_ALLOW_DIRTY:-}" = "1" ] || exit 1
+      echo "    （CBG_ALLOW_DIRTY=1，继续打包 —— 这份包只能自己测，别发门店）"
+    fi
   fi
 fi
 
 # ---------------------------------------------------------------- 复制源码
+# ───────────── 生活馆版：按 edition.PRUNE 追加排除（单源，python 读出来） ─────────────
+# 一份表两处用：这里（打包 rsync 排除）+ 自更新 `selfupdate._targets()` ——
+# 谁也不许另抄一张（抄的那份迟早跟 edition.PRUNE 走散，而"走散"的表现是
+# 打包裁了、自更新又铺回来，只有装到门店机器上才看得出来）。
+# ⚠ EDITION 缺失 / 读不出 / 内容不是 lifehall → 一律按**主包**跑
+#   （跟 `src/edition.py` 同一个默认：宁可当主包，别半疯）。
+# ⚠ 下面的 `${PRUNE_ARGS[@]+...}` 是 macOS bash 3.2 + `set -u` 的兼容写法：
+#   空数组 `"${PRUNE_ARGS[@]}"` 直接展开会报 unbound variable。
+if [ -f "${ROOT}/EDITION" ]; then
+  EDITION_VAL="$(tr -d '[:space:]' < "${ROOT}/EDITION")"
+else
+  EDITION_VAL="full"
+fi
+PRUNE_ARGS=()
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "==> 生活馆版（EDITION=lifehall）—— 按 src/edition.py::PRUNE 裁剪"
+  while IFS= read -r p; do
+    if [ -n "$p" ]; then
+      PRUNE_ARGS+=(--exclude "$p")
+    fi
+  done < <(cd "${ROOT}" && python3 -c "from src.edition import PRUNE; print('\n'.join(PRUNE))")
+fi
 rsync -a \
   --exclude '.secrets/' \
   --exclude '.dsh/' \
@@ -131,23 +157,26 @@ rsync -a \
   --exclude '*.pyc' \
   --exclude '.pytest_cache/' \
   --exclude '.DS_Store' \
-  --exclude '.git/' \
+  --exclude '.git' \
   --exclude 'run.sh' \
   --exclude 'run.bat' \
   --exclude 'run-now.sh' \
   --exclude 'run-now.bat' \
   --exclude '.gitignore' \
+  --exclude '.venv/' \
   --exclude 'README.md' \
   --exclude 'AGENTS.md' \
   --exclude 'agent.md' \
   --exclude '设计文档.md' \
   --exclude 'packaging/' \
   --exclude '运维手册.md' \
+  --exclude '/docs/' \
   --exclude '/.playwright-cli/' \
   --exclude '/claim-guide-preview.html' \
   --exclude '/claim-guide.css' \
   --exclude '/claim-guide.js' \
   --exclude '*.xlsx' \
+  ${PRUNE_ARGS[@]+"${PRUNE_ARGS[@]}"} \
   "${ROOT}/" "${STAGE}/"
 # ⚠ `tests/` **不进门店包**（用户 2026-09-22 方案 2）：门店不跑 pytest；
 #   仓库 git 里保留测试。自更新 `_targets` 用 `SKIP_APPLY` 同步跳过 ——
@@ -167,7 +196,9 @@ rsync -a \
 # 仓库/git 里始终没有它。安装时 `bootstrap._seed_central_mail()` 会把它播进
 # 门店的 `.secrets/mail.env`（已有键不覆盖），自更新不会动 `.secrets/` ⇒ 一直有效。
 CENTRAL_SRC="${ROOT}/.secrets/mail.env"
-if grep -q '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" 2>/dev/null; then
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "  · 生活馆版不使用邮件推送，跳过中台邮箱授权码"
+elif grep -q '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" 2>/dev/null; then
   grep '^MAIL_CENTRAL_PASSWORD=' "${CENTRAL_SRC}" > "${STAGE}/central-mail.env"
   echo "  · 已把中台邮箱授权码塞进包（之后门店一直默认用它）"
 else
@@ -201,7 +232,9 @@ if [ -e "${ROOT}/mail-key.json" ]; then
   exit 1
 fi
 KEY_SRC="${ROOT}/.secrets/mail-key.json"
-if [ -f "${KEY_SRC}" ]; then
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "  · 生活馆版不使用邮件附件，跳过邮件密钥"
+elif [ -f "${KEY_SRC}" ]; then
   cp "${KEY_SRC}" "${STAGE}/mail-key.json"
   _kid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("current","?"))' \
           "${KEY_SRC}" 2>/dev/null || echo '?')"
@@ -335,6 +368,12 @@ fi
 #   ⚠ 改发布说明 = 改根目录那个文件 + commit，**不再改本脚本**；
 #     顺带 f-string 反斜杠转义坑随正文一起消失（原来那条
 #     test_release_notes_python_has_no_invalid_escapes 已改钉新形状）。
+# ⚠ 生活馆版**不带**这份文档（`edition.PRUNE` 单源）：rsync 已经把它排除了，
+#   这里的 `cp` 不跟着跳过就等于又拷回来 —— 两道闸自相矛盾，最后靠下面那条
+#   反查断言才发现。所以 cp / beta 横幅整段进 else。
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "    ✓ 发布说明.md：生活馆版不带（edition.PRUNE —— 它讲的是被裁功能）"
+else
 cp "${ROOT}/发布说明.md" "${STAGE}/发布说明.md"
 
 # beta 包在正文第一个 `---` 后插一条"这是测试包"的横幅（改 stage 副本，仓库文件不动）
@@ -351,6 +390,7 @@ p.write_text(body, encoding="utf-8")
 BETABANNER
 fi
 echo "    ✓ 发布说明.md（来自仓库${BETA_LABEL:+ · ${BETA_LABEL}}）"
+fi
 
 
 # ---------------------------------------------------------------- 指南与文档
@@ -365,7 +405,12 @@ echo "    ✓ 发布说明.md（来自仓库${BETA_LABEL:+ · ${BETA_LABEL}}）"
 # 远程指挥门店时，他翻到 README 就会照着做错。
 #
 # 两份都在 git 仓库里，维护的人照样看得到；门店这边留指南 + 发布说明就够了。
+# ⚠ 生活馆版同样不带它（`edition.PRUNE`，理由同上一段的 cp）。
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  echo "    ✓ 门店操作手册.md：生活馆版不带（edition.PRUNE —— 生活馆另发自己的指引）"
+else
 cp "${ROOT}/门店操作手册.md" "${STAGE}/门店操作手册.md"
+fi
 
 # ---------------------------------------------------------------- 自检
 echo "==> 打包前自检"
@@ -407,11 +452,18 @@ check_absent "${STAGE}/dist"
 #   五个 js + 一个 css 在 `web/inventory/` 下 —— 少任何一个，
 #   门店点开「库存盘点」看到的是白板，而 Python 测试全绿。
 #   （它**不是构建产物**：没有 `build.mjs`，六个文件照原样发，见该页头部注释。）
-for _inv in inventory.html inventory/core.js inventory/api.js inventory/store.js \
-            inventory/xlsx.js inventory/ui.js inventory/style.css \
-            tools/price-tag/index.html tools/price-tag/js/app.js \
+# ⚠ 生活馆版**没有这一页**（`edition.PRUNE` 裁掉）—— 所以"必须在"的断言
+#   只在主包跑；生活馆侧由下面那条反查（它必须**不在**）守。
+if [ "${EDITION_VAL}" != "lifehall" ]; then
+  for _inv in inventory.html inventory/core.js inventory/api.js inventory/store.js \
+              inventory/xlsx.js inventory/ui.js inventory/style.css; do
+    [ -f "${STAGE}/web/${_inv}" ] || { echo "    ✗ 缺 web/${_inv}（库存前端）"; fail=1; }
+  done
+fi
+# 小工具前端**两个版都要**（price-tag 不在 PRUNE 里，生活馆也保留那三个工具页）
+for _inv in tools/price-tag/index.html tools/price-tag/js/app.js \
             tools/price-tag/css/style.css; do
-  [ -f "${STAGE}/web/${_inv}" ] || { echo "    ✗ 缺 web/${_inv}（库存/小工具前端）"; fail=1; }
+  [ -f "${STAGE}/web/${_inv}" ] || { echo "    ✗ 缺 web/${_inv}（小工具前端）"; fail=1; }
 done
 [ -f "${STAGE}/config/stores.yaml" ] || { echo "    ✗ 缺 config/stores.yaml"; fail=1; }
 # 门店配置模板**必须**在包里 —— 没有它，新机器装完就没有配置文件，程序起不来
@@ -431,8 +483,25 @@ fi
 [ -f "${STAGE}/uninstall.bat" ]   || { echo "    ✗ 缺 uninstall.bat"; fail=1; }
 [ -f "${STAGE}/diagnose.bat" ]    || { echo "    ✗ 缺 diagnose.bat"; fail=1; }
 [ -f "${STAGE}/run_check.py" ]    || { echo "    ✗ 缺 run_check.py（计划任务靠它记日志）"; fail=1; }
-[ -f "${STAGE}/门店操作手册.md" ] || { echo "    ✗ 缺 门店操作手册.md"; fail=1; }
-[ -f "${STAGE}/发布说明.md" ]      || { echo "    ✗ 缺 发布说明.md"; fail=1; }
+# ───────── 按版反查（两道闸的第二道）─────────
+# 生活馆包里被裁的东西必须真的**不在**（rsync 排除 + 反查断言，老规矩），
+# EDITION 文件必须**在**（自更新和安装都靠它认版 —— 没有它，下一次自更新
+# 会把这台机器当主包处理）。
+# ⚠ 主包的原断言（手册 / 发布说明必须在）原样挪进 else —— 少了任何一条，
+#   生活馆包会因为"缺 门店操作手册.md"必挂，而主包会因为没人查而漏发手册。
+if [ "${EDITION_VAL}" = "lifehall" ]; then
+  for _p in src/erp.py src/reconcile.py src/app/pos.py src/features/compliance \
+            config/managers.yaml 门店操作手册.md 发布说明.md web/inventory.html; do
+    if [ -e "${STAGE}/${_p}" ]; then
+      echo "    ✗ 生活馆包里混进了该裁的文件：${_p}"
+      fail=1
+    fi
+  done
+  [ -f "${STAGE}/EDITION" ] || { echo "    ✗ 缺 EDITION 文件（自更新要靠它认版）"; fail=1; }
+else
+  [ -f "${STAGE}/门店操作手册.md" ] || { echo "    ✗ 缺 门店操作手册.md"; fail=1; }
+  [ -f "${STAGE}/发布说明.md" ]      || { echo "    ✗ 缺 发布说明.md"; fail=1; }
+fi
 # 本机生成的 run 脚本绝不能进包 —— 里面写着**开发机**的 Python 绝对路径，
 # 门店电脑上跑不了。（上次就漏了 run-now.sh 进去。）
 _stray="$(ls "${STAGE}"/run*.sh "${STAGE}"/run*.bat 2>/dev/null || true)"
@@ -451,7 +520,9 @@ fi
 #   而 AGENTS.md 正文里写着"rsync 排除 + 反查断言，两道"，等于文档承诺了、
 #   代码没做。2026-09-16 补上，顺便加 `agent.md`。
 #   名单要和 `--exclude` 那一段**一一对上**，对不上就是下次踩坑的开始。
-for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md; do
+#   2026-09-29 加 `docs`：根目录那份是开发计划笔记（superpowers 会话产物），
+#   跟 README 一个待遇 —— rsync 排除 + 这里反查，两道。
+for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md docs; do
   if [ -e "${STAGE}/${_doc}" ]; then
     echo "    ✗ 包里混进了不给门店看的文档：${_doc}（门店只看 门店操作手册.md）"
     fail=1
@@ -464,7 +535,9 @@ if grep -rIl "/Users/ashui" "${STAGE}" 2>/dev/null | head -3 | grep -q .; then
 fi
 # 开发垃圾不能进包（门店同事会打开这个目录，看到缓存文件会困惑）
 # ⚠ `*.xlsx` 也是垃圾：开发期源表（rsync 已排，这里再钉一道）。
-for junk in '.pytest_cache' '__pycache__' 'dist' 'tools' 'packaging' \
+# ⚠ `.venv` 2026-09-29 加：开发机在仓库根建的 venv —— `.gitignore` 挡得住 git、
+#   挡不住 rsync（打包拷的是工作区），不排就整包被"本机绝对路径"那条闸拦死。
+for junk in '.pytest_cache' '__pycache__' 'dist' 'tools' 'packaging' '.venv' \
             'run.sh' 'run.bat' 'run-now.sh' 'run-now.bat' '.gitignore' \
             '.playwright-cli' 'claim-guide-preview.html' 'claim-guide.css' \
             'claim-guide.js'; do

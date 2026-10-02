@@ -12,6 +12,9 @@
 
 ⇒ **本模块是那个唯一来源**：`run_daily` 的三张表从这儿**派生**（见它文件头），
 菜单那边等前端接上（`tests/test_registry.py` 里先钉"注册表与 HTML 不漂移"）。
+⚠ 派生口按版收窄（生活馆版 2026-09-26）：功能走 `build_all()`、
+能力层步骤走 **`builtin_steps()`** —— 生活馆只留抓玲珑 + 自动更新，
+且 `dump` 的 `whens` 剥成空（用户定：不建计划任务，手动刷）。
 
 ## 形状：父带"目录"，子带"内容"
 
@@ -38,7 +41,7 @@ Feature(key=…)        ← 一级：功能模块（销售数据 / 五项合规 
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, List, Optional, Tuple
 
 #: 「什么时候唤醒」的值对象住在**计时模块**里（那是这件事的归属），
@@ -169,9 +172,10 @@ BUILTIN_STEPS: Tuple[Step, ...] = (
 
 
 def all_features() -> List[Feature]:
-    """全部功能模块（注册表的唯一入口）。"""
-    from . import ALL
-    return list(ALL)
+    """注册表的唯一入口 —— ⚠ 每次现算（`features.ALL` 是定格常量，
+    生活馆测试要能切 env 看到不同结果，所以问 `build_all()`）。"""
+    from . import build_all
+    return build_all()
 
 
 def step_by_cmd(cmd: str) -> Optional[Step]:
@@ -223,9 +227,31 @@ def wakes() -> List[Step]:
     return [s for s in all_steps() if s.whens]
 
 
+def builtin_steps() -> List[Step]:
+    """能力层步骤（**按版收窄的口子**）—— 生活馆只留抓玲珑 + 自动更新，
+    且 `dump` 的 whens 剥成 `()`（用户 2026-09-26 定：不建计划任务，手动刷）。
+
+    ⚠ full 版原样返回 `BUILTIN_STEPS`（既有 2810 条测试钉的是原对象）；
+      `BUILTIN_OWNER` 那张展示表保持全表 —— 键多出来无害，`step_owner` 查不到会兜底。
+    """
+    from .. import edition
+    out = list(BUILTIN_STEPS)
+    if edition.is_lifehall():
+        drop = {"erp-dump", "report", "report-inbox"}
+        out = [s for s in out if s.cmd in edition.LIFEHALL_BUILTIN_STEPS
+               and s.cmd not in drop]
+        replaced = []
+        for s in out:
+            if s.cmd == "dump":
+                s = replace(s, whens=())     # 生活馆不建计划任务：手动刷
+            replaced.append(s)
+        out = replaced
+    return out
+
+
 def all_steps() -> List[Step]:
     """定时步骤（含能力层自带的），按 `order` 排好。"""
-    out = list(BUILTIN_STEPS)
+    out = builtin_steps()
     for f in all_features():
         out += f.steps()
     return sorted(out, key=lambda s: (s.order, s.cmd))

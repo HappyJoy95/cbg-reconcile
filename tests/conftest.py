@@ -13,6 +13,12 @@ import os
 
 os.environ.setdefault("CBG_NO_DB_REBUILD", "1")
 
+# ⚠ 本仓库（lifehall 分支）的 `EDITION` 文件写着 lifehall，但**既有 2810 条
+#   测试全是按主包（full）写的** —— 测试默认钉 full，验生活馆行为的测试显式
+#   patch env 再 `edition.reload()`（见 tests/test_edition.py）。
+#   生产机器上没有这个 env，读到的就是 `EDITION` 文件 —— 两条路互不打扰。
+os.environ.setdefault("CBG_EDITION", "full")
+
 
 # ─────────────────── 测试起的 HTTP 服务：shutdown 别等满 0.5s ───────────────────
 #
@@ -101,6 +107,8 @@ def _guarded_session_request(self, method, url, *args, **kw):
 _requests.Session.request = _guarded_session_request
 
 
+
+
 # ─────────────────────── 测试**不许往项目根写东西** ───────────────────────
 #
 # ⚠ 这条是**用真金白银换来的**（2026-09-19 一天里踩了三次）：
@@ -122,12 +130,17 @@ _OUT_DIRS = _WATCH_DIRS          # 老名字，别再引用
 
 def _snapshot():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    got = set()
+    got = {}
     for d in _WATCH_DIRS:
         p = os.path.join(root, d)
         if os.path.isdir(p):
             for name in os.listdir(p):
-                got.add(d + "/" + name)
+                fp = os.path.join(p, name)
+                try:
+                    st = os.stat(fp)
+                    got[d + "/" + name] = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    got[d + "/" + name] = None
     return got
 
 
@@ -139,13 +152,25 @@ def pytest_sessionfinish(session, exitstatus):
     before = getattr(session, "_cbg_files_before", None)
     if before is None:
         return
-    new = sorted(_snapshot() - before)
-    if new:
+    after = _snapshot()
+    new = sorted(set(after) - set(before))
+    # ⚠ **改了已有文件也要报**（2026-09-29 加）：只盯"新增"时漏掉了一整类 ——
+    #   `health.boot(ROOT)` 的 `check_schema(apply=True)` 会把迁移真跑进开发机
+    #   真库 `out/cbg-2026.db`（加 004 迁移那次实测：schema 3→4 + 建表）。
+    #   数据没坏（跟门店自检做的事一样），但"测试不许写项目根"的口径要两边都守。
+    changed = sorted(k for k in set(after) & set(before)
+                     if after[k] and before[k] and after[k] != before[k])
+    if new or changed:
         # ⚠ 只**报**不失败（`pytest_sessionfinish` 改不了退出码）——
         #   但这条红字足够定位：说明某个测试在往项目根写东西。
         print("\n" + "!" * 70)
-        print("⚠ 测试往项目根写了新文件（大概率是忘了传临时 root）：")
-        for n in new:
-            print("    " + n)
+        if new:
+            print("⚠ 测试往项目根写了新文件（大概率是忘了传临时 root）：")
+            for n in new:
+                print("    " + n)
+        if changed:
+            print("⚠ 测试改了项目根的已有文件（查法：谁拿 root= 项目根跑了写操作）：")
+            for n in changed:
+                print("    " + n)
         print("  查法：`ls -l` 看 mtime 落在哪个测试；那个测试的 root= 要传 tmp。")
         print("!" * 70)

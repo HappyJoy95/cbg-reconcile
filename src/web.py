@@ -27,48 +27,91 @@ from .app import data_state as app_data
 from .features.store import staff as app_staff
 from .modules import auth, health, theme, timer
 from .storage import runlog
-from . import (autostart, browser, config_io, elevate, erp, mailer, pools_history,
-               pools_notify,
-               run_daily, schedule,
-               selfupdate, service, startup, upgrade, version, wecom, whatsnew)
+from . import edition as _edition
+if _edition.is_lifehall():
+    # 生活馆包：erp/report/pools_* 被物理裁掉（见 edition.PRUNE）——
+    # 走到这里的功能在 LIFEHALL_GONE 里已经 404，这里的替身只兜
+    # "每请求都路过"的调用点（role_scope/status_brief/boot）。
+    from . import (autostart, browser, config_io, elevate, mailer, run_daily,
+                   schedule, selfupdate, service, startup, upgrade, version,
+                   wecom, whatsnew)
+    # ⚠ 计划里这行原写 `from . import erp` —— 那是笔误：生活馆包里
+    #   `erp.py` 物理不存在，真那么写 import 当场 ModuleNotFoundError。
+    #   绑住 `erp` 这个名字只为 `inventory_ready()` 那种运行期引用
+    #   （`erp.describe_credentials(env)`）—— 它是哨兵，返回 {} / 用到即抛。
+    from . import erp_stub as erp
+    from .erp_stub import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired,
+                           ErpClient, ErpError, describe_credentials,
+                           describe_store_credentials, load_credentials,
+                           load_store_credentials, save_credentials,
+                           save_store_credentials)
+    pools_history = None
+    pools_notify = None
+
+    def list_reports(*a, **k):
+        return []
+
+    def load_report(*a, **k):
+        return {}
+
+    def delete_report(*a, **k):
+        return False, "生活馆版没有对账报告"
+else:
+    from . import (autostart, browser, config_io, elevate, erp, mailer,
+                   pools_history, pools_notify, run_daily, schedule,
+                   selfupdate, service, startup, upgrade, version, wecom,
+                   whatsnew)
+    from .erp import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired,
+                      ErpClient, ErpError, describe_credentials,
+                      describe_store_credentials, load_credentials,
+                      load_store_credentials, save_credentials,
+                      save_store_credentials)
+    from .report import delete_report, list_reports, load_report
 from .cbg import CbgClient, CbgError
-from .erp import (DEFAULT_ENV_FILE, STORE_ENV_FILE, ErpCaptchaRequired, ErpClient,
-                  ErpError, describe_credentials, describe_store_credentials,
-                  load_credentials, load_store_credentials, save_credentials,
-                  save_store_credentials)
 from .paths import ROOT
-from .report import delete_report, list_reports, load_report
 from . import runner
 from .runner import manager
 from .session import CbgAuthError, CbgSession
 
 WEB_DIR = ROOT / "web"
 
-#: 「**刷新**」按钮点下去**先抓哪几步新数据**（用户 2026-09-20：
-#: 「周度重点的刷新按钮，还有 pos 合规和报量查询的刷新按钮**需要单独调用一次抓取新数据**」）。
-#:
-#: ⚠ 三个页面**各要各的**，一个都不能少、也一个都不能多：
-#:   * 达成读的是**云商销售明细**（`erp_sales`）⇒ 抓云商 + 算达成；
-#:   * POS 读的是**玲珑侧**的单据（orders/payments/returns）⇒ 抓玲珑 + 算 POS；
-#:   * 双平台对比**两边都要** ⇒ 两份都抓 + 算对比。
-#: ⚠ 顺序由 `daily --steps` 里的 `Step.order` 兜底（抓在前、算在后）——
-#:   这里写的顺序只是给人看的。
-REFRESH_STEPS = {
-    "attain": ("erp-dump", "attain"),
-    # 月度生意计划读的**也是**云商销售明细（`erp_sales`）⇒ 跟达成同一条链。
-    "monthly": ("erp-dump", "plan"),
-    "pos": ("dump", "pos"),
-    "pools": ("dump", "erp-dump", "pools"),
-    # ⚠ 防护膜：**只手动**（`whens=()`），点「刷新」= 先抓云商销售导出再落快照。
-    "film": ("erp-dump", "film"),
-    # 无忧会员权益：同防护膜 —— 读 erp_sales，点刷新先抓再算。
-    "benefit": ("erp-dump", "benefit"),
-    # 权益领取 · 待领：**没有自己的 Step**（状态/匹配读接口现算），
-    # 刷新只保证 erp_sales 是新的 —— 所以只点名 `erp-dump`。
-    "claim-pending": ("erp-dump",),
-    # 串号追踪：读 erp_stock + erp_sales —— 刷新同样先抓云商。
-    "sn-trace": ("erp-dump",),
-}
+def _refresh_steps() -> dict:
+    """「**刷新**」按钮点下去**先抓哪几步新数据**（用户 2026-09-20：
+    「周度重点的刷新按钮，还有 pos 合规和报量查询的刷新按钮**需要单独调用一次抓取新数据**」）。
+
+    ⚠ 三个页面**各要各的**，一个都不能少、也一个都不能多：
+      * 达成读的是**云商销售明细**（`erp_sales`）⇒ 抓云商 + 算达成；
+      * POS 读的是**玲珑侧**的单据（orders/payments/returns）⇒ 抓玲珑 + 算 POS；
+      * 双平台对比**两边都要** ⇒ 两份都抓 + 算对比。
+    ⚠ 顺序由 `daily --steps` 里的 `Step.order` 兜底（抓在前、算在后）——
+      这里写的顺序只是给人看的。
+    ⚠ **按版收窄的口子**（生活馆版 2026-09-26）：生活馆只有「待领」那一页还在，
+      而它的数据源是**玲珑销售单** ⇒ 刷 `dump`（云商那步整个不存在）。
+    """
+    from . import edition as _edition
+    if _edition.is_lifehall():
+        return {"claim-pending": ("dump",)}
+    return {
+        "attain": ("erp-dump", "attain"),
+        # 月度生意计划读的**也是**云商销售明细（`erp_sales`）⇒ 跟达成同一条链。
+        "monthly": ("erp-dump", "plan"),
+        "pos": ("dump", "pos"),
+        "pools": ("dump", "erp-dump", "pools"),
+        # ⚠ 防护膜：**只手动**（`whens=()`），点「刷新」= 先抓云商销售导出再落快照。
+        "film": ("erp-dump", "film"),
+        # 无忧会员权益：同防护膜 —— 读 erp_sales，点刷新先抓再算。
+        "benefit": ("erp-dump", "benefit"),
+        # 权益领取 · 待领：**没有自己的 Step**（状态/匹配读接口现算），
+        # 刷新只保证 erp_sales 是新的 —— 所以只点名 `erp-dump`。
+        "claim-pending": ("erp-dump",),
+        # 串号追踪：读 erp_stock + erp_sales —— 刷新同样先抓云商。
+        "sn-trace": ("erp-dump",),
+    }
+
+
+#: ⚠ 模块导入时按**当时的版**定格一次（生产机器的版不会变）。
+#:   测试切 env 验生活馆时要调 `_refresh_steps()` 本身，别拿这个常量断言。
+REFRESH_STEPS = _refresh_steps()
 
 #: 手动「刷新」时，这两步**半小时内成功抓过就跳过**（2026-09-22 用户）。
 #: ⚠ **只挡手动刷新**（`/api/refresh`）—— 定时器那趟**不过这道闸**。
@@ -114,6 +157,14 @@ def _shown_step_cmds() -> list:
     from .features import registry
     return [s.cmd for s in registry.all_steps()
             if s.cmd not in runner.INTERNAL_STEPS]
+
+
+def _day_window(day: str) -> tuple:
+    """`YYYY-MM-DD` → 那天 CST 的 [start, end] 秒级时间戳（照 dump 的窗口口径）。"""
+    import datetime as _dt
+    d = _dt.datetime.strptime(day, "%Y-%m-%d").replace(
+        tzinfo=_dt.timezone(_dt.timedelta(hours=8)))
+    return int(d.timestamp()), int((d + _dt.timedelta(days=1)).timestamp()) - 1
 
 
 class CaptureJob:
@@ -386,6 +437,46 @@ SETUP_ALLOW = (
     "/api/setup/preview",
 )
 
+#: 生活馆版**没有的功能**的接口前缀 —— 菜单藏了不等于接口拦了（M17），
+#: 这里给"写个 curl 也进不来"的一道。
+#: ⚠ 前缀匹配用 `path == p or path.startswith(p + "/")`，
+#:   别让 `/api/report-bug` 被 `/api/report` 误伤。
+#: ⚠ 不含 `/api/timer/order`：定时器页面在 lifehall 已不显示，
+#:   拦截清单从简，别拦自己要用的（计划 Task 4 明确删掉这条）。
+LIFEHALL_GONE = (
+    "/api/erp", "/api/store-account",       # 云商（logout 除外，见下）
+    "/api/report",                          # 对账报告（report-bug 除外，见下）
+    "/api/pools", "/api/pools-notify",
+    "/api/attain", "/api/plan", "/api/pos", "/api/film", "/api/benefit",
+    "/api/inventory", "/api/sn-trace", "/api/staff",
+)
+
+#: 白名单例外（前缀在上面但**不许拦**的）。
+LIFEHALL_GONE_KEEP = (
+    "/api/store-account/logout",   # 退出登录要能清身份
+    "/api/report-bug",             # 上报 bug 是支持工具，与对账无关
+)
+
+
+def lifehall_gone(path: str) -> bool:
+    """这个接口在生活馆版里是不是"没有"。full 版恒 False。"""
+    if not _edition.is_lifehall():
+        return False
+    if any(path == k or path.startswith(k + "/") for k in LIFEHALL_GONE_KEEP):
+        return False
+    return any(path == p or path.startswith(p + "/") for p in LIFEHALL_GONE)
+
+
+def _notify_preferences(root=None) -> dict:
+    """返回设置页可见的推送偏好；生活馆仅列已接入推送的功能和通道。"""
+    from .modules.notify import prefs as push_prefs
+    values = push_prefs.all_prefs(root)
+    if not _edition.is_lifehall():
+        return values
+    allowed = set(_edition.LIFEHALL_PUSH_FEATURES)
+    allowed.update("plat:" + key for key in push_prefs.PLATFORMS)
+    return {key: value for key, value in values.items() if key in allowed}
+
 
 #: 「预览模式」标记 —— `.secrets/preview.json`（**这台机器自己的**，自更新不碰）。
 #:
@@ -440,6 +531,9 @@ def setup_state(app) -> dict:
     ⚠ 判据**不发网络请求**：这个函数每个 API 请求都会调一次，
        每次都去 ping 一下华为的话，控制台会被自己拖死。
     """
+    if _edition.is_lifehall():
+        # 生活馆只认玲珑一步（云商那步整个不存在）—— 见下面那个函数。
+        return _setup_state_lifehall(app)
     v = config_io.pick(config_io.load_raw(app.config_path))
     store = describe_store_credentials(store_path(app))
     prof = config_io.store_profile(v, app.root)
@@ -494,6 +588,38 @@ def setup_state(app) -> dict:
         # 缺哪一步 —— 前端据此决定登录页停在第几步
         "need": ("" if (erp_ok and (ling_ok or prev))
                  else ("erp" if not erp_ok else "linglong")),
+    }
+
+
+def _setup_state_lifehall(app) -> dict:
+    """生活馆登录门禁：**只有玲珑一步，有会话文件就放行**（用户 2026-09-26 定）。
+
+    ⚠ 不卡自检（`check_ok`）—— 用户原话"抓到真实登录数据后就给登录"，
+      抓取流程本身已经验过会话真假（`_capture_worker` 的 verify），这里再卡
+      一道只会把"存好了但没点自检"的人挡在门外。
+
+    ⚠ **预览（跳过）也放行**（用户 2026-09-30：「登录页加个跳过按钮，让我直接进入」）——
+      早先"生活馆没有跳过看界面这回事"那条作废。语义跟 full 版一模一样：
+      `set_preview` 只写 `.secrets/preview.json`、**只放行界面**，
+      要会话的抓取/导入照常报错，顶上一直挂着预览横幅。
+    """
+    v = config_io.pick(config_io.load_raw(app.config_path))
+    prof = config_io.store_profile(v, app.root)
+    s = app.session_info()
+    ling_ok = bool(s.get("exists"))
+    ling_why = "已抓到玲珑会话" if ling_ok else "还没抓到玲珑会话"
+    prev = preview_on(app)
+    return {
+        "ready": bool(ling_ok or prev),
+        "lifehall": True,
+        "preview": bool(prev and not ling_ok),
+        # 还没会话 ⇒ 登录页上那个「跳过」按钮随时能用（预览开没开都给）
+        "preview_available": bool(not ling_ok),
+        "erp": {"ok": True, "why": "生活馆版没有云商这一步", "username": "",
+                "has_token": False},
+        "linglong": {"ok": bool(ling_ok), "why": ling_why},
+        "profile": prof,
+        "need": ("" if (ling_ok or prev) else "linglong"),
     }
 
 
@@ -647,6 +773,9 @@ def role_scope(app) -> dict:
     except Exception:                                          # noqa: BLE001
         prof = {}
     try:
+        # 生活馆：这里拿到的是 `erp_stub.describe_store_credentials`（恒回 `{}`）
+        # ⇒ acc="" ⇒ 下面条按账号认区长的判定自然跳过（生活馆没有
+        #   managers.yaml，PRUNE 里裁了）—— 所以**不用再加 edition 分支**。
         acc = str(describe_store_credentials(store_path(app)).get("username") or "").strip()
     except OSError:
         acc = ""
@@ -776,12 +905,17 @@ def _build_page_rules() -> dict:
     ⚠ 左下角那几项不是功能模块 ⇒ 手写在 `FOOT_PAGES`。
     """
     from .features import registry
+    from . import edition as _edition
     out = {}
     for f in registry.all_features():
         out[f.key] = f.types or ""
         for s in f.children:
             out[s.key] = s.types or f.types or ""
     out.update(FOOT_PAGES)
+    if _edition.is_lifehall():
+        # 生活馆只有一种身份（门店）：保留名单内的页面全放行，
+        # 其余页面连键都不给 —— 前端 applyProfile 照 pages 渲染，零 if(edition)。
+        return {k: "" for k in out if k in _edition.LIFEHALL_PAGES}
     return out
 
 
@@ -1014,6 +1148,13 @@ def _capture_worker(app: "App", headless: bool):
             老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
             实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
             """
+            if _edition.is_lifehall():
+                # 生活馆：身份从会话认（不带 storeCode 查一次订单 → 店码）。
+                # 假会话死在这儿（探测的 authfail 态必须拦），0 行的新店放行
+                # 但说清 —— 三态判据只有 store_identity 一份，别在这儿另写。
+                from . import store_identity
+                return store_identity.verify_with_identity(
+                    sess, app.root, app.config_path, emit=job.say)
             try:
                 ok, why = CbgClient(sess, store_code=store, timeout=25).ping()
                 return ok, why
@@ -1045,7 +1186,20 @@ def _capture_worker(app: "App", headless: bool):
                                        state_root=app.root,
                                        on_need=lambda what: setattr(job, "need", what))
         p = sess.save(app.session_path(cfg))              # 只有自检过了才走到这里
-        ok, msg = CbgClient(sess, store_code=store).ping()
+        if _edition.is_lifehall():
+            # 生活馆：认店 —— verify 里可能已经写过店码（而 cfg 是开跑时读的
+            # 旧的，会话落在 cbg-default.json），这里补写 + 挪会话文件名 + 播报。
+            # 认不出来也不拦：登录判据是"有会话文件"，下面照常自检。
+            from . import store_identity
+            info = store_identity.identify(app.root, app.config_path, sess)
+            store = info.get("store_code") or store       # 下面那次自检按店码打
+            job.say(("认店：%s" % info.get("store_name")) if info.get("store_name")
+                    else info.get("why") or ("店码 %s" % info.get("store_code", "")))
+            # ⚠ 没店码时**别 ping**（store_detail 必报"没给 storeCode"）——
+            #   0 订单新店会被显示成"自检没过"。判据见 check_after_save。
+            ok, msg = store_identity.check_after_save(sess, store)
+        else:
+            ok, msg = CbgClient(sess, store_code=store).ping()
         app.record_check(sess, ok, msg)                   # 记下这次自检，界面要显示时间
         job.say(f"已保存 → {p.name}")
         job.state = "ok" if ok else "saved"
@@ -1243,6 +1397,23 @@ class App:
         def add(label, value, kind=""):
             rows.append({"label": label, "value": value, "kind": kind})
 
+        if _edition.is_lifehall():
+            # Lifehall 没有云商、推送和定时器；悬浮状态只显示玲珑侧信息。
+            # 不要顺路计算通用版 profile（会读云商登录人），也不加载 mailer/
+            # wecom/timer 状态，否则被裁掉的设置会在这里报错。
+            st = _setup_state_lifehall(self)
+            profile = st.get("profile") or {}
+            name = str(profile.get("erp_name") or "").strip()
+            if name:
+                add("门店名称", name)
+            code = str(profile.get("store_code") or v.get("store_code") or "").strip()
+            if code:
+                add("华为门店编码", code)
+            sess = st.get("linglong") or {}
+            add("玲珑会话", "已导入" if sess.get("ok") else "未导入",
+                "ok" if sess.get("ok") else "bad")
+            return {"rows": rows}
+
         # ---- 这台电脑是哪家店
         erp_name = (v.get("erp_store_name") or "").strip()
         add("门店名称", erp_name or "未配置", "" if erp_name else "bad")
@@ -1265,14 +1436,19 @@ class App:
         #     而 `describe_credentials` 按设计**只读指定的那个文件**，
         #     所以"这个文件里没有" ≠ "没账号"（真账号在回落链下一站）。
         #     现在四种来源**一律显示「已配置」**，靠 `kind` 上色区分好坏就够了。
-        d = describe_credentials(self.erp_env_file())
-        if d.get("builtin") or d.get("has_password") or d.get("used_from"):
-            add("公司云商账号", "已配置", "ok")
-        elif d.get("has_token"):
-            # 只有 token 没密码：现在能用，但 token 一过期就续不上
-            add("公司云商账号", "只有 token，没存密码 —— 过期后续不上", "warn")
-        else:
-            add("公司云商账号", "没配置", "bad")
+        #
+        #   生活馆版：这一组**整段不画** —— 包里没有 `erp.py`（走的是
+        #   `erp_stub`，`describe_credentials` 恒回 `{}`），照原逻辑会画成
+        #   「公司云商账号：没配置 bad」，而生活馆压根没有云商这一步。
+        if not _edition.is_lifehall():
+            d = describe_credentials(self.erp_env_file())
+            if d.get("builtin") or d.get("has_password") or d.get("used_from"):
+                add("公司云商账号", "已配置", "ok")
+            elif d.get("has_token"):
+                # 只有 token 没密码：现在能用，但 token 一过期就续不上
+                add("公司云商账号", "只有 token，没存密码 —— 过期后续不上", "warn")
+            else:
+                add("公司云商账号", "没配置", "bad")
 
         # ---- 玲珑（华为）会话
         s = self.session_info()
@@ -1912,7 +2088,7 @@ class App:
         }
 
     def claim_pending(self) -> dict:
-        """「小工具 · 权益领取 · 待领清单」—— erp_sales 匹配 + 状态 join + **滤店**。
+        """「小工具 · 权益领取 · 待领清单」—— 按版本读销售池、合状态并滤店。
 
         ⚠ 门禁：**登录**（接口不在 `SETUP_ALLOW`）+ **`role_scope()` 滤店**
           —— 门店账号只能读到本店；区长所辖；平台全部（坑 18）。
@@ -2086,6 +2262,168 @@ class App:
             # 已领取时把 ok 提成 true？ —— 不：前端要能区分文案。
             # 只加 already_claimed + local_marked，失败态仍走 else 分支渲染。
         return res
+
+    # ────────────────────────── 收银（生活馆利润核算录入端，2026-09-29）────
+    # 开发目标：`.dsh/docs/2026-09-29-生活馆收银界面-开发目标.md`
+    # ⚠ 身份门禁在 **dispatch 那一侧整块做**（`/api/cashier` 前缀 + role != store
+    #   → 403，见下面路由块）—— 收银是**门店本机**的操作，区长/平台没有
+    #   "替门店记一笔"这回事；这里只管业务，不重复判身份。
+
+    #: 政策刷新互斥锁（类属性）：这条会**阻塞到人工登录完成**（最长 10 分钟），
+    #  双击开两个登录窗是最坏的体验 —— 第二次直接回"正在更新"。
+    _cashier_policy_lock = threading.Lock()
+
+    #: 一键导入互斥锁（类属性，**别共用 policy 锁**）：拉单是网络+写库的慢活，
+    #  双击 = 两个导入同时写同一个库 —— 第二次直接回"正在导入"。
+    _cashier_import_lock = threading.Lock()
+
+    def cashier_entries(self, day: str = "") -> dict:
+        """当日流水 + 销售员历史 + 政策新鲜度 —— 页面初始化一次 GET 全带回。"""
+        from .features.cashier import store as cashier_store
+        try:
+            return {"ok": True, "day": str(day or ""),
+                    "rows": cashier_store.list_entries(self.root, day=day),
+                    "sellers": cashier_store.sellers(self.root),
+                    "policy": cashier_store.policy_meta(self.root)}
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_entry_save(self, body: dict) -> dict:
+        """录/改一笔（`body.id` 有值 = 改那条）。业务校验的 why 原样传给界面。"""
+        from .features.cashier import store as cashier_store
+        body = body or {}
+        try:
+            return cashier_store.save_entry(self.root, body, entry_id=body.get("id"))
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_entry_delete(self, entry_id) -> dict:
+        from .features.cashier import store as cashier_store
+        try:
+            return cashier_store.delete_entry(self.root, entry_id)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_lookup(self, code: str) -> dict:
+        """按商品编码反查政策 —— `found=false` **不是错误**（政策表可能还没刷新）。"""
+        from .features.cashier import store as cashier_store
+        try:
+            row = cashier_store.lookup(self.root, code)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+        return {"ok": True, "found": row is not None, "row": row}
+
+    def cashier_policy_refresh(self) -> dict:
+        """从 pmall 拉最新「价格与返利政策」落库 —— **手动触发**（用户定：不做定时）。
+
+        会话走 A 案（`pmall.ensure_session`）：活窗 → jar → **弹窗人工登录**
+        （uniportal 有短信二次验证，必要时人来一次）。所以这条会**阻塞到登录
+        完成**（最长 10 分钟）—— 前端按钮禁用 + 文案说清，后端类锁互斥。
+        """
+        log = []
+        if not self._cashier_policy_lock.acquire(blocking=False):
+            return {"ok": False,
+                    "why": "政策表正在更新（可能在等登录窗），等它跑完再点"}
+        try:
+            from . import pmall
+            from .features.cashier import store as cashier_store
+            sess = pmall.ensure_session(self.root, say=log.append)
+            data, rec = pmall.fetch_policy(sess, say=log.append)
+            rows = pmall.parse_policy(data)
+            res = cashier_store.save_policy(self.root, rows)
+            if not res.get("ok"):
+                return {"ok": False, "why": res.get("why") or "落库失败", "log": log}
+            return {"ok": True, "rows": res.get("rows"),
+                    "fetched_at": res.get("fetched_at"),
+                    "file": rec.get("fileName") or "", "log": log}
+        except Exception as e:                                     # noqa: BLE001
+            # `PmallError` 的文案就是给人看的（含"请人工登录"那类），原样出去
+            return {"ok": False,
+                    "why": str(e) or ("%s: %s" % (type(e).__name__, e)),
+                    "log": log}
+        finally:
+            self._cashier_policy_lock.release()
+
+    def cashier_import(self, body: dict) -> dict:
+        """一键导入：拉**当天**玲珑销售单合并进库，再生成当日卡片。
+
+        两段分开的原因：合并 orders 是网络+写库（慢、会话会掉），
+        生成卡片是纯读库（幂等、好测）—— 中途失败重按一次即可（external_id 挡重）。
+        会话掉了把 CbgAuthError 的原文丢出去（跟其它 CBG 接口同一口径）。
+        """
+        import datetime
+        from . import dump as _dump
+        from .features.cashier import store as cashier_store
+        if not self._cashier_import_lock.acquire(blocking=False):
+            return {"ok": False, "why": "正在导入，等它跑完再点"}
+        try:
+            day = str((body or {}).get("day") or "").strip()
+            try:
+                dt = datetime.datetime.strptime(day, "%Y-%m-%d")
+            except ValueError:
+                return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
+            day = dt.strftime("%Y-%m-%d")          # "2026-9-3" → "2026-09-03"
+            path = cashier_store.ensure(self.root)
+            cfg = config_io.load_raw(self.config_path)
+            start, end = _day_window(day)
+            conn = _dump.connect(path)
+            try:
+                conn.executescript(_dump.SCHEMA)
+                client = self.cbg_client()
+                _dump.load_orders(conn, client, cfg.get("store_code") or None,
+                                  start, end, verbose=False)
+                conn.commit()
+            except (CbgAuthError, CbgError) as e:
+                return {"ok": False, "why": str(e) or "会话失效，先抓一次会话"}
+            except Exception as e:                                 # noqa: BLE001
+                return {"ok": False,
+                        "why": str(e) or type(e).__name__}
+            finally:
+                conn.close()
+            return cashier_store.entries_from_orders(self.root, day)
+        finally:
+            self._cashier_import_lock.release()
+
+    def cashier_exclude(self, entry_id) -> dict:
+        from .features.cashier import store as cashier_store
+        try:
+            return cashier_store.exclude_entry(self.root, entry_id)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": str(e) or type(e).__name__}
+
+    def cashier_import_settings(self, body: dict = None, save: bool = False) -> dict:
+        """黑名单读写。⚠ save 失败要转 {ok:False, why} —— import_cfg.save
+        有意抛 OSError（跟 timer/store 相反），照同层 handler 的模式在这层接住。"""
+        from .features.cashier import import_cfg
+        if save:
+            words = (body or {}).get("blacklist")
+            if not isinstance(words, list):
+                return {"ok": False, "why": "blacklist 得是列表"}
+            try:
+                return import_cfg.save(self.root, words)
+            except OSError as e:
+                return {"ok": False, "why": "写不进去：%s" % e}
+        return {"ok": True, "blacklist": import_cfg.load(self.root)}
+
+    def cashier_commit(self, body: dict) -> dict:
+        """「保存并记录」—— 把**那天**的暂存行批量转成已入库（两段式的第二段）。"""
+        from .features.cashier import store as cashier_store
+        day = str((body or {}).get("day") or "").strip()
+        try:
+            return cashier_store.commit_entries(self.root, day)
+        except Exception as e:                                     # noqa: BLE001
+            return {"ok": False, "why": "%s: %s" % (type(e).__name__, e)}
+
+    def cashier_export(self, body: dict = None, who: str = "") -> dict:
+        """当月导出（销售表 + 现行政策表两个 sheet）→ `out/exports/` 落盘。
+
+        月份缺省用**今天所在的月**（前端一般会点名传，这里只是别因为漏传就 400）。
+        """
+        from .features.cashier import exporter
+        month = str((body or {}).get("month") or "").strip()
+        if not month:
+            month = time.strftime("%Y-%m")
+        return exporter.export(self.root, month, who=who)
 
     def plan(self) -> dict:
         """「月度生意计划」的数据 —— **纯读盘，一个网络请求都不发**。
@@ -3074,6 +3412,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/boot" and method == "GET":
             return self._json(app.boot_state())
 
+        # ---- 生活馆版：被裁功能的接口一律 404（M17 教训：菜单藏了不等于接口拦了）
+        #
+        # ⚠ 放在 `SETUP_ALLOW` 门禁**之前**：404 要先于"还没登录好"的 403，
+        #   否则未登录时 curl 一个云商接口会得到误导性的 403。
+        #   （登录页调的 /api/setup、/api/session 都不在 LIFEHALL_GONE，顺序无影响。）
+        if lifehall_gone(path):
+            return self._json({"error": "生活馆版没有这个功能"}, 404)
+
         # 这个身份的权限（**每个接口共用一份判据** —— 见 `role_scope`）。
         # ⚠ 放在探活 / 启动自检那两条 early-return **之后**：那两条登录页也要调，
         #   没必要为它们读一遍配置和凭据（实测这一算 ~11ms，概览页 30 秒轮一次）。
@@ -3301,21 +3647,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(res, 200 if res.get("ok") else 404)
 
         if path == "/api/notify-pref" and method == "GET":
-            from .modules.notify import prefs as push_prefs
-            return self._json({"ok": True, "prefs": push_prefs.all_prefs(app.root)})
+            return self._json({"ok": True, "prefs": _notify_preferences(app.root)})
 
         if path == "/api/notify-pref" and method == "PUT":
             from .modules.notify import prefs as push_prefs
             body = self._read_json() or {}
             key = str(body.get("key") or "").strip()
             on = bool(body.get("enabled"))
+            if (_edition.is_lifehall() and not key.startswith("plat:")
+                    and key not in _edition.LIFEHALL_PUSH_FEATURES):
+                return self._json({"ok": False,
+                                   "error": "生活馆版没有这个业务推送项"}, 400)
             try:
                 if key.startswith("plat:"):
-                    prefs = push_prefs.set_platform(key[5:], on, app.root)
+                    push_prefs.set_platform(key[5:], on, app.root)
                 else:
-                    prefs = push_prefs.set_enabled(key, on, app.root)
+                    push_prefs.set_enabled(key, on, app.root)
             except ValueError as e:
                 return self._json({"ok": False, "error": str(e)}, 400)
+            prefs = _notify_preferences(app.root)
             return self._json({"ok": True, "prefs": prefs,
                                "message": "%s：推送已%s"
                                           % (prefs[key]["label"],
@@ -3453,6 +3803,74 @@ class Handler(BaseHTTPRequestHandler):
                 code = 403 if res.get("forbidden") else 400
                 return self._json(res, code)
             return self._json(res)
+        # **收银**（生活馆利润核算录入端，2026-09-29）—— 流水 CRUD + 编码反查 +
+        # 政策手动刷新。
+        # ⚠ **整块一个门禁**：收银是**门店本机**的操作 —— 区长/平台一律 403
+        #   （跟 `staff.write` 同一档；M17 红线：每个接口都要有 `forbid` 那一行，
+        #   这里用前缀块一次覆盖 `/api/cashier/*`，漏不掉任何子路径）。
+        # ⚠ 前面已经过了「生活馆 404」和「登录 403」两道，这里只管身份。
+        if path.startswith("/api/cashier"):
+            if scope.get("role") != "store":
+                return self._json(
+                    forbid(scope, "用收银", "收银是门店本机的操作"), 403)
+            if path == "/api/cashier/entries" and method == "GET":
+                res = app.cashier_entries((query.get("day") or [""])[0])
+                if not res.get("ok"):
+                    return self._json({"error": res.get("why") or "读取失败"}, 400)
+                return self._json(res)
+            if path == "/api/cashier/entry-save" and method == "POST":
+                res = app.cashier_entry_save(self._read_json() or {})
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "保存失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/entry-delete" and method == "POST":
+                res = app.cashier_entry_delete((self._read_json() or {}).get("id"))
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "删除失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/lookup" and method == "GET":
+                res = app.cashier_lookup((query.get("code") or [""])[0])
+                if not res.get("ok"):
+                    return self._json({"error": res.get("why") or "反查失败"}, 400)
+                return self._json(res)
+            if path == "/api/cashier/policy-refresh" and method == "POST":
+                res = app.cashier_policy_refresh()
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "更新失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/import" and method == "POST":
+                res = app.cashier_import(self._read_json() or {})
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "导入失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/exclude" and method == "POST":
+                res = app.cashier_exclude((self._read_json() or {}).get("id"))
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "排除失败"), 400)
+                return self._json(res)
+            if path == "/api/cashier/import-settings" and method == "GET":
+                return self._json(app.cashier_import_settings())
+            if path == "/api/cashier/import-settings" and method == "PUT":
+                res = app.cashier_import_settings(self._read_json() or {}, save=True)
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "保存失败"), 400)
+                return self._json(res)
+            # 「保存并记录」—— 当天暂存 → 已入库（两段式第二段）
+            if path == "/api/cashier/commit" and method == "POST":
+                res = app.cashier_commit(self._read_json() or {})
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "入库失败"), 400)
+                return self._json(res)
+            # 当月导出（销售表 + 政策表）—— 落盘后前端拿 file 触发浏览器下载
+            if path == "/api/cashier/export" and method == "POST":
+                res = app.cashier_export(
+                    self._read_json() or {},
+                    who=scope.get("who") or scope.get("account") or "")
+                if not res.get("ok"):
+                    return self._json(dict(res, error=res.get("why") or "导出失败"), 400)
+                return self._json(res)
+            # 块内没登记的子路径 —— fail closed（别落到下面当普通 404 糊过去）
+            return self._json({"error": "接口不存在"}, 404)
         # **小工具 · 串号追踪**（2026-09-23）—— 86码/SN → 库存+销售全程
         if path == "/api/sn-trace" and method == "GET":
             code = (query.get("code") or [""])[0]
@@ -3677,6 +4095,13 @@ class Handler(BaseHTTPRequestHandler):
             sess = CbgSession.from_curl(text)              # 解析失败 → 409
             p = sess.save(app.session_path())
             result = {"saved": str(p), "cookies": sess.describe()}
+            if _edition.is_lifehall():
+                # 认店放在自检**之前**：写完 store_code、挪完会话文件，下面
+                # _ping_result 才按得到店码（它每次现读配置）。认不出店也照回
+                # saved —— 登录判据是"有会话文件"，identify 自己也不往外抛。
+                from . import store_identity
+                result["identify"] = store_identity.identify(
+                    app.root, app.config_path, sess)
             try:
                 result.update(self._ping_result(app))
             except (CbgAuthError, CbgError) as e:
@@ -3685,6 +4110,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/session/ping" and method == "POST":
             return self._json(self._ping_result(app))
+
+        # 手输门店编码（用户 2026-09-27）：认店探测在这台机器上一直 403，
+        # 抓取卡死在 verify —— 人把店码给了，identify 就跳过探测直接 ping。
+        # ⚠ 在 `/api/session` 前缀下 ⇒ **登录前也能调**（登录页上那个输入框要能用，
+        #   SETUP_ALLOW 是前缀匹配）。判据只在 store_identity.set_store_code 一份。
+        if path == "/api/session/store-code" and method in ("PUT", "POST"):
+            if not _edition.is_lifehall():
+                return self._json({"error": "当前版本不支持手输门店编码"}, 404)
+            body = self._read_json()
+            from . import store_identity
+            res = store_identity.set_store_code(
+                app.root, app.config_path, body.get("store_code"))
+            if not res.get("ok"):
+                return self._json({"error": res.get("error") or "写不进去"}, 400)
+            # 认店/挪名已经做完了，顺手把会话状态带上 —— 前端一次刷新到位
+            res["session"] = app.session_info()
+            return self._json(res)
 
         if path == "/api/session" and method == "DELETE":
             p = app.session_path()

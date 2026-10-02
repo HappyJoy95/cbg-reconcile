@@ -307,6 +307,12 @@ def store_profile(values: dict, root) -> dict:
     （`dump` 抓的就是玲珑数据）三处都要问同一个问题 ——
     各写一份的话，迟早出现"菜单里藏了但任务还在跑"这种自相矛盾。
     """
+    # 生活馆（2026-09-26）：名单里可能根本没这家店（认店只拿到店码）—— 但它
+    # **一定走玲珑**（待领清单的数据源就是玲珑销售单）。不置 True 的话 run_daily
+    # 会把 dump 按掉，待领清单从此没数，且日志只说"这家店不走玲珑"，极难查。
+    # ⇒ 下面三个出口的 `needs_linglong` 统一走这一档（full 版行为逐字不变）。
+    # 函数内 import：本文件是纯函数库，避免在文件头引入对 edition 的模块级依赖。
+    from . import edition as _edition
     # ⚠ 平台岗：**不绑某一家店**。菜单全开、但不要求玲珑会话 ——
     #   玲珑会话是按门店编码存的，平台岗本来就不属于任何一家店。
     if str(values.get("platform") or "").strip().lower() in ("1", "true", "yes"):
@@ -317,7 +323,8 @@ def store_profile(values: dict, root) -> dict:
         return {"erp_name": PLATFORM_STORE, "huawei_code": "", "marker": "",
                 "kind": PLATFORM_KIND,
                 "huawei_name": "", "in_roster": False, "platform": True,
-                "needs_linglong": False, "show_all": True, "type": "platform"}
+                "needs_linglong": _edition.is_lifehall(),
+                "show_all": True, "type": "platform"}
 
     name = (values.get("erp_store_name") or "").strip()
     hit = find_store(name, root) if name else None
@@ -349,7 +356,8 @@ def store_profile(values: dict, root) -> dict:
                 # ⚠ 按名字认时名单里**没命中**就是没命中，别写死 True ——
                 #   `in_roster` 表达的是"名单里找得到这家店"，写假了下一个读它的人会被骗。
                 "in_roster": bool(hit), "platform": True,
-                "needs_linglong": False, "show_all": True, "type": "platform"}
+                "needs_linglong": _edition.is_lifehall(),
+                "show_all": True, "type": "platform"}
     # ⚠ **名单优先**，配置里的只是"名单里没这家店"时的兜底。
     #
     #   反过来写（配置优先）会让**旧值一直赢**：2026-09-18 实测踩到 ——
@@ -366,7 +374,7 @@ def store_profile(values: dict, root) -> dict:
         "huawei_name": (hit or {}).get("huawei_name") or "",
         "in_roster": bool(hit),
         #: 有没有串号标识 —— **有就要走玲珑**（那 14 家体验店）
-        "needs_linglong": bool(marker),
+        "needs_linglong": (True if _edition.is_lifehall() else bool(marker)),
         "platform": False,
         #: 菜单要不要**全开**（平台岗全开）
         "show_all": False,

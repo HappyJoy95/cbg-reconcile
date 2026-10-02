@@ -640,7 +640,18 @@ def selfcheck(conn) -> dict:
 
 
 def load_store(conn, client: CbgClient, store_code: str) -> dict:
-    d = client.store_detail()
+    """门店档案 → `stores` 表。**抓不到就跳过，绝不掐死抓单主线**。
+
+    ⚠ `store-detail` 按角色挑人（2026-09-29 测试机定案，同 `ping` 的订单回退
+      理由）：非店长账号回「用户没有对应的角色 店长」—— 而 `stores` 只是
+      **锦上添花**（打印一行 + 档案查询），不该让它把每日抓取整个弄挂。
+      会话真死的话下一步抓订单会以 `CbgAuthError` 报出来 —— 死在该死的地方。
+    """
+    try:
+        d = client.store_detail()
+    except (CbgError, CbgAuthError) as e:
+        print("门店档案这次没抓到（不影响抓单）：%s" % e, flush=True)
+        return {}
     put(conn, "stores", {
         "store_code": d.get("storeNo") or store_code, "store_name": d.get("storeName"),
         "abbreviation": d.get("abbreviation"), "address": d.get("address"),
@@ -1010,7 +1021,8 @@ def main(argv=None) -> int:
     _run_migrations(conn)              # 结构迁移（幂等；"这个库是第几版"的唯一权威）
     try:
         d = load_store(conn, client, args.store_code)
-        print("门店：%s %s" % (d.get("storeNo"), d.get("storeName")), flush=True)
+        if d:                      # 抓到才打印；跳过时 load_store 已经说清原因
+            print("门店：%s %s" % (d.get("storeNo"), d.get("storeName")), flush=True)
 
         media_n = 0
         if not args.skip_medias:

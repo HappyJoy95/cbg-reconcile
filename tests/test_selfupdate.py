@@ -429,11 +429,27 @@ class TestWhitelist(unittest.TestCase):
 
         self.assertIn("--exclude 'agent.md'", script, "打包脚本没排除 agent.md")
         self.assertIn(
-            "for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md;",
+            "for _doc in README.md 设计文档.md 运维手册.md AGENTS.md agent.md docs;",
             script,
             "自检断言的名单和 --exclude 对不上 —— 排除项哪天被删了没人会发现")
         self.assertIn("agent.md", selfupdate.NEVER_TOUCH,
                       "自更新也该不碰 agent.md")
+
+    def test_docs目录被挡在两条路外面(self):
+        """`docs/`（根目录开发计划笔记，2026-09-29 加）跟 `.dsh/` 同待遇 ——
+        打包排除 + 自检反查 + `NEVER_TOUCH` 三处对得上。
+
+        ⚠ 它现在还没入 git（superpowers 的会话产物），但**没被 ignore** ——
+        哪天有人顺手 commit 了，zipball 就会带着它，没有这道镜子的话
+        自更新会把开发笔记铺到门店目录里。"""
+        tools = Path(__file__).resolve().parent.parent / "tools"
+        if not tools.is_dir():
+            self.skipTest("装出来的包里没有 tools/（打包脚本不进包）—— 这条只在仓库里跑")
+        script = (tools / "build_package.sh").read_text(encoding="utf-8")
+        self.assertIn("--exclude '/docs/'", script, "打包脚本没排除 docs/")
+        self.assertIn("docs;", script, "自检的禁入名单里没有 docs")
+        self.assertIn("docs", selfupdate.NEVER_TOUCH,
+                      "自更新也该不碰 docs/（.dsh 同款理由：明说 + 两处对得上）")
 
     def test_never_touch_accepts_a_top_level_file(self):
         """光把 `agent.md` 写进黑名单不够 —— 要验它**真的**被拦下来。

@@ -4,6 +4,22 @@
 
 * { box-sizing: border-box; }
 
+/* lifehall：三个工具平铺为一级入口；左下角只留主题与玲珑授权。 */
+.nav-lifehall { display: none; }
+body.lifehall-edition .nav-lifehall { display: block; }
+body.lifehall-edition .nav-item[data-tab="tools"]:not(.nav-lifehall) { display: none; }
+body.lifehall-edition #side-foot [data-foot="account"],
+body.lifehall-edition #side-foot [data-foot="update"],
+body.lifehall-edition #side-foot [data-foot="general"],
+body.lifehall-edition #side-foot [data-foot="stores"],
+body.lifehall-edition #side-foot [data-foot="scheduler"] { display: none; }
+.lifehall-weather-row { display: none; }
+body.lifehall-edition .lifehall-weather-row {
+  display: block; padding: 5px 6px 2px; color: var(--muted);
+  font-size: 10.5px; line-height: 1.35; white-space: nowrap;
+}
+#lifehall-weather[hidden] { display: none; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -915,11 +931,14 @@ body.setup-locked .shell { visibility: hidden; }
 /* ───────────────────────── 提示 ───────────────────────── */
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: var(--ink-2); color: var(--on-brand); padding: 10px 18px; border-radius: 10px;
+  background: var(--ink-2); color: var(--ink-text); padding: 10px 18px; border-radius: 10px;
   font-size: 13.5px; box-shadow: var(--shadow-toast); z-index: 99; max-width: 80vw;
 }
-.toast.bad { background: var(--bad); }
-.toast.ok { background: var(--ok); }
+/* ⚠ 字色分两套：中性 toast 跟 ink 底配对（--ink-text）；
+   ok/bad 的底是**状态色**，字单独钉 --on-brand（暮山蓝里 --on-brand 是深字、
+   --ok/--bad 是亮底，反过来就又撞了）。 */
+.toast.bad { background: var(--bad); color: var(--on-brand); }
+.toast.ok { background: var(--ok); color: var(--on-brand); }
 
 /* 横幅右边那个「收起来」—— 别让它跟着文字换行跑到下一行去 */
 .banner-x { margin-left: auto; flex: 0 0 auto; }
@@ -1909,3 +1928,125 @@ tr.dist-drill table { font-size: 12.5px; }
 tr.dist-drill table th { background: transparent; }
 tr.dist-drill tbody tr:hover { background: transparent; }
 .dist-drill-neg { color: var(--bad); }
+
+/* lifehall：手输门店编码（登录页与玲珑授权页共用 #session-box 里这一块） */
+.store-code-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.store-code-box b { white-space: nowrap; }
+.store-code-box input {
+  width: 150px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.store-code-box .hint { flex: 1 1 220px; }
+
+
+/* ──────────────────────── 收银 · 订单卡（2026-09-30） ────────────────────────
+   布局照华为 POS 参考图：吸顶「录入+汇总」，下面每笔订单一张卡（左数据右信息栏）。
+   ⚠ 滚动容器是窗口本身（main / subpanel 都没有 overflow），所以 sticky top:0
+   是贴视口顶 —— 别给这俩容器加 overflow，加了吸顶就只在容器内生效。 */
+.cashier-top { position: sticky; top: 0; z-index: 20;
+  background: var(--bg); padding-bottom: 6px; }
+.cashier-scan { display: flex; gap: 8px; margin-bottom: 10px; }
+.cashier-scan input { flex: 1; font-size: 15px; padding: 9px 12px; }
+.cashier-summary { display: flex; align-items: center; gap: 16px;
+  font-size: 13.5px; color: var(--muted); }
+.cashier-summary b { color: var(--text); font-size: 15px; }
+.cashier-summary .cs-date { font-weight: 650; color: var(--text); }
+.cashier-summary .cs-gap { flex: 1; }
+.cashier-blacklist { display: flex; align-items: center; gap: 10px; }
+.cashier-blacklist label { min-width: 0; display: flex; align-items: center; gap: 8px; }
+
+.cashier-cards { display: flex; flex-direction: column; gap: 12px; }
+/* 卡片 HTML 是 `class="cashier-card card"`：card 自带 padding:18px/margin-bottom，
+   两区分栏要贴边 ⇒ padding 归零由本类覆盖（后写的选择器赢，同特异性）。 */
+.cashier-card { display: flex; gap: 0; padding: 0; overflow: hidden;
+  position: relative; margin-bottom: 0; }
+.cc-main { flex: 1 1 auto; min-width: 0; padding: 14px 16px; }
+.cc-time { font-size: 12.5px; color: var(--muted); }
+.cc-name { font-size: 15.5px; font-weight: 650; margin: 2px 0 6px; }
+.cc-meta { font-size: 12.5px; color: var(--muted); line-height: 1.7;
+  word-break: break-all; }
+.cc-amount-row { display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 8px; }
+.cc-amount-row .cc-qty { font-size: 13px; color: var(--muted); }
+.cc-amount-row .cc-amount { font-size: 21px; font-weight: 700; }
+.cc-acc { margin-top: 10px; border-top: 1px dashed var(--line);
+  padding-top: 8px; font-size: 13px; }
+.cc-acc-row { display: flex; justify-content: space-between; gap: 12px;
+  padding: 2px 0; }
+/* 左上角钱区（用户第 3 条）：应收 = Σ商品（编辑态只读输入）；实收 = Σ支付渠道 */
+.cc-money { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 6px 0 4px; }
+.cc-money .cm-tag { font-size: 13px; color: var(--muted); }
+.cc-money input { width: 8.5em; font-size: 18px; font-weight: 700; }
+.cc-money .cc-amount { font-size: 21px; font-weight: 700; }
+.cc-money .cm-paid { font-size: 13px; color: var(--muted); }
+.cc-money .cm-paid b { color: var(--text); font-size: 15px; }
+.cc-money .cc-qty { font-size: 13px; color: var(--muted); }
+/* 商品行 / 配件编辑行**共用一套栅格**（用户第 2 条）：
+   配件名对齐商品名（列 1）、金额对齐商品金额（列 5）、删对齐（列 7） */
+.cc-prod { display: grid; gap: 6px; align-items: center; padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+  grid-template-columns: minmax(9em, 1fr) 7em 8em 4.5em 6em 7.5em auto; }
+.cc-prod input { min-width: 0; }
+.cc-prod select { min-width: 0; max-width: 7.5em; }
+.cc-prod .btn { justify-self: end; }
+.cc-acc-edit .ac-name { grid-column: 1; }
+.cc-acc-edit .ac-qty { grid-column: 4; }
+.cc-acc-edit .ac-amt { grid-column: 5; }
+.cc-acc-edit .ac-x { grid-column: 7; }
+.cc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.cc-editing { outline: 2px solid var(--brand); }
+
+/* 右侧信息栏 —— 参考图的蓝竖条分组标题；右 36px 给垂直居中的 ✕ 让位
+   （原计划写两条 .cc-side，已合并进这一条：padding 左14 右36 —— 28px 时
+   全角 ✕ 的最大字宽还会压到行尾，留足 36）。 */
+.cc-side { flex: 0 0 260px; border-left: 1px solid var(--line);
+  padding: 12px 36px 12px 14px; background: var(--field); font-size: 13px; }
+.cc-group + .cc-group { margin-top: 12px; }
+.cc-group-title { font-weight: 650; margin-bottom: 6px; padding-left: 8px;
+  border-left: 3px solid var(--brand); line-height: 1.2; }
+.cc-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.cc-row .k { color: var(--muted); flex: 0 0 auto; }
+.cc-row .v { text-align: right; word-break: break-all; }
+.cc-muted { color: var(--muted); }
+.cc-wait { display: inline-block; font-size: 11.5px; border: 1px dashed var(--line);
+  border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+
+/* 支付方块（参考图彩色块）：块 + 下方金额框；软提醒不拦截。
+   ⚠ 底色用纯 hex、不写 color-mix —— 门店 Win7 老 Chromium 不认 color-mix()。 */
+.pay-blocks { display: flex; flex-wrap: wrap; gap: 8px; }
+/* ⚠ 用户第 4 条（2026-09-30）：六色 pastel 底改成**系统统一底色** ——
+   跟其它输入框一个样（--field），文字也回 --text（暗色主题可读）。
+   原来的"钉死深色字"是给 pastel 浅底配的，底换了就一起撤。 */
+.pay-block { position: relative; border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; background: var(--field); min-width: 86px;
+  color: var(--text); }
+.pay-block .pb-name { font-size: 12.5px; font-weight: 600; padding-right: 14px; }
+.pay-block input { width: 76px; margin-top: 4px; }
+.pay-block select, .pay-block input { background: var(--card); color: var(--text); }
+.pay-block .pb-x { position: absolute; top: 2px; right: 3px; border: 0;
+  background: none; cursor: pointer; color: var(--muted); font-size: 13px; }
+.pay-sum { font-size: 12.5px; margin-top: 8px; color: var(--muted); }
+.pay-warn { color: var(--warn); background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 5px; padding: 3px 8px; display: inline-block; margin-top: 6px; }
+
+/* 卡右侧垂直居中的 ✕（两类卡统一入口，语义在 JS 分叉） */
+.cc-close { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  border: 0; background: none; font-size: 17px; line-height: 1; cursor: pointer;
+  color: var(--muted); padding: 6px; }
+.cc-close:hover { color: var(--bad); }
+

@@ -22,16 +22,35 @@ import yaml
 from . import (autostart, browser, config_io, lockfile, mailer, runtime,
                service, version, wecom)
 from .cbg import CbgClient, CbgError
-from .erp import (ErpCaptchaRequired, ErpClient, ErpError, describe_credentials,
-                  effective_env_file, load_credentials)
 from .modules import auth, notify
 import json
 import sqlite3
 
 from .paths import ROOT
-from .reconcile import classify_sales, reconcile, sn_row_index
-from .report import summary_lines, write_report
 from .session import CbgAuthError, CbgSession
+
+from . import edition as _edition
+if _edition.is_lifehall():
+    # 生活馆包：`erp.py` / `reconcile.py` / `report.py` 物理不存在（edition.PRUNE）。
+    # ⚠ 不另开 reconcile_stub / report_stub 两个文件（太散）—— 哨兵直接写在这儿：
+    #   真被调到就抛"生活馆版没有对账"，而不是让人看到 ModuleNotFoundError。
+    from .erp_stub import (ErpCaptchaRequired, ErpClient, ErpError,
+                           describe_credentials, effective_env_file,
+                           load_credentials, ErpError as _E)
+
+    def classify_sales(*a, **k):
+        raise _E("生活馆版没有对账")
+    reconcile = classify_sales
+    sn_row_index = classify_sales
+
+    def summary_lines(*a, **k):
+        return ["生活馆版没有对账报告"]
+    write_report = summary_lines
+else:
+    from .erp import (ErpCaptchaRequired, ErpClient, ErpError,
+                      describe_credentials, effective_env_file, load_credentials)
+    from .reconcile import classify_sales, reconcile, sn_row_index
+    from .report import summary_lines, write_report
 
 #: 每月**头几天**顺带把上个月的云商销售重拉一遍。
 #:
@@ -235,6 +254,14 @@ def cmd_auth(args) -> int:
             老写法 `.ping()[0]` 把它扔了，用户最后只看到一句"自检没过" ——
             实测就卡在这儿：只能反复说"就是抓不到"，谁也定位不了。
             """
+            if _edition.is_lifehall():
+                # 生活馆：认店走会话探测 —— 和 web._capture_worker 的 verify
+                # **同一份判据**（store_identity.verify_with_identity），
+                # 别在这儿另写一套（两份定义必漂）。新机上 store_code 还空着，
+                # 拿它 ping 必然"没给 storeCode"→ verify 永远不过 → 挂死到超时。
+                from . import store_identity
+                return store_identity.verify_with_identity(
+                    s, ROOT, cfg.get("_path") or args.config)
             try:
                 ok, why = CbgClient(s, store_code=cfg.get("store_code") or None, timeout=25).ping()
                 return ok, why
@@ -275,8 +302,25 @@ def cmd_auth(args) -> int:
     p = sess.save(session_path(cfg))
     print(f"已保存会话 → {p}")
     print(f"  {sess.describe()}")
-    client = CbgClient(sess, store_code=cfg.get("store_code") or None)
-    ok, msg = client.ping()
+    if _edition.is_lifehall():
+        # 生活馆：身份从会话认（详见 store_identity）。认不出店也照常往下走 ——
+        # 登录判据是"有会话文件"，认店只影响显示和会话文件名。
+        from . import store_identity
+        info = store_identity.identify(ROOT, cfg.get("_path") or args.config, sess)
+        if info.get("store_name"):
+            print(f"认店：{info['store_name']}")
+        elif info.get("why"):
+            print(f"认店：{info['why']}")
+        elif info.get("store_code"):
+            print(f"认店：店码 {info['store_code']}（名单里没这家店，店名留空）")
+        if info.get("store_code"):
+            cfg["store_code"] = info["store_code"]   # 下面那次自检按店码打
+        # ⚠ 没店码时别 ping —— store_detail 必报「没给 storeCode」，0 订单
+        #   新店会被打成「❌ 会话不可用」。判据和 web 保存点同一份（check_after_save）
+        ok, msg = store_identity.check_after_save(sess, cfg.get("store_code") or "")
+    else:
+        client = CbgClient(sess, store_code=cfg.get("store_code") or None)
+        ok, msg = client.ping()
     print(("✅ 会话可用：" if ok else "❌ 会话不可用：") + msg)
     return EXIT_OK if ok else EXIT_AUTH
 
@@ -1048,30 +1092,36 @@ def cmd_selftest(args) -> int:
     head(3, "云商账号")
     cfg = load_config(args.config)
     env_file = (cfg.get("erp") or {}).get("env_file")
-    dc = describe_credentials(env_file)
-    # 看**实际生效的**凭据，不是"这个文件里有什么" —— 否则会出现
-    # "第3步说缺密码、第4步却登录成功"这种自相矛盾。
-    creds = load_credentials(env_file)
-    if creds["username"] and creds["password"]:
-        print(f"  {creds['username']}（公司 {creds['company']}）")
-        src = effective_env_file(env_file)
-        if src and str(src) != dc["env_file"]:
-            print(f"  注意：密码来自 {src}，不是 {dc['env_file']}")
+    if _edition.is_lifehall():
+        # 生活馆包里没有 `erp.py`（这里 import 的是 `erp_stub`：describe 给空、
+        # **load/save 用到即抛**）—— 第 3、4 步整个跳过，否则自检跑到这儿
+        # 当场抛"生活馆版没有云商功能"、整个 selftest 以退出码 9 收场。
+        print("  生活馆版没有云商 —— 第 3、4 步跳过")
     else:
-        print("  ✗ 缺账号或密码 —— 到控制台「设置 → 云商账号」里填")
-        failures.append("云商凭据不全")
+        dc = describe_credentials(env_file)
+        # 看**实际生效的**凭据，不是"这个文件里有什么" —— 否则会出现
+        # "第3步说缺密码、第4步却登录成功"这种自相矛盾。
+        creds = load_credentials(env_file)
+        if creds["username"] and creds["password"]:
+            print(f"  {creds['username']}（公司 {creds['company']}）")
+            src = effective_env_file(env_file)
+            if src and str(src) != dc["env_file"]:
+                print(f"  注意：密码来自 {src}，不是 {dc['env_file']}")
+        else:
+            print("  ✗ 缺账号或密码 —— 到控制台「设置 → 云商账号」里填")
+            failures.append("云商凭据不全")
 
-    head(4, "云商登录（真去换一次 token）")
-    try:
-        r = ErpClient(load_credentials(env_file), env_file=env_file,
-                      timeout=60, verbose=args.verbose).login_and_verify(save=False)
-        print(f"  登录成功：{r.get('who') or dc['username']}")
-    except ErpCaptchaRequired:
-        print("  要图形验证码 —— 到控制台「设置 → 云商账号」点「测试登录」，"
-              "验证码会显示在页面上")
-    except ErpError as e:
-        print(f"  ✗ {e}")
-        failures.append("云商登录失败")
+        head(4, "云商登录（真去换一次 token）")
+        try:
+            r = ErpClient(load_credentials(env_file), env_file=env_file,
+                          timeout=60, verbose=args.verbose).login_and_verify(save=False)
+            print(f"  登录成功：{r.get('who') or dc['username']}")
+        except ErpCaptchaRequired:
+            print("  要图形验证码 —— 到控制台「设置 → 云商账号」点「测试登录」，"
+                  "验证码会显示在页面上")
+        except ErpError as e:
+            print(f"  ✗ {e}")
+            failures.append("云商登录失败")
 
     head(5, "华为会话")
     try:
@@ -2195,8 +2245,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ping", help="华为会话自检")
     p.set_defaults(func=cmd_ping)
 
-    p = sub.add_parser("erp-login", help="模拟登录云商换 token（验证账号密码配对了没）")
-    p.set_defaults(func=cmd_erp_login)
+    # ⚠ 生活馆包里被裁的 11 个子命令**整段不注册**（`_edition.is_lifehall()`）：
+    #   注册了也只是 --help 里露出来、跑起来抛哨兵；`daily` 的步骤名单本来
+    #   就从注册表派生（生活馆只剩 dump/autoupdate），这里跟它保持一致。
+    #   ⚠ 是**整段包 if**，不是"注册了再跳过" —— argparse 的注册是顺序代码，
+    #     中途 return 会把后面的子命令全部吃掉。
+    if not _edition.is_lifehall():
+        p = sub.add_parser("erp-login", help="模拟登录云商换 token（验证账号密码配对了没）")
+        p.set_defaults(func=cmd_erp_login)
 
     p = sub.add_parser("mail-test", help="发一封测试邮件，验证 SMTP 配置")
     p.set_defaults(func=cmd_mail_test)
@@ -2223,22 +2279,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("wecom-test", help="往企微群推一条测试消息，验证 webhook")
     p.set_defaults(func=cmd_wecom_test)
 
-    p = sub.add_parser("check", help="跑对账")
-    p.add_argument("--date", help="目标日 YYYY-MM-DD，默认今天")
-    p.add_argument("--days-ago", type=int,
-                   help="目标日 = 今天往前 N 天（计划任务里用 --days-ago 1 查昨天，"
-                        "免得依赖 Windows 的日期格式）")
-    p.add_argument("--lookback", type=int, help="覆盖配置：销售窗口往前多看几天")
-    p.add_argument("--lookahead", type=int, help="覆盖配置：华为窗口往后多看几天")
-    # ⚠ `--no-refresh` 从这里**搬走了** —— 它控的是"华为会话失效时要不要静默续期"，
-    #   而华为那套已经整体搬去第 1 步（`dump`）了。留在这儿的话它是个**死参数**：
-    #   `--help` 里写着一段已经不存在的行为了。
-    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
-    p.add_argument("--no-push", action="store_true", help="本次不推企微")
-    p.add_argument("--out-dir", help="输出目录，默认 ./out")
-    p.add_argument("--log-file", help="把输出**同时**写一份到这个文件（run.bat 用）。"
-                                      "不写的话计划任务跑完什么都留不下")
-    p.set_defaults(func=cmd_check)
+    if not _edition.is_lifehall():
+        p = sub.add_parser("check", help="跑对账")
+        p.add_argument("--date", help="目标日 YYYY-MM-DD，默认今天")
+        p.add_argument("--days-ago", type=int,
+                       help="目标日 = 今天往前 N 天（计划任务里用 --days-ago 1 查昨天，"
+                            "免得依赖 Windows 的日期格式）")
+        p.add_argument("--lookback", type=int, help="覆盖配置：销售窗口往前多看几天")
+        p.add_argument("--lookahead", type=int, help="覆盖配置：华为窗口往后多看几天")
+        # ⚠ `--no-refresh` 从这里**搬走了** —— 它控的是"华为会话失效时要不要静默续期"，
+        #   而华为那套已经整体搬去第 1 步（`dump`）了。留在这儿的话它是个**死参数**：
+        #   `--help` 里写着一段已经不存在的行为了。
+        p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+        p.add_argument("--no-push", action="store_true", help="本次不推企微")
+        p.add_argument("--out-dir", help="输出目录，默认 ./out")
+        p.add_argument("--log-file", help="把输出**同时**写一份到这个文件（run.bat 用）。"
+                                          "不写的话计划任务跑完什么都留不下")
+        p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("service-start", help="把服务放到后台跑起来（start.bat 调的）")
     # ⚠ 别调小：门店电脑冷启动（杀毒实时扫描 / 机械盘）超过 25 秒是常事，
@@ -2326,73 +2383,74 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_autoupdate)
 
-    p = sub.add_parser("erp-dump", help="抓云商数据（在库 + 销售明细）→ 同一个订单库")
-    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
-    p.add_argument("-v", "--verbose", action="store_true")
-    p.set_defaults(func=cmd_erp_dump)
+    if not _edition.is_lifehall():
+        p = sub.add_parser("erp-dump", help="抓云商数据（在库 + 销售明细）→ 同一个订单库")
+        p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+        p.add_argument("-v", "--verbose", action="store_true")
+        p.set_defaults(func=cmd_erp_dump)
 
-    p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json（并单独推一条）")
-    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
-    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
-    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
-    p.set_defaults(func=cmd_pos)
+        p = sub.add_parser("pos", help="算 POS 合规率 → out/pos-<年>.json（并单独推一条）")
+        p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+        p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+        p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+        p.set_defaults(func=cmd_pos)
 
-    p = sub.add_parser("attain", help="周度销售达成 → out/attain-<年>.json（读腾讯文档目标）")
-    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
-    p.add_argument("--store", default="", help="只看这家云商门店（默认：按本店配置 / 全区）")
-    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
-    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
-    p.set_defaults(func=cmd_attain)
+        p = sub.add_parser("attain", help="周度销售达成 → out/attain-<年>.json（读腾讯文档目标）")
+        p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+        p.add_argument("--store", default="", help="只看这家云商门店（默认：按本店配置 / 全区）")
+        p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+        p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+        p.set_defaults(func=cmd_attain)
 
-    p = sub.add_parser("plan", help="月度生意计划 → out/plan-<年>.json（七块 × 本月 vs 上月同期）")
-    p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
-    p.set_defaults(func=cmd_plan)
+        p = sub.add_parser("plan", help="月度生意计划 → out/plan-<年>.json（七块 × 本月 vs 上月同期）")
+        p.add_argument("--db", default="", help="订单库；不给就取 out/ 里最新的 cbg-<年>.db")
+        p.set_defaults(func=cmd_plan)
 
-    p = sub.add_parser("film", help="防护膜达成（落快照 out/film.json）")
-    p.set_defaults(func=cmd_film)
+        p = sub.add_parser("film", help="防护膜达成（落快照 out/film.json）")
+        p.set_defaults(func=cmd_film)
 
-    p = sub.add_parser("report", help="把当天新增上报给区长（SQLite 附件走邮件）")
-    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
-    p.add_argument("--date", default="", help="包里写哪天（默认今天）")
-    p.add_argument("--no-push", action="store_true", help="只生成，不发")
-    p.add_argument("--dry-run", action="store_true", help="连包都不生成，只看会跑哪几步")
-    p.add_argument("--force", action="store_true",
-                   help="指纹说没变也照样发（人工重发用）")
-    p.set_defaults(func=cmd_report)
+        p = sub.add_parser("report", help="把当天新增上报给区长（SQLite 附件走邮件）")
+        p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+        p.add_argument("--date", default="", help="包里写哪天（默认今天）")
+        p.add_argument("--no-push", action="store_true", help="只生成，不发")
+        p.add_argument("--dry-run", action="store_true", help="连包都不生成，只看会跑哪几步")
+        p.add_argument("--force", action="store_true",
+                       help="指纹说没变也照样发（人工重发用）")
+        p.set_defaults(func=cmd_report)
 
-    p = sub.add_parser("report-inbox", help="收门店上报 → in/report.db（区长/平台机器用）")
-    p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
-    p.add_argument("--limit", type=int, default=0, help="最多往回扫几封（默认 200）")
-    p.add_argument("--dry-run", action="store_true", help="只看会收哪几封，不落库")
-    p.set_defaults(func=cmd_report_inbox)
+        p = sub.add_parser("report-inbox", help="收门店上报 → in/report.db（区长/平台机器用）")
+        p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
+        p.add_argument("--limit", type=int, default=0, help="最多往回扫几封（默认 200）")
+        p.add_argument("--dry-run", action="store_true", help="只看会收哪几封，不落库")
+        p.set_defaults(func=cmd_report_inbox)
 
-    p = sub.add_parser("pos-export", help="出 POS 明细 Excel")
-    p.add_argument("--month", required=True, help="2026-08")
-    p.add_argument("--db", default="")
-    p.add_argument("--out", default="")
-    p.add_argument("--by", default="", choices=["", "label", "remark"])
-    p.set_defaults(func=cmd_pos_export)
+        p = sub.add_parser("pos-export", help="出 POS 明细 Excel")
+        p.add_argument("--month", required=True, help="2026-08")
+        p.add_argument("--db", default="")
+        p.add_argument("--out", default="")
+        p.add_argument("--by", default="", choices=["", "label", "remark"])
+        p.set_defaults(func=cmd_pos_export)
 
-    p = sub.add_parser("pools",
-                       help="四个数据池：建库 / 拉取 / 看状态（池A 玲珑销售单已有，"
-                            "这里管 B/C/D）")
-    p.add_argument("--fetch", action="append", default=[], metavar="池",
-                   choices=["lg-stock", "erp-stock", "erp-sales"],
-                   help="拉哪个池（可重复给）：lg-stock=池B玲珑在库 / "
-                        "erp-stock=池D云商在库 / erp-sales=池C云商销售单。"
-                        "**不给就只显示状态**")
-    p.add_argument("--start", default="", help="erp-sales 起始日 YYYY-MM-DD，默认当月 1 号")
-    p.add_argument("--end", default="", help="erp-sales 结束日 YYYY-MM-DD，默认今天")
-    p.add_argument("--rewrite", action="store_true",
-                   help="**强制刷新**（2026-09-29 用户）：不给 --start 就从本年 1 月 1 日起，"
-                        "抓全之后**整表重写**（按当前口径把老月份重新落一遍）。"
-                        "⚠ 抓失败/抓到 0 行都不动旧数据。")
-    p.add_argument("--date", default="", help="快照日 YYYY-MM-DD，默认今天")
-    p.add_argument("--days-ago", type=int, default=0, help="快照日 = 今天往前 N 天")
-    p.add_argument("--no-refresh", action="store_true", help="会话失效时别开浏览器静默续期")
-    p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
-    p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
-    p.set_defaults(func=cmd_pools)
+        p = sub.add_parser("pools",
+                           help="四个数据池：建库 / 拉取 / 看状态（池A 玲珑销售单已有，"
+                                "这里管 B/C/D）")
+        p.add_argument("--fetch", action="append", default=[], metavar="池",
+                       choices=["lg-stock", "erp-stock", "erp-sales"],
+                       help="拉哪个池（可重复给）：lg-stock=池B玲珑在库 / "
+                            "erp-stock=池D云商在库 / erp-sales=池C云商销售单。"
+                            "**不给就只显示状态**")
+        p.add_argument("--start", default="", help="erp-sales 起始日 YYYY-MM-DD，默认当月 1 号")
+        p.add_argument("--end", default="", help="erp-sales 结束日 YYYY-MM-DD，默认今天")
+        p.add_argument("--rewrite", action="store_true",
+                       help="**强制刷新**（2026-09-29 用户）：不给 --start 就从本年 1 月 1 日起，"
+                            "抓全之后**整表重写**（按当前口径把老月份重新落一遍）。"
+                            "⚠ 抓失败/抓到 0 行都不动旧数据。")
+        p.add_argument("--date", default="", help="快照日 YYYY-MM-DD，默认今天")
+        p.add_argument("--days-ago", type=int, default=0, help="快照日 = 今天往前 N 天")
+        p.add_argument("--no-refresh", action="store_true", help="会话失效时别开浏览器静默续期")
+        p.add_argument("--no-push", action="store_true", help="本次不推企业微信")
+        p.add_argument("--no-mail", action="store_true", help="本次不发邮件")
+        p.set_defaults(func=cmd_pools)
 
     p = sub.add_parser("ensure-service", help="服务没跑就把它拉起来（系统计划任务只干这个）")
     p.add_argument("-c", "--config", default=str(DEFAULT_CONFIG))
