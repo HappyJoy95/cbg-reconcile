@@ -518,9 +518,15 @@ cat <<'NEXT'
 
 ==> 下一步（两步都要做，缺一步门店都看不到新版）
     1) 发到发行仓：  bash tools/publish_release.sh
-       （会自动剔掉 central-mail.env / mail-key.json，再反查一遍才上传）
+       （会自动剔掉 central-mail.env / mail-key.json / config/managers.yaml，
+         反查一遍才上传）
     2) 提交源码仓：  git add -A && git commit && git push
-       —— 正式包会改 src/version.py，push 只是留痕；
-          **门店更新读的是发行仓**，不依赖这一步。
+    ⚠ **顺序必须是 1 → 2**：反过来的话门店会先读到新版本号（源码仓那边），
+      再去发行仓下载 —— 而那时 Release 还是旧的，`releases/latest` 给下来的是
+      上一版，装完 BUILD.txt 写成旧号、has_update 还是真的 ⇒
+      「一直提示有更新、装上去又没变」，直到把 Release 补上为止。
+    ⚠ 第 2 步**不是留痕**：还在读源码仓的门店（没升到桥接版的）全靠它看到更新。
+      等数据上报里各店 version 都 ≥ 桥接版、源码仓改 Private 之后，
+      门店那边就只读发行仓了 —— 那时第 2 步只剩"仓库留痕"的作用。
     ⚠ beta 包：第 1 步发成 prerelease，第 2 步**不要 push**。
 NEXT
