@@ -63,3 +63,4 @@ central-mail.env
 #    附件加密就当场归零。`.secrets/` 那条已经挡住本机那份了，这一行挡的是
 #    **包根那份**：它散装在仓库根目录，不写就会裸奔。
 mail-key.json
+dist-exe/

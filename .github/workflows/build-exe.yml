@@ -1,0 +1,53 @@
+name: build-exe
+
+# ⚠ **只在 Windows 上打 exe** —— PyInstaller 不支持交叉编译，
+#   开发机是 macOS，所以这一步必须放到 CI 上（2026-10-02 定的路线 B）。
+#
+# 不做 push 自动触发：打包要几分钟，而日常 push 只是改代码 ——
+# 要出包就手动跑（Actions → build-exe → Run workflow）。
+# 真要按 tag 出包，push 一个 `v*` tag 也会触发。
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠⚠ **Python 必须是 3.8** —— 这不是随手选的：
+      #   PyInstaller 打出来的 exe 里**编的是哪一版 Python，门店就得有哪一版的运行时特性**，
+      #   而 CPython 3.9 起依赖 `api-ms-win-core-path-l1-1-0.dll`，**Windows 7 上没有这个 DLL**
+      #   （bugs.python.org/issue40740）。门店还有 Win7 老电脑 —— 用 3.9+ 打，
+      #   那台机器上 exe 直接起不来，跟 AGENTS 开头"底线是 3.8 不是 3.9"是同一条。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      # PyInstaller 钉在 5.13.2：5.x 的 onedir 是**平铺**的（exe 旁边直接是数据文件），
+      # 6.x 默认多一层 `_internal/` —— `paths.ROOT` 和 `selfupdate.ANCHORS` 都会跟着错。
+      # 要升 6.x 得先想清楚 `contents_directory` 和锚点，别顺手升。
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller==5.13.2"
+
+      - name: 跑单元测试（3.8，跟门店同一档）
+        run: python -m pytest tests/ -q
+
+      - name: 打 exe 包
+        shell: bash
+        run: bash tools/build_exe.sh
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbg-reconcile-exe
+          path: |
+            dist-exe/*.zip
+            dist-exe/*.sha256
+          if-no-files-found: error
+          retention-days: 30

@@ -34,29 +34,6 @@ class Test只读sqlite(unittest.TestCase):
         self.assertIn("db", flat)
 
 
-class Test指纹缓存(unittest.TestCase):
-    def test_指纹没变就回缓存_变了就重算(self):
-        film_compute._CACHE.clear()
-        t0 = time.time()
-        d1 = film_compute.load(force=True)
-        t1 = time.time()
-        self.assertTrue(d1.get("ok"))
-        d2 = film_compute.load()
-        t2 = time.time()
-        self.assertIs(d1, d2, "指纹没变应直接回同一份结果")
-        self.assertLess(t2 - t1, 0.05, "缓存命中不该重算")
-        self.assertGreater(t1 - t0, 0.01, "第一次至少要真算")
-
-    def test_force_不吃缓存(self):
-        film_compute._CACHE.clear()
-        film_compute.load(force=True)
-        d = film_compute.load(force=True)
-        self.assertTrue(d.get("ok"))
-        self.assertIn("summary", d)
-        blob = str(d.get("source") or "") + str(d.get("note") or "")
-        self.assertIn("erp_sales", blob)
-
-
 class _FilmDbCase(unittest.TestCase):
     """临时库 + monkeypatch `find_db`。"""
 
@@ -108,6 +85,34 @@ class _FilmDbCase(unittest.TestCase):
                 "付款方式": "", "支付时间": "2026-09-10 10:00:00"}
         base.update(over)
         return base
+
+
+class Test指纹缓存(_FilmDbCase):
+    """⚠ **必须用临时库**（原来直接读本机 `out/cbg-*.db`）——
+    干净 checkout 里那个文件根本不存在（2026-10-02 实测：CI 一跑就红两条，
+    而本机恰好有库时又是绿的 —— 时红时绿的测试比没有测试更糟）。"""
+
+    def test_指纹没变就回缓存_变了就重算(self):
+        self._patch(self._db([self._sale(门店="甲店", 数量=3)]))
+        film_compute._CACHE.clear()
+        d1 = film_compute.load(force=True)
+        self.assertTrue(d1.get("ok"), d1.get("why"))
+        self.assertEqual(len(film_compute._CACHE), 1, "算完该进缓存")
+
+        d2 = film_compute.load()
+        # ⚠ 不用"耗时"当判据：临时库只有几行，重算可能比 1ms 还快，
+        #   阈值断言会随机器快慢乱红。`assertIs` 是**确定性**的 ——
+        #   重算必然产生新对象，回缓存才是同一个对象。
+        self.assertIs(d1, d2, "指纹没变应直接回同一份结果")
+
+    def test_force_不吃缓存(self):
+        self._patch(self._db([self._sale(门店="甲店", 数量=3)]))
+        film_compute.load(force=True)
+        d = film_compute.load(force=True)
+        self.assertTrue(d.get("ok"), d.get("why"))
+        self.assertIn("summary", d)
+        blob = str(d.get("source") or "") + str(d.get("note") or "")
+        self.assertIn("erp_sales", blob)
 
 
 class Test拆到人(_FilmDbCase):

@@ -27,8 +27,19 @@
 ⚠ 必须用 `from … import ROOT` 这种写法，**不要**改成满项目 `paths.ROOT`：
 有 12 处测试是 `mock.patch.object(cli, "ROOT", 临时目录)` 这种按**模块属性**打补丁的，
 `from … import` 让每个模块仍然有自己的 `ROOT` 名字，那些测试一行都不用改。
+
+⚠ **打包成 exe 之后（2026-10-02）根不一样**：PyInstaller 把 `src/` 编进
+可执行文件，`__file__` 指向**归档内部**的假路径 —— 那时 `.parent.parent`
+算出来的是临时/内部目录，`config/`、`.secrets/`、`out/` 会**静默建到那儿去**
+（正是上面说的"静默换根"，这次是打包给的）。所以冻结时改认
+**exe 所在的目录**（onedir 布局里 `web/`、`config/` 就在它旁边）。
+这个判断只能写成**一句赋值** —— `tests/test_paths.py::test_里面只有一句求值`
+盯着，别在里面加函数。
 """
 
 from pathlib import Path
+import sys
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent.parent)
+
