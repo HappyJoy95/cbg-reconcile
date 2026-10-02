@@ -1001,11 +1001,11 @@ def cmd_selftest(args) -> int:
         print(f"          {_mk.get('why') or ''}")
         print("          3.0.0 之前的机器靠自更新升上来时就是这样：")
         print("          把带密钥的完整安装包再拷一次、双击 install.bat 就有了。")
-    # ⚠ **更新包密钥**（路线 A，2026-10-02）—— 公开仓上是密文包，靠它解开。
-    #   ⚠ 这里**不算 failures**：过渡期明文那份还在（`_ASSET_ORDER` 会退回 `.zip`），
-    #     所以没钥匙暂时还升得上去；等明文撤了，`selfupdate` 的报错会自己说清楚
-    #     （`mailcrypto.unseal` 那句"把 release.key 放进 .secrets"）。
-    #     现在就判失败，会让一批还没拿到钥匙的机器在自检里红一片、而其实能用。
+    # ⚠ **更新包密钥**（路线 A，2026-10-02）—— 公开仓上只有密文，靠它解开。
+    #   ⚠ **没有它 = 自更新当场失败**（不是软降级）：用户定「不过渡」之后
+    #     公开仓上不再有明文资产，下载这条路只认密文 ⇒ 解不开就报错。
+    #     所以这里**算 failures**，跟"没有浏览器"一个量级 —— 宁可自检红，
+    #     也不能让门店以为一切正常、到点更新时才发现升不动。
     try:
         _rk = _mailcrypto.describe(ROOT, rel=_mailcrypto.RELEASE_KEY_REL)
     except Exception as _e:                                    # noqa: BLE001
@@ -1014,9 +1014,10 @@ def cmd_selftest(args) -> int:
         print(f"  更新包密钥 {_rk['key_id']}"
               f"（本机 {len(_rk.get('keys') or [])} 把）—— 公开仓的密文更新包解得开")
     else:
-        print("  更新包密钥 ⚠️ 没有 —— 明文更新包撤掉之后**自更新会失败**")
+        print("  更新包密钥 ⚠️ 没有 —— **自更新会失败**（公开仓只发密文包）")
         print(f"          {_rk.get('why') or ''}")
         print("          解法：把 release.key 放进 .secrets\\，或拿一次完整安装包。")
+        failures.append("没有更新包密钥（自更新会失败）")
     import importlib.metadata as md
     for pkg in ("requests", "PyYAML", "openpyxl"):
         try:

@@ -12,21 +12,22 @@
 # 推源码仓还是人自己 commit + push（见 AGENTS.md 发版那节）。
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠⚠ **这个脚本对着的是一个公开仓库，两道硬闸挡密钥**：
+# ⚠⚠ **这个脚本对着的是一个公开仓库，三道硬闸**（顺序不能换）：
 #
-#    包里不许有 `central-mail.env`（中台邮箱授权码）和 `mail-key.json`
-#    （邮件附件加密密钥）。那两样只随**私发的安装包**走（用户 2026-10-02：
-#    「安装包只私发」）—— 一旦进了公开 Release，附件加密当场归零，
-#    中台邮箱也跟着泄露。而且**泄露一次就收不回来**（GitHub 的 release 资产
-#    虽然能删，但 CDN 缓存和别人的 clone 里可能还在）。
+#    ① **剔**  `central-mail.env`（中台授权码）、`mail-key.json`（附件加密密钥）、
+#       `release.key`（**更新包**加密密钥）、`config/managers.yaml`（区长名单）
+#       一个都不许进资产。那几样只随**私发的安装包**走。
+#    ② **加密**  用 `.secrets/release.key` 把整包封成 `.sealed` ——
+#       这样公开仓上**连安装包内容都读不到**（路线 A）。
+#       ⚠ 中间的明文 zip 加密完立刻删 —— 留在 /tmp 就是把源码摆硬盘上。
+#    ③ **反查**  产物必须 `is_sealed()` 且**当 zip 打不开**，否则不生成资产。
 #
-#    第一道：本脚本把它们**剔出**将要上传的 zip；
-#    第二道：剔完**反查** —— 资产里还有任何一个就直接失败，不上传。
-#    （写法照抄 `build_package.sh` 里那几条 `check_absent` 的思路：
-#      断言要在**动作之前**拦下来，事后发现就晚了。）
+#    泄露一次就收不回来（GitHub 的 release 资产虽然能删，
+#    但 CDN 缓存和别人的 clone 里可能还在）—— 所以断言全排在**上传之前**，
+#    写法照抄 `build_package.sh` 里那几条 `check_absent`。
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# 发行仓地址**不在这儿写死** —— 从 `src/selfupdate.py` 读，客户端和发布脚本
+# 资产名**不在这儿写死** —— 从 `src/selfupdate.py` 读，客户端和发布脚本
 # 同一个来源（那边写错了，这边跟着错，而不是"改了一处忘了另一处"）。
 
 set -euo pipefail
@@ -53,15 +54,21 @@ done
 # ------------------------------------------------------- 从代码里读发行仓配置
 RELEASE_REPO="$(sed -n 's/^RELEASE_REPO *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
 RELEASE_ASSET="$(sed -n 's/^RELEASE_ASSET *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
-RELEASE_ASSET_SEALED="$(sed -n 's/^RELEASE_ASSET_SEALED *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
-if [ -z "${RELEASE_REPO}" ] || [ -z "${RELEASE_ASSET}" ] || [ -z "${RELEASE_ASSET_SEALED}" ]; then
-  echo "✗ 读不出发行仓配置（src/selfupdate.py 里的 RELEASE_REPO / RELEASE_ASSET*）"
+if [ -z "${RELEASE_REPO}" ] || [ -z "${RELEASE_ASSET}" ]; then
+  echo "✗ 读不出发行仓配置（src/selfupdate.py 里的 RELEASE_REPO / RELEASE_ASSET）"
   exit 1
 fi
-# 上传的**最终**资产名 —— 路线 A：只发密文（`.sealed`）。
-# 明文那个名字（`RELEASE_ASSET`）留给过渡期，客户端 `_ASSET_ORDER` 两个都认。
-ASSET="${RELEASE_ASSET_SEALED}"
+# ⚠ 资产名**只从 selfupdate 读一处**（那边写错了，这边跟着错，而不是
+#   "改了一处忘了另一处" ⇒ 发布成功、客户端 404）。
+# ⚠ 它本身就是 `.sealed` —— 用户 2026-10-02 定「不过渡」⇒ **只发这一种**，
+#   没有明文资产那份退路。
+ASSET="${RELEASE_ASSET}"
 SHA_NAME="${ASSET}.sha256"
+case "${ASSET}" in
+  *.sealed) ;;
+  *) echo "✗ 资产名不是 .sealed（读到的是 ${ASSET}）—— 那等于往公开仓传明文";
+     exit 1 ;;
+esac
 
 # ------------------------------------------------------------------ 挑包
 if [ -z "${ZIP_IN}" ]; then
@@ -331,6 +338,11 @@ if gh api "repos/${RELEASE_REPO}/contents/CHANGELOG.md" --jq '.content' 2>/dev/n
 import pathlib, re, sys
 path, ver, note = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 body = path.read_text(encoding="utf-8")
+# ⚠ 同一个版本**重发**（补资产 / 换密文）是常事 —— 已经有这一节就**不插了**，
+#   否则每重发一次 CHANGELOG 里就多一节同号的，看着像发了好几个版。
+if re.search(r"(?m)^## %s\s*$" % re.escape(ver), body):
+    print(f"    · CHANGELOG 里已有 {ver}，不重复插")
+    raise SystemExit(0)
 entry = f"## {ver}\n\n- {note}\n\n"
 m = re.search(r"(?m)^## ", body)
 if m:

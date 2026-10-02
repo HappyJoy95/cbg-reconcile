@@ -1347,11 +1347,13 @@ class Test打包规则对账(unittest.TestCase):
 
 
 class TestDownloadSources(unittest.TestCase):
-    """下载候选源的**顺序**—— 源码仓 / 发行仓分离之后，这就是私有化的保险。
+    """下载候选源 —— **只从发行仓拿，而且只拿密文**。
 
-    见 `selfupdate` 模块文档：发行仓必须排在源码仓前面。顺序一反，
-    源码仓改 Private 的那一刻，还在跑旧代码的门店**当场就查不到更新**，
-    而且没有任何补救 —— 那是整次迁移里唯一不可逆的一步。
+    2026-10-02 用户定「不过渡，现在就当做没有门店用过」：
+    * 没有明文资产那条退路（`RELEASE_ASSET` 本身就是 `.sealed`）；
+    * **不再走源码仓 zipball / codeload** —— 它们给的是明文，
+      留着就等于公开渠道上还有一条明文路，而 `_unseal_in_place` 已经
+      不收明文了（fail closed）。源码仓现在**只作版本号的退路**。
     """
 
     #: 发行仓资产的 api 直链（`Accept: application/octet-stream` 才吐字节）
@@ -1385,15 +1387,32 @@ class TestDownloadSources(unittest.TestCase):
         return out
 
     def test_release_asset_is_tried_first(self):
-        """**发行仓排在源码仓前面** —— 顺序反了，源码仓私有化就是灾难。"""
+        """资产 api 直链必须排第一 —— 它是唯一不碰 `github.com` 的那条。"""
         urls = [u for u, _ in self._urls()]
-        rel, src = self._release_urls(urls), self._source_urls(urls)
-        self.assertTrue(rel, "发行仓一个候选源都没有")
-        self.assertTrue(src, "源码仓退路没了")
+        self.assertTrue(self._release_urls(urls), "发行仓一个候选源都没有")
         self.assertEqual(urls[0], self.ASSET, "第一个必须是发行仓的资产直链")
-        self.assertLess(max(urls.index(u) for u in rel),
-                        min(urls.index(u) for u in src),
-                        "发行仓的候选源必须整体排在源码仓前面")
+
+    def test_不再走源码仓(self):
+        """⚠ **明文那条路必须是死的** —— 留着 zipball/codeload 就等于
+        公开渠道上还能下到明文包，而明文正是路线 A 要消灭的东西。"""
+        for urls in (self._urls(), self._urls(asset="", tag="")):
+            src = self._source_urls(urls)
+            self.assertEqual(src, [], f"还留着源码仓下载退路：{src}")
+
+    def test_资产名就是密文那个(self):
+        """`RELEASE_ASSET` 本身必须带 `.sealed` —— 名字写成 `.zip`
+        就等于把明文资产又放回了候选里。
+
+        ⚠ 只查 **github.com 上带文件名的那几条**：api 的资产直链
+        （`/releases/assets/4242`）里**本来就没有文件名**，查它是空的。
+        """
+        self.assertTrue(selfupdate.RELEASE_ASSET.endswith(".sealed"),
+                        selfupdate.RELEASE_ASSET)
+        named = [u for u, _ in self._urls()
+                 if "releases/latest/download" in u or "releases/download" in u]
+        self.assertTrue(named, "一条带文件名的直链都没有")
+        for u in named:
+            self.assertTrue(u.endswith(".sealed"), f"非密文资产：{u}")
 
     def test_asset_url_carries_octet_stream_header(self):
         """不带这个请求头，`api.github.com` 的资产地址返回的是**元数据 JSON**，
@@ -1404,25 +1423,21 @@ class TestDownloadSources(unittest.TestCase):
         for url, headers in pairs[1:]:
             self.assertIsNone(headers, url)
 
-    def test_source_repo_urls_follow_the_requested_ref(self):
-        """`download(ref=…)` 要能把源码仓那两条的 ref 换成指定分支/tag。
-
-        ⚠ 发行仓那几条**故意不跟 ref 走** —— 它们的包跟着"最新 Release"。
-        """
+    def test_ref_不参与选地址(self):
+        """`download(ref=…)` 的 ref 现在只是**占位**（`repair()` 会传）——
+        地址全跟"最新 Release"走，不该被 ref 影响。"""
         sha = "abc1234def5678"
-        src = self._source_urls(self._urls(sha))
-        self.assertEqual(len(src), 2, "源码仓的两条退路没了")
-        for u in src:
-            self.assertIn(sha, u)
-        for u in self._release_urls(self._urls(sha)):
-            self.assertNotIn(sha, u)
+        plain = [u for u, _ in self._urls()]
+        withref = [u for u, _ in self._urls(sha)]
+        self.assertEqual(plain, withref, "ref 居然改变了下载地址")
 
-    def test_release_repo_unreachable_still_has_the_source_fallback(self):
-        """发行仓整个挂了（问不到资产地址）—— 源码仓那两条还在。"""
+    def test_问不到资产地址时还有固定名直链(self):
+        """发行仓整个挂了（`_release_asset_url` 返回空）——
+        **固定名那条直链还在**（`releases/latest/download/<资产名>`）。"""
         urls = [u for u, _ in self._urls(asset="", tag="")]
-        self.assertTrue(self._source_urls(urls), "退路没了")
         self.assertTrue(any("releases/latest/download" in u for u in urls),
                         "拿不到 tag 也该留一条固定名的直链")
+        self.assertEqual(self._source_urls(urls), [], "顺手又把明文路放回来了")
 
     def test_release_asset_url_never_raises(self):
         """这条是**最前面**的候选源 —— 它抛异常会把整次下载判死。
@@ -1433,7 +1448,7 @@ class TestDownloadSources(unittest.TestCase):
 
     def test_tries_every_source_then_reports_them_all(self):
         """一个个试过去，全挂了要把**每个源**都写进报错 —— 门店要靠它判断
-        是"整个 GitHub 都不通"还是"只有发行仓出事"。"""
+        是"整个 GitHub 都不通"还是"只有 api 那条不通"。"""
         tried = []
 
         def fake_get(url, *, timeout, stream=False, **kw):
@@ -1444,11 +1459,12 @@ class TestDownloadSources(unittest.TestCase):
             with self.assertRaises(selfupdate.UpdateError) as cm:
                 selfupdate.download()
         self.assertEqual(tried[0], self.ASSET, "发行仓资产必须最先试")
-        self.assertIn("zipball", tried[-2])
-        self.assertIn("codeload", tried[-1], "codeload 是最后一道退路")
+        self.assertIn("releases/latest/download", tried[-1],
+                      "最后一条该是固定名直链")
+        self.assertEqual(self._source_urls(tried), [], "不该再去碰源码仓")
         msg = str(cm.exception)
         self.assertIn("api.github.com", msg)
-        self.assertIn("codeload", msg, "报错要说清源码仓那两条都试过了")
+        self.assertIn("github.com", msg, "报错要说清每一条都试过了")
         self.assertIn("下载失败", msg)
 
 
@@ -2233,12 +2249,16 @@ class Test解封下载(unittest.TestCase):
         p.write_bytes(data)
         return p
 
-    def test_明文老包原样放行(self):
-        """渐进升级：明文那份还在时，老包一行代码都不用改。"""
+    def test_明文必须被拒(self):
+        """⚠ **fail closed**（2026-10-02「不过渡」）：收到明文只可能是
+        下错了东西（错误页 / 镜像站 / 被换过的资产），而按明文铺下去 =
+        把源码从公开渠道装进门店，正是路线 A 要消灭的事。"""
         raw = b"PK\x03\x04 fake-zip"
         p = self._file(raw)
-        self.assertEqual(selfupdate._unseal_in_place(p, root=self.root), "")
-        self.assertEqual(p.read_bytes(), raw, "明文不许被改动")
+        with self.assertRaises(selfupdate.UpdateError) as cm:
+            selfupdate._unseal_in_place(p, root=self.root)
+        self.assertIn("不是密文包", str(cm.exception))
+        self.assertEqual(p.read_bytes(), raw, "被拒时文件不许被动过")
 
     def test_密文解开成明文(self):
         sealed, how = self.mc.seal(b"PK\x03\x04 real-zip", root=self.root,
@@ -2275,47 +2295,57 @@ class Test解封下载(unittest.TestCase):
         self.assertIn("解不开", str(cm.exception))
 
 
-class Test资产顺序(unittest.TestCase):
-    """⚠ **密文那份必须排在明文前面** —— 顺序反了就等于没加密：
-    客户端会先拿到明文包，加密只在"最后一个候选"里生效。"""
+class Test只发密文一种资产(unittest.TestCase):
+    """2026-10-02 用户定「不过渡，现在就当做没有门店用过」⇒ **只有一种资产**。
 
-    def _api_payload(self):
-        assets = [
-            {"name": selfupdate.RELEASE_ASSET,            # 明文（过渡期）
-             "url": "https://api.github.com/repos/x/releases/assets/1"},
-            {"name": selfupdate.RELEASE_ASSET_SEALED,     # 密文
-             "url": "https://api.github.com/repos/x/releases/assets/2"},
-        ]
+    少了明文那份，"先拿到明文包、加密只在最后一个候选里生效"这种漏洞
+    就整个不存在了 —— 但代价是**认错名字 = 404**，所以名字必须两边共用一处。
+    """
+
+    def _api_payload(self, assets):
         resp = types.SimpleNamespace(status_code=200, text="")
         resp.json = lambda: {"tag_name": "v1.2.3", "assets": assets}
         return resp
 
-    def test_发布侧只认密文那份(self):
+    def test_只认密文那份(self):
+        assets = [{"name": selfupdate.RELEASE_ASSET,
+                   "url": "https://api.github.com/repos/x/releases/assets/2"}]
         with mock.patch.object(selfupdate, "_get",
-                               lambda url, **kw: self._api_payload()):
+                               lambda url, **kw: self._api_payload(assets)):
             url, tag = selfupdate._release_asset_url()
-        self.assertIn("assets/2", url, "拿到的是明文那份 —— 加密白做了")
+        self.assertIn("assets/2", url)
         self.assertEqual(tag, "v1.2.3")
 
-    def test_候选源里密文排在明文之前(self):
+    def test_只挂着明文资产时拿不到(self):
+        """⚠ 明文资产**不该**被认出来 —— 认了就等于把明文路又开了一条。"""
+        assets = [{"name": "cbg-reconcile-update.zip",      # 明文老名字
+                   "url": "https://api.github.com/repos/x/releases/assets/1"}]
+        with mock.patch.object(selfupdate, "_get",
+                               lambda url, **kw: self._api_payload(assets)):
+            url, tag = selfupdate._release_asset_url()
+        self.assertEqual(url, "", "居然认了明文资产")
+        self.assertEqual(tag, "v1.2.3", "tag 还是要给（版本号用得上）")
+
+    def test_候选源全是密文(self):
         with mock.patch.object(selfupdate, "_release_asset_url",
                                lambda timeout=15:
                                ("https://api.github.com/ok/2", "v1.2.3")):
             urls = [u for u, _ in selfupdate._zip_urls(selfupdate.BRANCH)]
-        sealed = [u for u in urls if u.endswith(selfupdate.RELEASE_ASSET_SEALED)]
-        plain = [u for u in urls if u.endswith(selfupdate.RELEASE_ASSET)]
-        self.assertTrue(sealed and plain, "两个资产名都要在候选里")
-        self.assertLess(min(urls.index(u) for u in sealed),
-                        min(urls.index(u) for u in plain),
-                        "每个层级上都必须密文在前")
+        self.assertTrue(urls)
+        for u in urls:
+            if "releases/download" in u:
+                self.assertIn(".sealed", u, f"候选里有非密文资产：{u}")
+            self.assertNotIn("zipball", u, "又把明文的源码仓路放回来了")
+            self.assertNotIn("codeload", u, "又把明文的源码仓路放回来了")
 
-    def test_两个资产名都必须从代码里读(self):
+    def test_资产名必须从代码里读(self):
         """⚠ 发布脚本和客户端必须认**同一个**名字 —— 写死两份迟早对不上，
         表现是「发布成功、客户端 404」。"""
         text = (ROOT / "tools" / "publish_release.sh").read_text(encoding="utf-8")
-        self.assertIn("RELEASE_ASSET_SEALED", text,
-                      "发布脚本没从 selfupdate 读密封资产名")
-        self.assertRegex(text, r'ASSET="\$\{RELEASE_ASSET_SEALED\}"')
+        self.assertIn("RELEASE_ASSET", text, "发布脚本没从 selfupdate 读资产名")
+        self.assertRegex(text, r'ASSET="\$\{RELEASE_ASSET\}"')
+        self.assertNotIn("RELEASE_ASSET_SEALED", text,
+                         "还留着已删除的 SEALED 变量")
 
 
 class Test发布脚本会加密(unittest.TestCase):

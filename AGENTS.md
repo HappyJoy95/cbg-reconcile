@@ -219,10 +219,13 @@ update-debug.py    更新失败时的现场诊断脚本
   那层把话补成能照做的（见 `_unseal_in_place`，有测试钉着）。
 * **格式跟 `mail-key.json` 一样**，`seal/unseal/load/describe` 多收一个 `rel=`
   （默认还是邮件那把 ⇒ 现有调用点一行没改，也就不会静默改到邮件那条路）。
-* **明文那份（`RELEASE_ASSET`）是过渡期的退路**：`_ASSET_ORDER` 密文优先、
-  明文兜底。等所有门店都有钥匙了再撤明文，撤之前老客户端照样升得上去。
-* ⚠ **没有这把钥匙的门店**：过渡期还能靠明文那份升级；明文一撤就**升不动了**
-  （`unseal` 报"缺 release.key"）。`selftest` 第 0 节会报出来，提前查是哪几家。
+* **只有一种资产，而且它是密文**（用户 2026-10-02：「不过渡，现在就当做
+  没有门店用过」）：`RELEASE_ASSET` 本身就是 `…zip.sealed`，没有明文资产那份
+  退路，`_unseal_in_place` 收到明文**直接报错**（fail closed）。
+  下载也**不走源码仓 zipball / codeload** —— 它们给的是明文，留着就等于
+  公开渠道上还有一条明文路。源码仓现在**只作版本号的退路**。
+* ⚠ **没有这把钥匙 = 自更新当场失败**（不是软降级）：公开仓只发密文，
+  解不开就报错。`selftest` 第 0 节**算 failures**，提前查是哪几家。
   拿钥匙的办法只有两个：**拿一次完整安装包**，或平台单独发一份 `release.key`。
 
 ### 正确顺序：打正式包会改 VERSION，再 push
@@ -371,8 +374,10 @@ Python 按 locale 编码写输出（中文 Windows 是 GBK）。这时打印 `�
 → 版本读 `api.github.com/.../contents`（发行仓 `VERSION` 优先，源码仓 `src/version.py` 退路）；
 zip 走 Release 资产的 **api 直链**（`_release_asset_url()`，要带
 `Accept: application/octet-stream`，不然返回的是元数据 JSON 而不是字节），
-`github.com/.../releases/download/...` 只是第二候选，源码仓 zipball / codeload 是最后退路
-（`_zip_urls()` / `_version_sources()`）。
+`github.com/.../releases/download/...` 只是第二候选。
+⚠ **下载没有源码仓退路**（2026-10-02「不过渡」）：`_zip_urls()` 里已经
+没有 zipball / codeload —— 它们给的是明文，留着等于公开渠道上还有一条明文路；
+源码仓现在只在**版本号**那两个源里当退路（`_version_sources()`）。
 
 ⚠⚠ **两条配额外的退路实测过，别当成摆设**（2026-10-02，匿名 60 次/小时）：
 

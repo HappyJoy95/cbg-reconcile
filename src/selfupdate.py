@@ -11,14 +11,20 @@
 **两个仓库，各管一半**（2026-10-02 起源码仓 / 发行仓分离）
 
 * `RELEASE_REPO`（**公开**，见下面 `RELEASE_ASSET`）—— 客户端**唯一依赖**的仓库：
-  版本号在它的 `VERSION` 里，更新包在它的 Releases 里。它**不含任何 `.py` 源码**。
-* `REPO`（源码仓，将改 **Private**）—— 只作**退路**：发行仓出问题时才问它。
-  源码仓私有化之后这条路会 404，但**正常情况下根本走不到**（发行仓先成功），
-  所以门店不会因为源码仓变私有而失去更新能力。
+  版本号在它的 `VERSION` 里，更新包在它的 Releases 里。
+  它**不含任何 `.py` 源码**，连更新包本身都是**密文**（路线 A）。
+* `REPO`（源码仓，将改 **Private**）—— **只作版本号的退路**：
+  发行仓的 `VERSION` 读不到时才问它。
 
-⚠ **顺序绝对不能反**：发行仓必须排在源码仓前面。反过来的话，
-  源码仓一私有，还在跑旧代码的门店**当场就查不到更新**，而且没有任何补救 ——
-  这是整次迁移里唯一不可逆的一步，顺序就是它的保险。
+⚠ **下载没有源码仓退路**（2026-10-02 用户定「不过渡，当做没有门店用过」）：
+  源码仓 zipball 给的是**明文**，留着它就等于公开渠道上还有一条明文路。
+  所以下载只从发行仓拿，且 `_unseal_in_place` 收到明文**直接报错**（fail closed）。
+  发行仓短时间不可用就等下一轮（`auto_update` 每小时一次），
+  不为了可用性把明文路留着。
+
+⚠ **顺序绝对不能反**（只针对**版本号**那两个源）：发行仓必须排在源码仓前面。
+  反过来的话，源码仓一私有，还在跑旧代码的门店**当场就查不到更新**，
+  而且没有任何补救 —— 这是整次迁移里唯一不可逆的一步，顺序就是它的保险。
 
 ⚠ **全程不碰 `github.com`**。实测（本机直连，无代理）：
   `api.github.com` 0.35s / `codeload` 0.5s / `objects.githubusercontent.com` 2.4s，
@@ -62,15 +68,11 @@ RELEASE_BRANCH = "main"
 #: 发行仓里更新包的**固定名字** —— 每条 Release 都叫这个，
 #: 于是 `/releases/latest/download/<它>` 永远指向最新那一版，不用先查 API。
 #:
-#: ⚠ **两个名字**（路线 A，2026-10-02）：正式发出去的是 `.sealed`（**密文**，
-#:   公开仓上读不出源码）；`.zip` 留给**过渡期**的明文包。
-#:   `_release_asset_url` **优先 `.sealed`** —— 过渡期两种包都下得下来，
-#:   撤掉明文那份之后老客户端也不会去下一个 404。
-RELEASE_ASSET = "cbg-reconcile-update.zip"
-RELEASE_ASSET_SEALED = "cbg-reconcile-update.zip.sealed"
-
-#: 认资产的顺序（密文在前）
-_ASSET_ORDER = (RELEASE_ASSET_SEALED, RELEASE_ASSET)
+#: ⚠ **只发这一个，而且它是密文**（路线 A，2026-10-02 用户定：
+#:   「不过渡，现在就当做没有门店用过」）—— 所以**没有明文资产那条退路**，
+#:   `_unseal_in_place` 拿到明文**直接报错**（fail closed）。
+#:   以前部署过的客户端用的是它们自己代码里那份名单，不受这里影响。
+RELEASE_ASSET = "cbg-reconcile-update.zip.sealed"
 
 # 源码仓。**发行仓排在它前面**（见模块文档里那条"顺序绝对不能反"）。
 REPO = "HappyJoy95/cbg-reconcile"
@@ -136,42 +138,36 @@ def _release_asset_url(timeout: int = 15) -> tuple:
     if not isinstance(info, dict):
         return "", ""
     tag = str(info.get("tag_name") or "")
-    assets = [a for a in (info.get("assets") or []) if isinstance(a, dict)]
-    # ⚠ **密文优先**（`_ASSET_ORDER`）：过渡期两种资产都在，先取密封的那份；
-    #   之后明文那份撤掉，这里自然只拿得到 `.sealed`。
-    for want in _ASSET_ORDER:
-        for a in assets:
-            if a.get("name") == want and a.get("url"):
-                return str(a["url"]), tag
+    for a in (info.get("assets") or []):
+        if isinstance(a, dict) and a.get("name") == RELEASE_ASSET and a.get("url"):
+            return str(a["url"]), tag
     return "", tag
 
 
 def _zip_urls(ref: str) -> list:
     """候选下载地址，**按可靠性排序** —— 每项是 `(url, headers)`。
 
-    1. Release 资产的 **api 直链**（`_release_asset_url` 现查，最可靠；
-       密文那份优先）；
-    2~4. `github.com/.../releases/download/<tag|latest>/<资产名>` ——
+    1. Release 资产的 **api 直链**（`_release_asset_url` 现查，最可靠）；
+    2~3. `github.com/.../releases/download/<tag|latest>/<资产名>` ——
        不吃 API 配额，但那个域名在门店/本机网络里时通时断（见模块文档），
-       所以只排第二；两个资产名各来一条（密文在前）；
-    5~6. **源码仓退路**（`api` 的 zipball + `codeload`）——
-       源码仓私有化之后会 404，但正常走不到（发行仓先成功）。
+       所以只排第二。
 
-    `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
+    ⚠ **没有源码仓那条退路**（2026-10-02 用户定「不过渡」）：
+      它给的是**明文** zipball —— 走它就等于公开渠道上还有一条明文路，
+      而 `_unseal_in_place` 也不再收明文了。发行仓出问题就等下一轮重试
+      （`auto_update` 每小时一次），别为了可用性把那条明文路留着。
+
+    `ref` 参数留着是为了不改调用方签名（`repair()` 会传）。
     """
     urls = []
     asset, tag = _release_asset_url()
     if asset:
         urls.append((asset, _OCTET_HEADERS))
     if tag:
-        for name in _ASSET_ORDER:
-            urls.append((f"https://github.com/{RELEASE_REPO}/releases/download/"
-                         f"{tag}/{name}", None))
-    for name in _ASSET_ORDER:
-        urls.append((f"https://github.com/{RELEASE_REPO}/releases/latest/download/"
-                     f"{name}", None))
-    urls.append((f"https://api.github.com/repos/{REPO}/zipball/{ref}", None))
-    urls.append((f"https://codeload.github.com/{REPO}/zip/refs/heads/{ref}", None))
+        urls.append((f"https://github.com/{RELEASE_REPO}/releases/download/"
+                     f"{tag}/{RELEASE_ASSET}", None))
+    urls.append((f"https://github.com/{RELEASE_REPO}/releases/latest/download/"
+                 f"{RELEASE_ASSET}", None))
     return urls
 
 
@@ -668,12 +664,17 @@ def _describe_payload(blob: Path, status: int, ctype: str) -> str:
 
 
 def _unseal_in_place(path: Path, root=None) -> str:
-    """包是密文就**解成 zip**（就地），返回一句说明（明文包返回 `""`）。
+    """把**密文**包解成 zip（就地），返回一句说明。
+
+    ⚠ **明文直接报错**（2026-10-02 用户定「不过渡，当做没有门店用过」）——
+      fail closed：收到明文只可能是"下错了东西"（错误页、镜像站、被换过的
+      资产），而按明文铺下去等于**把源码从公开渠道装进门店**，
+      正是路线 A 要消灭的事。宁可这次更新失败，也不接受它。
 
     ⚠ 解不开**抛 `UpdateError`** —— 调用方的 `except` 会把这句话记进报错，
-      然后接着试下一个源。过渡期明文那份还在 ⇒ 这儿失败还有救；
-      等明文撤掉，报错里就会留下「本机没有更新包密钥 … —— 把 release.key
-      放进 .secrets\\」这种**能照做**的话（`mailcrypto.unseal` 那句）。
+      然后接着试下一个源；全挂了就把话原样端给门店。
+      `mailcrypto.unseal` 缺钥匙时那句已经能照做（"把 release.key 放进
+      .secrets"），钥匙**不对**时它只会说"校验不过"，所以这里补一句。
 
     ⚠ 用 `rel=RELEASE_KEY_REL` —— 邮件附件那把钥匙解不开更新包，
       而解不开**不会报"钥匙用错了"**，只报"校验不过"，非常难查。
@@ -684,7 +685,10 @@ def _unseal_in_place(path: Path, root=None) -> str:
     except OSError as e:
         raise UpdateError(f"读不下刚下的包：{e}") from e
     if not mailcrypto.is_sealed(data):
-        return ""                        # 明文老包 —— 照旧
+        raise UpdateError(
+            "下下来的东西**不是密文包** —— 路线 A 之后公开仓上只发加密的更新包，"
+            "收到明文说明下错了（代理/镜像站换过内容？）。"
+            f"开头是：{data[:16]!r}")
     plain, how = mailcrypto.unseal(data, root=root, rel=mailcrypto.RELEASE_KEY_REL)
     if how.get("state") != "opened":
         why = str(how.get("why") or "未知原因")
@@ -704,16 +708,17 @@ def _unseal_in_place(path: Path, root=None) -> str:
 
 
 def download(timeout: int = 120, ref: str = BRANCH, root=None) -> Path:
-    """把**发行包**下到临时目录，返回解压出来的根目录。
+    """把**发行包（密文）**下到临时目录，返回解压出来的根目录。
 
     候选地址按可靠性排序（见 `_zip_urls`）：Release 资产的 api 直链 →
-    两条 `github.com` 直链 → 源码仓的 zipball / codeload（**退路**，
-    源码仓私有化之后会 404，但正常走不到）。
+    两条 `github.com` 直链。**只从发行仓拿，没有源码仓那条明文退路**
+    （2026-10-02 用户定「不过渡」，理由见 `_zip_urls`）。
 
-    资产是**密文**时先解封再解压（见 `_unseal_in_place`）；`root` 指到
-    安装目录（密钥在 `<root>/.secrets/release.key`），不传就用本机默认那套。
+    下来的东西**必须是密文**（`_unseal_in_place`），解开再解压；
+    `root` 指到安装目录（密钥在 `<root>/.secrets/release.key`），
+    不传就用本机默认那套。
 
-    `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
+    `ref` 参数留着不改调用方签名（`repair()` 会传），实际不参与选地址。
     """
     import requests
     tmp = Path(tempfile.mkdtemp(prefix="cbg-update-"))
