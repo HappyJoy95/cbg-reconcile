@@ -964,18 +964,10 @@ def cmd_selftest(args) -> int:
             print(f"  {pkg:<8} ⚠️ 没装")
 
     head(1, "单元测试")
-    # ⚠ **exe 安装包里没有 `tests/`**（打包时不下发，见 AGENTS「仓库 ≠ 包内容」）。
-    #   不判这一下，`unittest.discover` 会抛 `Start directory is not importable`，
-    #   自检**整段中断**在第 1 节 —— 门店看到的是"程序报了个英文错"，
-    #   而后面 2/3/4 节（浏览器、会话、服务）根本没跑到。
-    if not (ROOT / "tests").is_dir():
-        print("  （exe 安装包不下发测试 —— 跳过）")
-    else:
-        suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"),
-                                                    top_level_dir=str(ROOT))
-        res = unittest.TextTestRunner(verbosity=0, stream=sys.stdout).run(suite)
-        if not res.wasSuccessful():
-            failures.append("单元测试没过")
+    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"), top_level_dir=str(ROOT))
+    res = unittest.TextTestRunner(verbosity=0, stream=sys.stdout).run(suite)
+    if not res.wasSuccessful():
+        failures.append("单元测试没过")
 
     head(2, "浏览器（自动抓 cookie 要用）")
     # ⚠ cfg 要**先加载**：浏览器选哪个由 `browser.prefer` 定（默认 Chrome 优先）

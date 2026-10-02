@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -157,8 +156,6 @@ VERSION = "26.1002.145826"           # 发版号；正式打包会改成 yy.mmdd
 
 BUILD_FILE = ROOT / "BUILD.txt"
 UNPACKAGED = "源码运行（未打包）"
-#: 冻结成 exe 但**没有** `BUILD.txt` 时的说法（CI 忘了写指纹时用）
-FROZEN_NO_BUILD = "exe 打包（BUILD.txt 不在）"
 
 
 def _git_dir(root: Optional[Path] = None) -> Path:
@@ -241,19 +238,12 @@ def git_stamp(root: Optional[Path] = None) -> str:
 
 
 def build_id() -> str:
-    """构建指纹。优先级：BUILD.txt > .git > 冻结成 exe > "源码运行（未打包）"。"""
+    """构建指纹。优先级：BUILD.txt > .git > "源码运行（未打包）"。"""
     try:
         txt = BUILD_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         txt = ""
-    if txt:
-        return txt
-    # ⚠ 打包成 exe 之后既没有 `BUILD.txt`（CI 忘了写）也没有 `.git` ——
-    #   这时说"源码运行（未打包）"是**假的**：它明明是打包出来的，
-    #   而且这行字正是门店判断"我跑的是哪一版"的唯一线索。单独给它一个说法。
-    if getattr(sys, "frozen", False):
-        return FROZEN_NO_BUILD
-    return git_stamp() or UNPACKAGED
+    return txt or git_stamp() or UNPACKAGED
 
 
 def packaged() -> bool:
