@@ -4287,7 +4287,9 @@ class Handler(BaseHTTPRequestHandler):
             # dry=1 只下下来看看会改哪些文件，**不落盘** —— 让人更新前先看一眼
             if body.get("dry"):
                 try:
-                    root = selfupdate.download()
+                    # ⚠ `root=` 是**安装目录**（密钥在 `<root>/.secrets/release.key`）——
+                    #   不传的话密文包解不开，dry 预览就白做。
+                    root = selfupdate.download(root=app.root)
                     try:
                         pairs = selfupdate._targets(root)
                         return self._json({"ok": True, "files": sorted(

@@ -1631,3 +1631,103 @@ class Test邮件密钥随包播种(unittest.TestCase):
         self.assertIn(mailcrypto.PACK_NAME, gi, "打包注入的密钥文件绝不能进 git")
         self.assertFalse((ROOT / mailcrypto.PACK_NAME).exists(),
                          "仓库根出现了 %s —— 删掉它" % mailcrypto.PACK_NAME)
+
+
+class Test更新包密钥随包播种(unittest.TestCase):
+    """路线 A（2026-10-02）：公开 Release 上只放**密文**更新包。
+
+    链路跟邮件那把同构（打包注入 → 安装播种 → `.secrets/` 在 `NEVER_TOUCH` 里），
+    但**钥匙是分开的** —— 理由见 `mailcrypto.RELEASE_KEY_REL`：
+    邮件密钥泄露是"附件能被谁看"，这把泄露是**公开仓上的包人人能解**，
+    整条加密路线当场作废。
+
+    ⚠ 跟邮件那把**必须互不干扰**：两把都在的时候，各自 seal/unseal 各走各的，
+      用错钥匙只会得到"校验不过"（不会报"钥匙错了"），所以只能靠测试钉。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _seed(self):
+        import bootstrap
+        old = bootstrap.ROOT
+        bootstrap.ROOT = self.root
+        try:
+            bootstrap._seed_release_key()
+        finally:
+            bootstrap.ROOT = old
+
+    def _pack(self, src_root):
+        """模拟 `tools/build_package.sh`：把打包机的密钥拷到包根。"""
+        import shutil
+        from src import mailcrypto
+        shutil.copy(str(src_root / mailcrypto.RELEASE_KEY_REL),
+                    str(self.root / mailcrypto.RELEASE_PACK_NAME))
+
+    def test_装包的时候播进_secrets(self):
+        from src import mailcrypto
+        packer = self.root / "packer"
+        mailcrypto.new_key(packer, rel=mailcrypto.RELEASE_KEY_REL, note="随包")
+        self._pack(packer)
+
+        self._seed()
+        d = mailcrypto.describe(self.root, rel=mailcrypto.RELEASE_KEY_REL)
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["key_id"], "m1")
+        # ⚠ 播进 `.secrets/`（`NEVER_TOUCH` 里）—— 这是"之后升级不动它"的前提
+        self.assertTrue((self.root / mailcrypto.RELEASE_KEY_REL).is_file())
+
+    def test_包里没带就什么都不做(self):
+        """老安装包本来就没有它 —— 不该因此报错，更不该凭空造一把。"""
+        self._seed()
+        from src import mailcrypto
+        self.assertFalse((self.root / mailcrypto.RELEASE_KEY_REL).exists(),
+                         "包里没密钥时不该凭空造一个出来")
+
+    def test_两把钥匙各是各的(self):
+        """⭐ 核心不变量：邮件那把**解不开**更新包密文，反过来也一样。"""
+        from src import mailcrypto
+        mailcrypto.new_key(self.root)                       # 邮件 m1
+        mailcrypto.new_key(self.root, rel=mailcrypto.RELEASE_KEY_REL)
+        self.assertNotEqual(mailcrypto.load(self.root),
+                            mailcrypto.load(self.root, mailcrypto.RELEASE_KEY_REL),
+                            "两把钥匙不该是同一把")
+
+        sealed_by_pack, how = mailcrypto.seal(
+            b"zip-bytes", root=self.root, rel=mailcrypto.RELEASE_KEY_REL)
+        self.assertEqual(how["state"], "sealed")
+
+        # 用**邮件**那把去解更新包的密文 ⇒ 必须失败（且不是"当明文放行"）
+        bad, hb = mailcrypto.unseal(sealed_by_pack, root=self.root)
+        self.assertEqual(hb["state"], "failed", "用错钥匙不能被当成明文")
+        self.assertEqual(bad, b"", "解不开时不许返回半截数据")
+
+        good, hg = mailcrypto.unseal(sealed_by_pack, root=self.root,
+                                     rel=mailcrypto.RELEASE_KEY_REL)
+        self.assertEqual(hg["state"], "opened")
+        self.assertEqual(good, b"zip-bytes")
+
+    def test_缺钥匙时的报错要能照做(self):
+        """⚠ 门店看到的就是这一句 —— 只说"解不开"等于没说。"""
+        from src import mailcrypto
+        mailcrypto.new_key(self.root, rel=mailcrypto.RELEASE_KEY_REL)
+        sealed, _ = mailcrypto.seal(b"x", root=self.root,
+                                    rel=mailcrypto.RELEASE_KEY_REL)
+        empty = Path(self.tmp.name) / "other"
+        empty.mkdir()
+        _, h = mailcrypto.unseal(sealed, root=empty,
+                                 rel=mailcrypto.RELEASE_KEY_REL)
+        self.assertEqual(h["state"], "failed")
+        self.assertIn("release.key", h["why"], "要说出把哪个文件放到哪")
+        self.assertIn(".secrets", h["why"])
+
+    def test_仓库里不许有它(self):
+        """⚠ 公开仓上去一次，密文包就人人能解 —— 三道：gitignore +
+        打包脚本反查 + 发布脚本的 BAN_NAMES。"""
+        from src import mailcrypto
+        gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("release.key", gi, "打包注入的密钥文件绝不能进 git")
+        self.assertFalse((ROOT / mailcrypto.RELEASE_PACK_NAME).exists(),
+                         "仓库根出现了 %s —— 删掉它" % mailcrypto.RELEASE_PACK_NAME)

@@ -46,6 +46,19 @@ keystream 的第 i 块 = `HMAC-SHA256(ek, nonce || i)` —— 这就是
 | 包根（投递用） | `mail-key.json` | `tools/build_package.sh` 从上一行拷进去 |
 | 门店 / 区长机器 | `.secrets/mail-key.json` | 安装时 `bootstrap._seed_mail_key()` 播种 |
 
+**第二把：更新包的**（路线 A，2026-10-02）—— 同一条链，但钥匙分开：
+
+| 谁 | 路径 | 谁生成 |
+|---|---|---|
+| 打包机 | `.secrets/release.key` | 人工：`python -m src.cli release-key-new` |
+| 包根（投递用） | `release.key` | `tools/build_package.sh` 从上一行拷进去 |
+| 门店机器 | `.secrets/release.key` | 安装时 `bootstrap._seed_release_key()` 播种 |
+| 用它的地方 | 公开 Release 上的 `.zip.sealed` | `publish_release.sh` 加密 / `selfupdate` 解密 |
+
+⚠ **两把钥匙互不通用**（`Test更新包密钥随包播种::test_两把钥匙各是各的` 钉着）。
+用错的那一把不会报"钥匙错了"，只会报「校验不过 —— 密钥不对，或者内容被改过」
+—— 这正是 `selfupdate._unseal_in_place` 要把话补成"能照做"的原因。
+
 **「随大版本安装包走、不进小版本推包」是这条路子的天然性质**：
 自更新（门店唯一的自动升级通道）是从**公开** GitHub 仓库拉 zip
 （`selfupdate.REPO`，匿名读）⇒ 密钥**绝不能进 git**，进去了等于公开；
@@ -110,6 +123,25 @@ KEY_REL = ".secrets/mail-key.json"
 #: ⚠ 它**不在仓库里**（`.gitignore` 排掉 + 有测试盯着），是打包脚本塞进去的。
 PACK_NAME = "mail-key.json"
 
+# ── 第二把钥匙：**更新包的**（路线 A，2026-10-02）────────────────────────
+#
+# 用户定的：公开 Release 上只放**密文**，门店下载后本地解密再照常铺。
+# 于是需要一把"加密公开包"的密钥，而它跟邮件那把**必须分开**：
+#
+#   * 邮件密钥泄露 ⇒ 别人能读邮件附件（业务数据）；
+#   * 更新包密钥泄露 ⇒ **公开仓上的包人人能解** ⇒ 源码回到裸奔，
+#     整条路线当场作废。爆炸半径差一个量级，不许共用一把。
+#
+# ⚠ **文件格式跟 `mail-key.json` 一模一样**（`{"current", "keys"}`）——
+#   `load/_load_file/_keys_for` 原样复用，老 key 也一直留着能解历史包。
+#   所有碰密钥的函数都多收一个 `rel=`（默认还是邮件那把），
+#   **默认值不变 ⇒ 现有调用点一行都不用改**，也就不会静默改到邮件那条路。
+# ⚠ 位置在 `.secrets/` ⇒ `selfupdate.NEVER_TOUCH` 覆盖它 ⇒ 自更新覆盖不到、
+#   也删不掉，装一次一直有效（和邮件密钥同一条性质）。
+RELEASE_KEY_REL = ".secrets/release.key"
+#: 包里那份（**包根**）—— 安装时播种，跟 `PACK_NAME` 同一条路。
+RELEASE_PACK_NAME = "release.key"
+
 
 class MailKeyError(RuntimeError):
     """密钥文件本身有问题（坏了 / 版本对不上）。⚠ 只给 `cli` 和自检用，
@@ -118,14 +150,14 @@ class MailKeyError(RuntimeError):
 
 # ------------------------------------------------------------------ 路径与读写
 
-def key_file(root=None) -> Path:
-    """本机密钥文件（`.secrets/mail-key.json`）。"""
-    return Path(root or ROOT) / KEY_REL
+def key_file(root=None, rel: str = KEY_REL) -> Path:
+    """本机密钥文件。`rel` 默认是邮件那把；更新包那把传 `RELEASE_KEY_REL`。"""
+    return Path(root or ROOT) / rel
 
 
-def pack_file(root=None) -> Path:
-    """包里那份密钥（包根 `mail-key.json`）—— 只在安装时读一次。"""
-    return Path(root or ROOT) / PACK_NAME
+def pack_file(root=None, name: str = PACK_NAME) -> Path:
+    """包里那份密钥（包根）—— 只在安装时读一次。"""
+    return Path(root or ROOT) / name
 
 
 def _load_file(path: Path) -> Dict:
@@ -175,24 +207,24 @@ def _parse_item(v) -> Dict:
             "note": str(v.get("note") or "")}
 
 
-def load(root=None) -> Dict:
+def load(root=None, rel: str = KEY_REL) -> Dict:
     """本机密钥（已解析）。返回 `{"current": str, "keys": {id: {...}}}`。"""
-    return _load_file(key_file(root))
+    return _load_file(key_file(root, rel))
 
 
-def describe(root=None) -> Dict:
+def describe(root=None, rel: str = KEY_REL) -> Dict:
     """**给人看**的密钥状态（自检 / `cli mail-key-show` / 界面）。
 
     ⚠ **绝不返回密钥本体** —— 这个字典会被打进自检输出、日志、界面，
     带出去一次就等于密钥泄露一次。要核对密钥请比 `key_id`，别比内容。
     """
-    p = key_file(root)
-    d = load(root)
+    p = key_file(root, rel)
+    d = load(root, rel)
     ids = sorted(d["keys"])
     cur = d["current"]
     if not ids:
         return {"ok": False, "key_id": "", "count": 0, "keys": [], "path": str(p),
-                "why": "没有密钥（%s 不存在）—— 附件不会被加密" % KEY_REL}
+                "why": "没有密钥（%s 不存在）—— 附件不会被加密" % rel}
     if not cur:
         return {"ok": False, "key_id": "", "count": len(ids), "keys": ids, "path": str(p),
                 "why": "密钥文件里没有 current（不知道该用哪把）"}
@@ -204,13 +236,13 @@ def describe(root=None) -> Dict:
 
 
 def save(root=None, current: str = "", keys: Optional[Dict] = None,
-         merge: bool = True) -> bool:
+         merge: bool = True, rel: str = KEY_REL) -> bool:
     """写密钥文件。`merge=True` 时**与已有内容合并**（老 key 留着 —— 见 `seed_from_pack`）。
 
     写不成返回 `False`（不抛）。
     """
-    p = key_file(root)
-    old = load(root) if merge else {"current": "", "keys": {}}
+    p = key_file(root, rel)
+    old = load(root, rel) if merge else {"current": "", "keys": {}}
     all_keys = dict(old["keys"])
     for k, v in (keys or {}).items():
         all_keys[str(k)] = v
@@ -248,27 +280,27 @@ def _next_id(keys: Dict) -> str:
     return "m%d" % (n + 1)
 
 
-def new_key(root=None, key_id: str = "", note: str = "") -> Dict:
+def new_key(root=None, key_id: str = "", note: str = "", rel: str = KEY_REL) -> Dict:
     """生成一把新密钥并**设为 current**（老 key 留着）。
 
     返回 `{"ok","key_id","path","why"}`。⚠ 生成之后**别再改它** ——
     改一把已经发出去的密钥 = 换密钥 = 所有老包解不开。
     """
-    d = load(root)
+    d = load(root, rel)
     kid = str(key_id or "").strip() or _next_id(d["keys"])
     if kid in d["keys"]:
-        return {"ok": False, "key_id": kid, "path": str(key_file(root)),
+        return {"ok": False, "key_id": kid, "path": str(key_file(root, rel)),
                 "why": "key_id %s 已经存在（换密钥请用一个新的号）" % kid}
     item = {"alg": ALG_H2CTR_ETM, "key": os.urandom(KEY_LEN),
             "created": datetime.date.today().isoformat(), "note": str(note or "")}
-    if not save(root, current=kid, keys={kid: item}):
-        return {"ok": False, "key_id": kid, "path": str(key_file(root)),
+    if not save(root, current=kid, keys={kid: item}, rel=rel):
+        return {"ok": False, "key_id": kid, "path": str(key_file(root, rel)),
                 "why": "写不进去（目录权限？）"}
-    return {"ok": True, "key_id": kid, "path": str(key_file(root)), "why": ""}
+    return {"ok": True, "key_id": kid, "path": str(key_file(root, rel)), "why": ""}
 
 
-def seed_from_pack(root=None) -> Dict:
-    """**安装时**把包根那份 `mail-key.json` 合并进 `.secrets/mail-key.json`。
+def seed_from_pack(root=None, rel: str = KEY_REL, name: str = PACK_NAME) -> Dict:
+    """**安装时**把包根那份密钥合并进 `.secrets/` 对应的那个文件。
 
     用户 2026-09-21 定的路子跟中台授权码同构（见 `bootstrap._seed_central_mail`）：
     打包时注入 → 安装时播种 → `.secrets/` 在 `NEVER_TOUCH` 里 ⇒ 一直有效。
@@ -283,14 +315,14 @@ def seed_from_pack(root=None) -> Dict:
     （`bootstrap`）拿它打印一行。**绝不抛**（那是启动路径上的东西，
     见 `ensure_layout` 的规矩）。
     """
-    pack = _load_file(pack_file(root))
+    pack = _load_file(pack_file(root, name))
     if not pack["keys"]:
         return {"ok": True, "why": "", "added": [], "was": "", "current": "",
                 "state": "none"}          # 包里没带 —— 什么都不做
-    cur = load(root)
+    cur = load(root, rel)
     added = [k for k in sorted(pack["keys"]) if k not in cur["keys"]]
     cur_id = str(pack["current"] or cur["current"] or sorted(pack["keys"])[-1])
-    if not save(root, current=cur_id, keys=pack["keys"], merge=True):
+    if not save(root, current=cur_id, keys=pack["keys"], merge=True, rel=rel):
         return {"ok": False, "why": "密钥写不进 .secrets/（目录权限？）",
                 "added": added, "was": cur["current"], "current": cur_id,
                 "state": "failed"}
@@ -337,7 +369,7 @@ def _keys_for(d: Dict, kid: str) -> Optional[bytes]:
     return item["key"] if item else None
 
 
-def seal(data: bytes, *, root=None) -> Tuple[bytes, Dict]:
+def seal(data: bytes, *, root=None, rel: str = KEY_REL) -> Tuple[bytes, Dict]:
     """加密。返回 `(要发出去的字节, 说明)`。
 
     说明：`{"state": "sealed"|"plain", "key_id": str, "why": str}`
@@ -345,13 +377,17 @@ def seal(data: bytes, *, root=None) -> Tuple[bytes, Dict]:
     ⚠ **没密钥 / 出错时返回原文 + `state="plain"`**，不抛、也不挡业务 ——
       业务连续性优先（上报是门店的日常），但调用方**必须把 `state` 说出来**
       （`mailer` 会往正文里写一行）。静默降级是这个项目最忌讳的一类错。
+
+    ⚠ `rel` 选哪把钥匙：邮件附件走默认（`KEY_REL`）；**公开 Release 上的
+      更新包必须传 `RELEASE_KEY_REL`** —— 用错钥匙不会报错，只会让
+      门店解不开（而那时包已经在公开仓上了）。
     """
     data = bytes(data or b"")
-    d = load(root)
+    d = load(root, rel)
     kid = d["current"]
     K = _keys_for(d, kid) if kid else None
     if not K:
-        why = describe(root)["why"] or "密钥文件里没有 current"
+        why = describe(root, rel)["why"] or "密钥文件里没有 current"
         return data, {"state": "plain", "key_id": "", "why": why}
     try:
         kb = kid.encode("ascii")
@@ -370,7 +406,7 @@ def seal(data: bytes, *, root=None) -> Tuple[bytes, Dict]:
     return body + tag, {"state": "sealed", "key_id": kid, "why": ""}
 
 
-def unseal(data: bytes, *, root=None) -> Tuple[bytes, Dict]:
+def unseal(data: bytes, *, root=None, rel: str = KEY_REL) -> Tuple[bytes, Dict]:
     """解密。返回 `(原始字节, 说明)`。
 
     说明：`{"state": "opened"|"plain"|"failed", "key_id": str, "why": str}`
@@ -407,14 +443,22 @@ def unseal(data: bytes, *, root=None) -> Tuple[bytes, Dict]:
     ct = data[off + NONCE_LEN:-TAG_LEN]
     tag = data[-TAG_LEN:]
 
-    d = load(root)
+    d = load(root, rel)
     K = _keys_for(d, kid)
     if not K:
-        # ⚠ 这句要能回答"我该怎么办" —— 门店/区长看到的就这一行
-        return b"", {"state": "failed", "key_id": kid,
-                     "why": "本机没有密钥 %s（这台机器上的密钥：%s）—— "
-                            "需要用带密钥的完整安装包装一次"
-                            % (kid, "、".join(sorted(d["keys"])) or "一把都没有")}
+        # ⚠ 这句要能回答"我该怎么办" —— 门店/区长看到的就这一行。
+        #   两把钥匙的补救动作不一样（邮件：装完整安装包；更新包：把
+        #   release.key 放进 .secrets\），所以按 `rel` 分开说。
+        if rel == RELEASE_KEY_REL:
+            why = ("本机没有更新包密钥 %s（这台机器上的：%s）—— "
+                   "把 %s 放进 .secrets\\ 再点一次更新，或者拿一次完整安装包"
+                   % (kid, "、".join(sorted(d["keys"])) or "一把都没有",
+                      RELEASE_PACK_NAME))
+        else:
+            why = ("本机没有密钥 %s（这台机器上的密钥：%s）—— "
+                   "需要用带密钥的完整安装包装一次"
+                   % (kid, "、".join(sorted(d["keys"])) or "一把都没有"))
+        return b"", {"state": "failed", "key_id": kid, "why": why}
     mk = hmac.new(K, b"cbgenc/mac" + nonce, hashlib.sha256).digest()
     # ⚠ **先验 tag 再解密**（顺序不许换）+ `compare_digest`（不许 `==`）
     if not hmac.compare_digest(hmac.new(mk, data[:-TAG_LEN], hashlib.sha256).digest(),

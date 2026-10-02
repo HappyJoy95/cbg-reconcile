@@ -685,6 +685,51 @@ def cmd_mail_key_show(args) -> int:
     return EXIT_OK
 
 
+def cmd_release_key_new(args) -> int:
+    """生成**更新包的**加密密钥（路线 A）—— **只在打包那台机器上跑一次**。
+
+    链路跟邮件那把同构，但**钥匙是分开的**（见 `mailcrypto.RELEASE_KEY_REL`）：
+
+        这儿生成 → build_package.sh 塞进包根 release.key
+        → 门店 install.bat 由 bootstrap._seed_release_key() 播进 .secrets/
+        → publish_release.sh 用它**加密**公开仓上的更新包
+        → 门店 selfupdate 下载后用 .secrets/release.key 解开
+
+    ⚠ **公开资产里永远没有这把钥匙**（`publish_release.sh` 的 `BAN_NAMES` 挡着）。
+    ⚠ 生成之后**别再改**：改一把发出去的密钥 = 所有已经发出去的密文包解不开。
+    ⚠ 门店机器上**不用跑这个** —— 他们的钥匙是装包时播下来的。
+    """
+    from . import mailcrypto
+    got = mailcrypto.new_key(ROOT, key_id=getattr(args, "key_id", "") or "",
+                             note=getattr(args, "note", "") or "",
+                             rel=mailcrypto.RELEASE_KEY_REL)
+    if not got.get("ok"):
+        print(f"❌ {got.get('why')}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"✅ 生成更新包密钥 {got['key_id']} → {got['path']}")
+    print()
+    print("下一步：打正式包时 tools/build_package.sh 会把它塞进包根（release.key），")
+    print("       门店装包时由 bootstrap 播进 .secrets/，之后自更新不会动它。")
+    print("⚠ 它**不进仓库、也不进公开资产** —— .gitignore 和发布脚本两道都挡着。")
+    return EXIT_OK
+
+
+def cmd_release_key_show(args) -> int:
+    """看更新包密钥状态 —— ⚠ **不打印密钥本体**（进日志/截图就等于泄露）。"""
+    from . import mailcrypto
+    d = mailcrypto.describe(ROOT, rel=mailcrypto.RELEASE_KEY_REL)
+    print(f"密钥文件：{d['path']}")
+    if d.get("ok"):
+        print(f"当前密钥：{d['key_id']}"
+              f"（本机共 {len(d.get('keys') or [])} 把：{'、'.join(d.get('keys') or [])}）")
+        print("公开仓上的更新包用它加密 —— 这台机器能正常自更新。")
+    else:
+        print(f"⚠️ 没有可用的密钥：{d.get('why')}")
+        print("   ⇒ 这台机器**解不开公开仓上的密文更新包**，自更新会失败。")
+        print("     把 release.key 放进 .secrets\\，或拿一次完整安装包重装。")
+    return EXIT_OK
+
+
 def cmd_mail_test(args) -> int:
     """发一封测试邮件 —— 界面上「发送测试邮件」按钮走的就是这条。"""
     cfg = load_config(args.config)
@@ -956,6 +1001,22 @@ def cmd_selftest(args) -> int:
         print(f"          {_mk.get('why') or ''}")
         print("          3.0.0 之前的机器靠自更新升上来时就是这样：")
         print("          把带密钥的完整安装包再拷一次、双击 install.bat 就有了。")
+    # ⚠ **更新包密钥**（路线 A，2026-10-02）—— 公开仓上是密文包，靠它解开。
+    #   ⚠ 这里**不算 failures**：过渡期明文那份还在（`_ASSET_ORDER` 会退回 `.zip`），
+    #     所以没钥匙暂时还升得上去；等明文撤了，`selfupdate` 的报错会自己说清楚
+    #     （`mailcrypto.unseal` 那句"把 release.key 放进 .secrets"）。
+    #     现在就判失败，会让一批还没拿到钥匙的机器在自检里红一片、而其实能用。
+    try:
+        _rk = _mailcrypto.describe(ROOT, rel=_mailcrypto.RELEASE_KEY_REL)
+    except Exception as _e:                                    # noqa: BLE001
+        _rk = {"ok": False, "why": "读不出来：%s" % _e, "key_id": "", "keys": []}
+    if _rk.get("ok"):
+        print(f"  更新包密钥 {_rk['key_id']}"
+              f"（本机 {len(_rk.get('keys') or [])} 把）—— 公开仓的密文更新包解得开")
+    else:
+        print("  更新包密钥 ⚠️ 没有 —— 明文更新包撤掉之后**自更新会失败**")
+        print(f"          {_rk.get('why') or ''}")
+        print("          解法：把 release.key 放进 .secrets\\，或拿一次完整安装包。")
     import importlib.metadata as md
     for pkg in ("requests", "PyYAML", "openpyxl"):
         try:
@@ -2147,6 +2208,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("mail-key-show", help="看邮件附件加密的密钥状态（不打印密钥本体）")
     p.set_defaults(func=cmd_mail_key_show)
+
+    p = sub.add_parser("release-key-new",
+                       help="生成更新包的加密密钥（**只在打包那台机器上跑**）")
+    p.add_argument("--key-id", default="", help="指定编号（默认自动排 m1 / m2 …）")
+    p.add_argument("--note", default="", help="备注，写进密钥文件备忘")
+    p.set_defaults(func=cmd_release_key_new)
+
+    p = sub.add_parser("release-key-show",
+                       help="看更新包密钥状态（不打印密钥本体）")
+    p.set_defaults(func=cmd_release_key_show)
 
     p = sub.add_parser("wecom-test", help="往企微群推一条测试消息，验证 webhook")
     p.set_defaults(func=cmd_wecom_test)

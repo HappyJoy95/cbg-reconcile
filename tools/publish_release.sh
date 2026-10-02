@@ -53,10 +53,15 @@ done
 # ------------------------------------------------------- 从代码里读发行仓配置
 RELEASE_REPO="$(sed -n 's/^RELEASE_REPO *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
 RELEASE_ASSET="$(sed -n 's/^RELEASE_ASSET *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
-if [ -z "${RELEASE_REPO}" ] || [ -z "${RELEASE_ASSET}" ]; then
-  echo "✗ 读不出发行仓配置（src/selfupdate.py 里的 RELEASE_REPO / RELEASE_ASSET）"
+RELEASE_ASSET_SEALED="$(sed -n 's/^RELEASE_ASSET_SEALED *= *"\([^"]*\)".*/\1/p' "${ROOT}/src/selfupdate.py")"
+if [ -z "${RELEASE_REPO}" ] || [ -z "${RELEASE_ASSET}" ] || [ -z "${RELEASE_ASSET_SEALED}" ]; then
+  echo "✗ 读不出发行仓配置（src/selfupdate.py 里的 RELEASE_REPO / RELEASE_ASSET*）"
   exit 1
 fi
+# 上传的**最终**资产名 —— 路线 A：只发密文（`.sealed`）。
+# 明文那个名字（`RELEASE_ASSET`）留给过渡期，客户端 `_ASSET_ORDER` 两个都认。
+ASSET="${RELEASE_ASSET_SEALED}"
+SHA_NAME="${ASSET}.sha256"
 
 # ------------------------------------------------------------------ 挑包
 if [ -z "${ZIP_IN}" ]; then
@@ -93,23 +98,30 @@ else
 fi
 
 echo "==> 发行仓：${RELEASE_REPO}"
-echo "==> 资产名：${RELEASE_ASSET}"
+echo "==> 资产名：${ASSET}（密文）"
 echo "==> 要发的包：${ZIP_IN}"
 echo "    版本：${VER}   标签：${TAG}   类型：${KIND}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-# ------------------------------------------------------- 剔密钥 + 反查断言
-echo "==> 剔除不该公开的文件，并反查"
-OUT_ZIP="${WORK}/${RELEASE_ASSET}"
-python3 - "${ZIP_IN}" "${OUT_ZIP}" "${VER}" <<'PYSTRIP'
-import sys, zipfile
+# ------------------------------------------- 剔敏感文件 → 加密 → 反查断言
+echo "==> 剔除不该公开的文件，加密，再反查"
+# `PLAIN` 是**中间产物**（剔完的明文 zip），加密完立刻删 —— 它留在 tmp 里
+# 就等于把源码摆在硬盘上，谁 `ls /tmp` 都能看见。
+OUT_ZIP="${WORK}/${ASSET}"
+PLAIN="${WORK}/update-plain.zip"
+python3 - "${ZIP_IN}" "${PLAIN}" "${VER}" "${ROOT}" "${OUT_ZIP}" <<'PYSTRIP'
+import os
+import sys
+import zipfile
 
-src, dst, ver = sys.argv[1], sys.argv[2], sys.argv[3]
+src, dst, ver, repo_root, out = sys.argv[1:6]
 
-#: 这两样是**打包时注入的密钥**，只随私发的安装包走，绝不能出现在公开资产里
-BAN_NAMES = {"central-mail.env", "mail-key.json"}
+#: 这些是**打包时注入的密钥**，只随私发的安装包走，绝不能出现在公开资产里
+#: （⚠ 就算整包已经加密，也照样剔 —— 密钥一旦泄露，公开仓上那份密文
+#:   谁都能解了，防线只剩一层）。
+BAN_NAMES = {"central-mail.env", "mail-key.json", "release.key"}
 #: **按整条路径**禁发（文件名本身无害，内容有害）：
 #:   `config/managers.yaml` = 区长名单 —— 里面是**云商登录名和私人邮箱**。
 #:   它在 `selfupdate.NEVER_TOUCH` 里（`config/` 整个目录），更新本来就不会覆盖它，
@@ -174,12 +186,45 @@ for r in dropped:
     print(f"        剔除：{r}")
 if not dropped:
     print("        （这个包本来就没带密钥 —— 说明它是自更新包，正常）")
+
+# ---------------------------------------------------------- 加密（路线 A）
+# ⚠ 走 `mailcrypto`（现成的 Encrypt-then-MAC），**不自己写加密**。
+#   用 `RELEASE_KEY_REL` 那把 —— 跟邮件那把分开，用错不会报"钥匙错了"，
+#   只会报"校验不过"，非常难查，所以必须写死在这里。
+sys.path.insert(0, repo_root)
+from src import mailcrypto                                   # noqa: E402
+
+with open(dst, "rb") as f:
+    plain = f.read()
+sealed, how = mailcrypto.seal(plain, root=repo_root,
+                              rel=mailcrypto.RELEASE_KEY_REL)
+if how.get("state") != "sealed":
+    print("    ✗ 加密没成 —— %s" % (how.get("why") or "未知原因"))
+    print("      先在打包机上生成一把：python -m src.cli release-key-new")
+    sys.exit(1)
+with open(out, "wb") as f:
+    f.write(sealed)
+
+# ---- 第三道闸：出来的**必须是密文**，而且当 zip 打不开
+if not mailcrypto.is_sealed(sealed):
+    sys.exit("    ✗ 产物不是我们的密文格式 —— 不上传")
+try:
+    with zipfile.ZipFile(out):
+        pass
+except zipfile.BadZipFile:
+    pass
+else:
+    sys.exit("    ✗ 密文居然能当 zip 打开 —— 等于没加密，不上传")
+
+os.remove(dst)                                # 明文中间产物：加密完立刻删
+print(f"    ✓ 已加密（密钥 {how.get('key_id')}）：{len(sealed)} 字节")
+print("    ✓ 密文当 zip 打不开（公开仓上读不出源码）")
 PYSTRIP
 
 # ------------------------------------------------------- 资产校验和
-( cd "${WORK}" && (shasum -a 256 "${RELEASE_ASSET}" 2>/dev/null || sha256sum "${RELEASE_ASSET}") \
-    > "${RELEASE_ASSET%.zip}.sha256" )
-echo "    sha256：$(cut -d' ' -f1 "${WORK}/${RELEASE_ASSET%.zip}.sha256")"
+( cd "${WORK}" && (shasum -a 256 "${ASSET}" 2>/dev/null || sha256sum "${ASSET}") \
+    > "${SHA_NAME}" )
+echo "    sha256：$(cut -d' ' -f1 "${WORK}/${SHA_NAME}")"
 
 if [ -n "${DRY_RUN}" ]; then
   echo
@@ -206,7 +251,11 @@ elif [ -n "${NOTES}" ]; then
 else
   NOTES_BODY="## ${TITLE}
 
-更新包：\`${RELEASE_ASSET}\`（校验和见同名 \`.sha256\`）
+更新包：\`${ASSET}\`（**加密**，校验和见同名 \`.sha256\`）
+
+> 下载下来是密文，程序会自己解 —— 门店不用做任何事。
+> 解不开说明这台机器缺更新包密钥：把 \`release.key\` 放进 \`.secrets\`
+> 目录再点一次更新，或者拿一次完整安装包。
 
 * 安装 / 升级步骤 → [门店操作手册](./门店操作手册.md)
 * 这一版改了什么 → [发布说明](./发布说明.md) · [CHANGELOG](./CHANGELOG.md)
@@ -227,7 +276,7 @@ fi
 echo "==> 发 Release：${TAG}"
 if gh release view "${TAG}" --repo "${RELEASE_REPO}" >/dev/null 2>&1; then
   echo "    标签已存在 —— 覆盖资产（同一个版本重发）"
-  gh release upload "${TAG}" "${OUT_ZIP}" "${WORK}/${RELEASE_ASSET%.zip}.sha256" \
+  gh release upload "${TAG}" "${OUT_ZIP}" "${WORK}/${SHA_NAME}" \
     --repo "${RELEASE_REPO}" --clobber
   if [ -n "${BETA}" ]; then
     gh release edit "${TAG}" "${GH_ARGS[@]}" --prerelease
@@ -235,7 +284,7 @@ if gh release view "${TAG}" --repo "${RELEASE_REPO}" >/dev/null 2>&1; then
     gh release edit "${TAG}" "${GH_ARGS[@]}" --latest
   fi
 else
-  gh release create "${TAG}" "${OUT_ZIP}" "${WORK}/${RELEASE_ASSET%.zip}.sha256" \
+  gh release create "${TAG}" "${OUT_ZIP}" "${WORK}/${SHA_NAME}" \
     "${GH_ARGS[@]}"
 fi
 echo "    ✓ https://github.com/${RELEASE_REPO}/releases/tag/${TAG}"

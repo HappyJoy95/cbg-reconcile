@@ -61,7 +61,16 @@ RELEASE_BRANCH = "main"
 
 #: 发行仓里更新包的**固定名字** —— 每条 Release 都叫这个，
 #: 于是 `/releases/latest/download/<它>` 永远指向最新那一版，不用先查 API。
+#:
+#: ⚠ **两个名字**（路线 A，2026-10-02）：正式发出去的是 `.sealed`（**密文**，
+#:   公开仓上读不出源码）；`.zip` 留给**过渡期**的明文包。
+#:   `_release_asset_url` **优先 `.sealed`** —— 过渡期两种包都下得下来，
+#:   撤掉明文那份之后老客户端也不会去下一个 404。
 RELEASE_ASSET = "cbg-reconcile-update.zip"
+RELEASE_ASSET_SEALED = "cbg-reconcile-update.zip.sealed"
+
+#: 认资产的顺序（密文在前）
+_ASSET_ORDER = (RELEASE_ASSET_SEALED, RELEASE_ASSET)
 
 # 源码仓。**发行仓排在它前面**（见模块文档里那条"顺序绝对不能反"）。
 REPO = "HappyJoy95/cbg-reconcile"
@@ -127,21 +136,25 @@ def _release_asset_url(timeout: int = 15) -> tuple:
     if not isinstance(info, dict):
         return "", ""
     tag = str(info.get("tag_name") or "")
-    want = RELEASE_ASSET
-    for a in (info.get("assets") or []):
-        if isinstance(a, dict) and a.get("name") == want and a.get("url"):
-            return str(a["url"]), tag
+    assets = [a for a in (info.get("assets") or []) if isinstance(a, dict)]
+    # ⚠ **密文优先**（`_ASSET_ORDER`）：过渡期两种资产都在，先取密封的那份；
+    #   之后明文那份撤掉，这里自然只拿得到 `.sealed`。
+    for want in _ASSET_ORDER:
+        for a in assets:
+            if a.get("name") == want and a.get("url"):
+                return str(a["url"]), tag
     return "", tag
 
 
 def _zip_urls(ref: str) -> list:
     """候选下载地址，**按可靠性排序** —— 每项是 `(url, headers)`。
 
-    1. Release 资产的 **api 直链**（`_release_asset_url` 现查，最可靠）；
-    2. `github.com/.../releases/download/<tag>/…` —— 不吃 API 配额，但那个域名
-       在门店/本机网络里时通时断（见模块文档），所以只排第二；
-    3. `github.com/.../releases/latest/download/<固定名>` —— 同上，且不用知道 tag；
-    4~5. **源码仓退路**（`api` 的 zipball + `codeload`）——
+    1. Release 资产的 **api 直链**（`_release_asset_url` 现查，最可靠；
+       密文那份优先）；
+    2~4. `github.com/.../releases/download/<tag|latest>/<资产名>` ——
+       不吃 API 配额，但那个域名在门店/本机网络里时通时断（见模块文档），
+       所以只排第二；两个资产名各来一条（密文在前）；
+    5~6. **源码仓退路**（`api` 的 zipball + `codeload`）——
        源码仓私有化之后会 404，但正常走不到（发行仓先成功）。
 
     `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
@@ -151,10 +164,12 @@ def _zip_urls(ref: str) -> list:
     if asset:
         urls.append((asset, _OCTET_HEADERS))
     if tag:
-        urls.append((f"https://github.com/{RELEASE_REPO}/releases/download/"
-                     f"{tag}/{RELEASE_ASSET}", None))
-    urls.append((f"https://github.com/{RELEASE_REPO}/releases/latest/download/"
-                 f"{RELEASE_ASSET}", None))
+        for name in _ASSET_ORDER:
+            urls.append((f"https://github.com/{RELEASE_REPO}/releases/download/"
+                         f"{tag}/{name}", None))
+    for name in _ASSET_ORDER:
+        urls.append((f"https://github.com/{RELEASE_REPO}/releases/latest/download/"
+                     f"{name}", None))
     urls.append((f"https://api.github.com/repos/{REPO}/zipball/{ref}", None))
     urls.append((f"https://codeload.github.com/{REPO}/zip/refs/heads/{ref}", None))
     return urls
@@ -652,12 +667,51 @@ def _describe_payload(blob: Path, status: int, ctype: str) -> str:
     return out
 
 
-def download(timeout: int = 120, ref: str = BRANCH) -> Path:
+def _unseal_in_place(path: Path, root=None) -> str:
+    """包是密文就**解成 zip**（就地），返回一句说明（明文包返回 `""`）。
+
+    ⚠ 解不开**抛 `UpdateError`** —— 调用方的 `except` 会把这句话记进报错，
+      然后接着试下一个源。过渡期明文那份还在 ⇒ 这儿失败还有救；
+      等明文撤掉，报错里就会留下「本机没有更新包密钥 … —— 把 release.key
+      放进 .secrets\\」这种**能照做**的话（`mailcrypto.unseal` 那句）。
+
+    ⚠ 用 `rel=RELEASE_KEY_REL` —— 邮件附件那把钥匙解不开更新包，
+      而解不开**不会报"钥匙用错了"**，只报"校验不过"，非常难查。
+    """
+    from . import mailcrypto
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        raise UpdateError(f"读不下刚下的包：{e}") from e
+    if not mailcrypto.is_sealed(data):
+        return ""                        # 明文老包 —— 照旧
+    plain, how = mailcrypto.unseal(data, root=root, rel=mailcrypto.RELEASE_KEY_REL)
+    if how.get("state") != "opened":
+        why = str(how.get("why") or "未知原因")
+        # ⚠ **"校验不过"是最难查的一种**（2026-10-02 测试当场逮到）：
+        #   本机有 release.key、但**不是打包机那把**时，`mailcrypto` 只会说
+        #   「密钥不对，或者内容被改过」—— 门店看到这句会以为包坏了，
+        #   于是去重装、去重下，白折腾好几轮，而真正该做的是换一把钥匙。
+        #   `unseal` 只在"**根本没有钥匙**"那种情况下提到 release.key，
+        #   所以这里补一句：已经提到的就不再重复。
+        if "release.key" not in why:
+            why += ("。这台机器的 release.key 跟打包机的**不是同一把** —— "
+                    "把正确的 release.key 放进 .secrets\\ 再试一次，"
+                    "或者拿一次完整安装包（它带这把钥匙）")
+        raise UpdateError("更新包是加密的，解不开 —— %s" % why)
+    path.write_bytes(plain)
+    return f"已解密（密钥 {how.get('key_id')}）"
+
+
+def download(timeout: int = 120, ref: str = BRANCH, root=None) -> Path:
     """把**发行包**下到临时目录，返回解压出来的根目录。
 
     候选地址按可靠性排序（见 `_zip_urls`）：Release 资产的 api 直链 →
     两条 `github.com` 直链 → 源码仓的 zipball / codeload（**退路**，
     源码仓私有化之后会 404，但正常走不到）。
+
+    资产是**密文**时先解封再解压（见 `_unseal_in_place`）；`root` 指到
+    安装目录（密钥在 `<root>/.secrets/release.key`），不传就用本机默认那套。
 
     `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
     """
@@ -672,6 +726,9 @@ def download(timeout: int = 120, ref: str = BRANCH) -> Path:
             with open(blob, "wb") as fp:
                 for chunk in r.iter_content(64 * 1024):
                     fp.write(chunk)
+            opened = _unseal_in_place(blob, root=root)
+            if opened:
+                _log(f"[更新] {host}: {opened}")
             with zipfile.ZipFile(blob) as z:
                 z.extractall(tmp)
             break
@@ -1223,7 +1280,7 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH, staging=None,
         raise UpdateError(f"安装目录不存在：{root}")
 
     zip_root = (Path(staging) if staging and Path(staging).is_dir()
-                else download(ref=ref))
+                else download(ref=ref, root=root))
     # ⚠ 这三个得在 try **外面**初始化：`except` 里要拿它们拼返回值
     started = False
     finished = False

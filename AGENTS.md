@@ -162,8 +162,12 @@ update-debug.py    更新失败时的现场诊断脚本
 # 1. 正式包：bash tools/build_package.sh
 #      → 自动 VER=$(date +%y.%m%d.%H%M%S)，写进包内 + 仓库 src/version.py
 # 2. 发到**发行仓**：bash tools/publish_release.sh
-#      → 剔掉 central-mail.env / mail-key.json 两把密钥（反查挡住），
-#        传成 Release 资产 cbg-reconcile-update.zip，并同步 VERSION / 文档 / CHANGELOG
+#      → ① 剔掉 central-mail.env / mail-key.json / config/managers.yaml（反查挡住）
+#         ② 用 `.secrets/release.key` **加密**（三道闸的最后一道：产物必须
+#            is_sealed() 且当 zip 打不开，否则不生成资产）
+#         ③ 传成 Release 资产 `cbg-reconcile-update.zip.sealed`，
+#            并同步 VERSION / 文档 / CHANGELOG
+#         ④ 中间的明文 zip 加密完立刻删（留在 /tmp 就是把源码摆硬盘上）
 # 3. commit message 可带个发版标记（纯人工翻 log 用；原「历史版本列表靠
 #      它筛」是残留 —— 那功能 2026-09-23 已删、代码 0 处读它，别再当规矩讲）：
 #      release: 26.0923.153045
@@ -189,10 +193,37 @@ update-debug.py    更新失败时的现场诊断脚本
 `gh repo edit HappyJoy95/cbg-reconcile --visibility private`。
 在那之前源码仓保持 Public —— 发现有店没升上来还来得及救。
 
-⚠⚠ **发行仓的资产不许带密钥**：`central-mail.env`（中台授权码）和
-`mail-key.json`（附件加密密钥）**只随私发的安装包走**（安装包不进公开仓）。
-`tools/publish_release.sh` 有两道闸（剔除 + 反查），
-`tests/test_selfupdate.py::Test发行仓发布脚本` 钉着那两道闸。
+⚠⚠ **发行仓的资产是密文，而且里面一个密钥都没有**：
+`central-mail.env`（中台授权码）、`mail-key.json`（附件加密密钥）、
+`release.key`（**更新包**加密密钥）、`config/managers.yaml`（区长名单）
+**只随私发的安装包走**（安装包不进公开仓）。
+`tools/publish_release.sh` 有**三道闸**（剔除 → 加密 → 反查），
+`tests/test_selfupdate.py::Test发行仓发布脚本` / `Test发布脚本会加密` 钉着它们。
+
+### 路线 A：公开包加密（2026-10-02 用户定）
+
+**目标**：公开 Release 上**读不到源码** —— 因为它是密文。
+
+```
+打包机 .secrets/release.key ──┐
+                              ├─→ build_package.sh 塞进包根 release.key
+门店 .secrets/release.key ←───┘        （只私发的安装包带；自更新碰不到 .secrets/）
+        │
+        ├─→ publish_release.sh：剔敏感文件 → mailcrypto.seal() → 上传 .zip.sealed
+        └─→ selfupdate.download()：is_sealed 就先 unseal 再解压
+```
+
+* **钥匙是独立的一把**（`mailcrypto.RELEASE_KEY_REL`），跟邮件那把**不通用**：
+  邮件密钥泄露是"附件能被谁看"，这把泄露是**公开仓上的包人人能解**。
+  ⚠ 用错钥匙不会报"钥匙错了"，只报"校验不过" —— 所以 `selfupdate`
+  那层把话补成能照做的（见 `_unseal_in_place`，有测试钉着）。
+* **格式跟 `mail-key.json` 一样**，`seal/unseal/load/describe` 多收一个 `rel=`
+  （默认还是邮件那把 ⇒ 现有调用点一行没改，也就不会静默改到邮件那条路）。
+* **明文那份（`RELEASE_ASSET`）是过渡期的退路**：`_ASSET_ORDER` 密文优先、
+  明文兜底。等所有门店都有钥匙了再撤明文，撤之前老客户端照样升得上去。
+* ⚠ **没有这把钥匙的门店**：过渡期还能靠明文那份升级；明文一撤就**升不动了**
+  （`unseal` 报"缺 release.key"）。`selftest` 第 0 节会报出来，提前查是哪几家。
+  拿钥匙的办法只有两个：**拿一次完整安装包**，或平台单独发一份 `release.key`。
 
 ### 正确顺序：打正式包会改 VERSION，再 push
 

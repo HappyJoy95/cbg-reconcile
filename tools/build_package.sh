@@ -217,6 +217,38 @@ else
   fi
 fi
 
+# ------------------------------------------------- 更新包的加密密钥（路线 A）
+# 跟上面那把邮件密钥**同一条链、不同的钥匙**（理由见 `mailcrypto.RELEASE_KEY_REL`）：
+#   ① 只在这里从本机 `.secrets/release.key` 读出来、塞进**包根** `release.key`；
+#   ② 仓库 / git 里**始终没有**它（`.gitignore` 排掉 + 下面反查）；
+#   ③ 安装时 `bootstrap._seed_release_key()` 把它合并进门店的 `.secrets/release.key`；
+#   ④ `.secrets/` 在 `selfupdate.NEVER_TOUCH` 里 ⇒ 自更新覆盖不到 ⇒
+#      公开仓上那份密文一直解得开。
+#
+# ⚠ **公开资产里不带它**（`publish_release.sh` 的 `BAN_NAMES` 有它）——
+#   带了就等于把"解密公开包的钥匙"和密文放在一起。
+if [ -e "${ROOT}/release.key" ]; then
+  echo "  ✗ 仓库根出现了 release.key —— 那是打包注入的产物，不该留在仓库里"
+  echo "    （.gitignore 已排掉它，但文件还在这儿；删掉再打）"
+  exit 1
+fi
+RELKEY_SRC="${ROOT}/.secrets/release.key"
+if [ -f "${RELKEY_SRC}" ]; then
+  cp "${RELKEY_SRC}" "${STAGE}/release.key"
+  _rkid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("current","?"))' \
+          "${RELKEY_SRC}" 2>/dev/null || echo '?')"
+  echo "  · 已把更新包密钥塞进包（当前 ${_rkid}）—— 门店装包时播进 .secrets/，之后才解得开公开仓的密文包"
+else
+  if [ -n "${BETA_N}" ]; then
+    echo "  ! 本机没有 .secrets/release.key —— beta 包先这样（公开仓的密文包这台机器解不开）"
+  else
+    echo "  ✗ 正式包必须带更新包密钥，否则门店解不开公开仓上的密文更新包。先生成一把："
+    echo "      python -m src.cli release-key-new"
+    echo "    （只在**打包这台机器**上生成；它不进仓库，也不进公开资产）"
+    exit 1
+  fi
+fi
+
 # ------------------------------------------------- 凭据 / 报告 / 门店配置
 # 这三样一个都不放进包（.secrets/ 、out/ 、config/store-*.yaml）。
 #   它们是**这台电脑自己的东西**：云商账号、历史报告、门店配置。

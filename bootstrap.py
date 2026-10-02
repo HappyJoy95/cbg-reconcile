@@ -752,6 +752,7 @@ def ensure_layout() -> None:
         _write_if_missing(ROOT / rel, body)
     _seed_central_mail()
     _seed_mail_key()
+    _seed_release_key()
     _ensure_default_config()
 
 
@@ -790,6 +791,40 @@ def _seed_mail_key() -> None:
         return
     extra = ("，新增 " + "、".join(got.get("added") or [])) if got.get("added") else ""
     print(f"  邮件附件加密：密钥 {got.get('was') or '无'} → {got.get('current')}{extra}")
+
+
+def _seed_release_key() -> None:
+    """把**打包时塞进来的更新包密钥**播进 `.secrets/release.key`。
+
+    路线 A（2026-10-02）：公开 Release 上只放**密文**更新包，门店下载后
+    靠这把钥匙解开。所以它比邮件那把**更不能丢** ——
+    没有它，门店的自更新**当场全断**（不是"附件不加密"那种软降级）。
+
+    跟 `_seed_mail_key` 同一条路：打包注入 → 安装播种 → `.secrets/` 在
+    `selfupdate.NEVER_TOUCH` 里 ⇒ 自更新覆盖不到、也删不掉。
+
+    ⚠ **绝不抛**（`ensure_layout` 是启动路径上的东西）；包里没带就什么都不做
+    （老安装包本来就没有，不该因此报错）。
+    """
+    try:
+        from src import mailcrypto                        # 纯标准库，装依赖前也能跑
+        got = mailcrypto.seed_from_pack(ROOT,
+                                        rel=mailcrypto.RELEASE_KEY_REL,
+                                        name=mailcrypto.RELEASE_PACK_NAME)
+    except Exception as e:                                # noqa: BLE001
+        print(f"  （更新包密钥没播上，不影响使用：{e}）")
+        return
+    if got.get("state") == "none":
+        return                                  # 包里没带 —— 什么都不做、什么都不说
+    if not got.get("ok"):
+        print(f"  （更新包密钥没播上，不影响使用：{got.get('why')}）")
+        return
+    if got.get("state") == "same":
+        print(f"  更新包密钥：{got.get('current')}（已是最新）")
+        return
+    extra = ("，新增 " + "、".join(got.get("added") or [])) if got.get("added") else ""
+    print(f"  更新包密钥：{got.get('was') or '无'} → {got.get('current')}{extra}"
+          f"（公开仓的密文更新包靠它解开）")
 
 
 def _seed_central_mail() -> None:

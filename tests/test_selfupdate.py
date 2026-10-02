@@ -1577,13 +1577,18 @@ class Test发行仓发布脚本(unittest.TestCase):
                          "发行仓地址必须从 src/selfupdate.py 读，不许在这儿再写一份")
 
     def test_两把密钥都在禁发名单里(self):
-        """`central-mail.env`（中台授权码）和 `mail-key.json`（附件加密密钥）
-        —— 进了公开 Release 就**收不回来**（CDN 缓存 / 别人的 clone 里还在）。"""
+        """`central-mail.env`（中台授权码）、`mail-key.json`（附件加密密钥）
+        和 `release.key`（**更新包**加密密钥）—— 进了公开 Release 就**收不回来**
+        （CDN 缓存 / 别人的 clone 里还在）。
+
+        ⚠ `release.key` 尤其要命：整包虽然已经加密，但**钥匙和密文放一起**
+        等于没加密。
+        """
         t = self._text()
         m = re.search(r"BAN_NAMES\s*=\s*\{([^}]+)\}", t)
         self.assertIsNotNone(m, "找不到禁发名单 BAN_NAMES")
         names = set(re.findall(r'"([^"]+)"', m.group(1)))
-        for must in ("central-mail.env", "mail-key.json"):
+        for must in ("central-mail.env", "mail-key.json", "release.key"):
             self.assertIn(must, names, f"{must} 不在禁发名单里")
 
     def test_区长名单不进公开资产(self):
@@ -2207,3 +2212,165 @@ class TestRestartSnippet(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Test解封下载(unittest.TestCase):
+    """路线 A：公开仓上是**密文**，`download()` 得先解开才谈得上解压。
+
+    三态必须分开，尤其最后一条 —— 门店看到的就是那句话。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        from src import mailcrypto
+        self.mc = mailcrypto
+        mailcrypto.new_key(self.root, rel=mailcrypto.RELEASE_KEY_REL)
+
+    def _file(self, data: bytes) -> Path:
+        p = self.root / "pkg.zip"
+        p.write_bytes(data)
+        return p
+
+    def test_明文老包原样放行(self):
+        """渐进升级：明文那份还在时，老包一行代码都不用改。"""
+        raw = b"PK\x03\x04 fake-zip"
+        p = self._file(raw)
+        self.assertEqual(selfupdate._unseal_in_place(p, root=self.root), "")
+        self.assertEqual(p.read_bytes(), raw, "明文不许被改动")
+
+    def test_密文解开成明文(self):
+        sealed, how = self.mc.seal(b"PK\x03\x04 real-zip", root=self.root,
+                                   rel=self.mc.RELEASE_KEY_REL)
+        self.assertEqual(how["state"], "sealed")
+        p = self._file(sealed)
+        msg = selfupdate._unseal_in_place(p, root=self.root)
+        self.assertIn("已解密", msg, "解开了要说一声 —— 否则没人知道包被换过")
+        self.assertEqual(p.read_bytes(), b"PK\x03\x04 real-zip")
+
+    def test_缺钥匙时把话说明白(self):
+        """⚠ 只说"不是 zip"等于没说 —— 门店不知道下一步做什么。"""
+        other = self.root / "packer"
+        other.mkdir()
+        self.mc.new_key(other, rel=self.mc.RELEASE_KEY_REL)
+        sealed, _ = self.mc.seal(b"x", root=other, rel=self.mc.RELEASE_KEY_REL)
+        p = self._file(sealed)
+        with self.assertRaises(selfupdate.UpdateError) as cm:
+            selfupdate._unseal_in_place(p, root=self.root)
+        msg = str(cm.exception)
+        self.assertIn("解不开", msg)
+        self.assertIn("release.key", msg, "要说清缺哪个文件")
+        self.assertIn(".secrets", msg, "要说清放哪儿")
+
+    def test_用错钥匙也要说得清(self):
+        """邮件那把解更新包的密文 —— 报"校验不过"是必然的，
+        但外层必须把它包成"解不开"并把原因带出去。"""
+        sealed, _ = self.mc.seal(b"x", root=self.root,
+                                 rel=self.mc.RELEASE_KEY_REL)
+        (self.root / self.mc.RELEASE_KEY_REL).unlink()      # 钥匙拿走
+        p = self._file(sealed)
+        with self.assertRaises(selfupdate.UpdateError) as cm:
+            selfupdate._unseal_in_place(p, root=self.root)
+        self.assertIn("解不开", str(cm.exception))
+
+
+class Test资产顺序(unittest.TestCase):
+    """⚠ **密文那份必须排在明文前面** —— 顺序反了就等于没加密：
+    客户端会先拿到明文包，加密只在"最后一个候选"里生效。"""
+
+    def _api_payload(self):
+        assets = [
+            {"name": selfupdate.RELEASE_ASSET,            # 明文（过渡期）
+             "url": "https://api.github.com/repos/x/releases/assets/1"},
+            {"name": selfupdate.RELEASE_ASSET_SEALED,     # 密文
+             "url": "https://api.github.com/repos/x/releases/assets/2"},
+        ]
+        resp = types.SimpleNamespace(status_code=200, text="")
+        resp.json = lambda: {"tag_name": "v1.2.3", "assets": assets}
+        return resp
+
+    def test_发布侧只认密文那份(self):
+        with mock.patch.object(selfupdate, "_get",
+                               lambda url, **kw: self._api_payload()):
+            url, tag = selfupdate._release_asset_url()
+        self.assertIn("assets/2", url, "拿到的是明文那份 —— 加密白做了")
+        self.assertEqual(tag, "v1.2.3")
+
+    def test_候选源里密文排在明文之前(self):
+        with mock.patch.object(selfupdate, "_release_asset_url",
+                               lambda timeout=15:
+                               ("https://api.github.com/ok/2", "v1.2.3")):
+            urls = [u for u, _ in selfupdate._zip_urls(selfupdate.BRANCH)]
+        sealed = [u for u in urls if u.endswith(selfupdate.RELEASE_ASSET_SEALED)]
+        plain = [u for u in urls if u.endswith(selfupdate.RELEASE_ASSET)]
+        self.assertTrue(sealed and plain, "两个资产名都要在候选里")
+        self.assertLess(min(urls.index(u) for u in sealed),
+                        min(urls.index(u) for u in plain),
+                        "每个层级上都必须密文在前")
+
+    def test_两个资产名都必须从代码里读(self):
+        """⚠ 发布脚本和客户端必须认**同一个**名字 —— 写死两份迟早对不上，
+        表现是「发布成功、客户端 404」。"""
+        text = (ROOT / "tools" / "publish_release.sh").read_text(encoding="utf-8")
+        self.assertIn("RELEASE_ASSET_SEALED", text,
+                      "发布脚本没从 selfupdate 读密封资产名")
+        self.assertRegex(text, r'ASSET="\$\{RELEASE_ASSET_SEALED\}"')
+
+
+class Test发布脚本会加密(unittest.TestCase):
+    """路线 A 的两半：**打包机把钥匙塞进包**、**发布脚本把包加密**。
+
+    这两条各自都有测试钉着，但**合起来才是"公开仓上读不到源码"** ——
+    少任何一半，公开仓上躺着的就是明文 .py。
+    """
+
+    PUB = ROOT / "tools" / "publish_release.sh"
+    PKG = ROOT / "tools" / "build_package.sh"
+
+    def _pub(self) -> str:
+        return self.PUB.read_text(encoding="utf-8")
+
+    def _pkg(self) -> str:
+        return self.PKG.read_text(encoding="utf-8")
+
+    def test_加密排在上传之前(self):
+        """⚠ 断言要在**动作之前**拦下来 —— 传完再发现就晚了，
+        而 GitHub 的 release 资产删掉也不保证 CDN 上没了。"""
+        t = self._pub()
+        seal = t.find("mailcrypto.seal")
+        upload = t.find("gh release create")
+        self.assertGreater(seal, 0, "发布脚本里找不到加密那一步")
+        self.assertGreater(upload, 0, "找不到上传那一步")
+        self.assertLess(seal, upload, "加密排在上传后面 —— 传上去的还是明文")
+
+    def test_产物必须是密文_而且当zip打不开(self):
+        """三道闸里的第三道：加密完再验一遍，验不过就**不生成资产**。"""
+        t = self._pub()
+        self.assertIn("is_sealed", t, "没验产物是不是我们的密文格式")
+        self.assertIn("BadZipFile", t, "没验密文是不是真的打不开")
+        # 反查不过必须 exit（不能只是 print 一句然后接着传）
+        # ⚠ `sys.exit` 在那句话的**前面**（它是参数），所以往回看
+        idx = t.find("等于没加密")
+        self.assertGreater(idx, 0, "找不到『等于没加密』那句反查")
+        self.assertIn("sys.exit", t[max(0, idx - 300):idx],
+                      "反查不过还要往下走 —— 那是摆设")
+
+    def test_用的是更新包那把钥匙(self):
+        """⚠ 用邮件那把加密不会报错，只会让门店解不开 —— 必须写死 REL。"""
+        t = self._pub()
+        self.assertIn("mailcrypto.RELEASE_KEY_REL", t,
+                      "没用 RELEASE_KEY_REL —— 会拿邮件那把去加密更新包")
+
+    def test_中间的明文会被删掉(self):
+        """⚠ 明文中间产物留在 /tmp 就等于把源码摆在硬盘上。"""
+        t = self._pub()
+        self.assertIn("os.remove(dst)", t, "加密完没删明文中间产物")
+
+    def test_安装包会带上这把钥匙(self):
+        """没带 ⇒ 门店装完也解不开公开仓的密文包（自更新当场断）。"""
+        t = self._pkg()
+        self.assertIn(".secrets/release.key", t, "没从打包机读这把钥匙")
+        self.assertIn("${STAGE}/release.key", t, "没塞进包根")
+        # 反查：仓库根不许出现它
+        self.assertIn('"${ROOT}/release.key"', t, "没有仓库根的反查断言")
