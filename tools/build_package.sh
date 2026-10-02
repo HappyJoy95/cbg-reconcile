@@ -507,3 +507,20 @@ else
   ( cd "${DIST}" && sha256sum "${_zipbase}" > "${_zipbase%.zip}.sha256" )
 fi
 echo "    校验和：$(cut -d' ' -f1 "${DIST}/${_zipbase%.zip}.sha256")"
+
+# ------------------------------------------------------------------ 下一步
+# ⚠ 发出去给门店之前，**必须过发行仓那一步**（2026-10-02 起）：
+#   客户端的「检查更新」读的是发行仓（HappyJoy95/cbg-reconcile-release），
+#   只 push 源码仓**不发 Release** 的话，门店看不到新版本 —— 反过来也一样。
+#   而且发行仓那份要剔掉两把密钥（见 publish_release.sh 的两道闸）：
+#   直接把本文件产出的 zip 传上去 = 把中台授权码和附件加密密钥贴到公网。
+cat <<'NEXT'
+
+==> 下一步（两步都要做，缺一步门店都看不到新版）
+    1) 发到发行仓：  bash tools/publish_release.sh
+       （会自动剔掉 central-mail.env / mail-key.json，再反查一遍才上传）
+    2) 提交源码仓：  git add -A && git commit && git push
+       —— 正式包会改 src/version.py，push 只是留痕；
+          **门店更新读的是发行仓**，不依赖这一步。
+    ⚠ beta 包：第 1 步发成 prerelease，第 2 步**不要 push**。
+NEXT

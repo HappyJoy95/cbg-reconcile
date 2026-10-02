@@ -161,19 +161,53 @@ update-debug.py    更新失败时的现场诊断脚本
 #   * 发版号       = 封包时刻 yy.mmdd.hhmmss（正式包自动写入 version.py）
 # 1. 正式包：bash tools/build_package.sh
 #      → 自动 VER=$(date +%y.%m%d.%H%M%S)，写进包内 + 仓库 src/version.py
-# 2. commit message 可带个发版标记（纯人工翻 log 用；原「历史版本列表靠
+# 2. 发到**发行仓**：bash tools/publish_release.sh
+#      → 剔掉 central-mail.env / mail-key.json 两把密钥（反查挡住），
+#        传成 Release 资产 cbg-reconcile-update.zip，并同步 VERSION / 文档 / CHANGELOG
+# 3. commit message 可带个发版标记（纯人工翻 log 用；原「历史版本列表靠
 #      它筛」是残留 —— 那功能 2026-09-23 已删、代码 0 处读它，别再当规矩讲）：
 #      release: 26.0923.153045
-# 3. push 到 main（门店自更新读远端 VERSION）
+# 4. push 到 main（源码仓；**门店更新已经不读它了**，见下面「两个仓库」）
 #    bash tools/build_package.sh beta     # 测试包（不改仓库 VERSION）
 ```
+
+### 两个仓库：源码仓（将 Private）+ 发行仓（公开）
+
+| | 源码仓 `HappyJoy95/cbg-reconcile` | 发行仓 `HappyJoy95/cbg-reconcile-release` |
+|---|---|---|
+| 内容 | 全部源码 / 采集实现 / 测试 / 打包工具 | `VERSION` · Releases 里的更新包 · CHANGELOG · 用户文档 |
+| 可见性 | **要改成 Private**（见下） | **必须保持 Public**（客户端匿名读） |
+| 谁读它 | 开发者；客户端只作**退路** | **客户端只依赖它** |
+
+⚠ **顺序绝对不能反**（`selfupdate._version_sources()` / `_zip_urls()` 里用注释钉着，
+`TestVersionSourcePriority` / `TestDownloadSources` 用测试钉着）：
+发行仓必须排在源码仓前面。反过来的话，源码仓一私有，**还没升上来的门店
+当场就查不到更新，而且没有任何补救** —— 那是整条迁移里唯一不可逆的一步。
+
+**私有化的前置条件**（用户 2026-10-02 定）：**等数据上报里所有门店的
+`version`（`src/app/report.py`）都 ≥ 桥接版**再执行
+`gh repo edit HappyJoy95/cbg-reconcile --visibility private`。
+在那之前源码仓保持 Public —— 发现有店没升上来还来得及救。
+
+⚠⚠ **发行仓的资产不许带密钥**：`central-mail.env`（中台授权码）和
+`mail-key.json`（附件加密密钥）**只随私发的安装包走**（安装包不进公开仓）。
+`tools/publish_release.sh` 有两道闸（剔除 + 反查），
+`tests/test_selfupdate.py::Test发行仓发布脚本` 钉着那两道闸。
 
 ### 正确顺序：打正式包会改 VERSION，再 push
 
 ```
-改代码 → 打 beta 包试 → 试好了 → 打正式包（自动写时间戳 VERSION）→ commit + push
+改代码 → 打 beta 包试 → 试好了 → 打正式包（自动写时间戳 VERSION）
+       → publish_release.sh 发到发行仓 → commit + push 源码仓
 ```
-⚠ beta **不改**仓库 VERSION（和以前一样）；正式包会改，**push 后**门店才看得到新号。
+⚠ beta **不改**仓库 VERSION，**也不改发行仓的 VERSION**（否则门店会看到假的"有新版"）；
+beta 发出去是 Release 的 **prerelease**，`releases/latest` 天然跳过它。
+⚠ 正式包会改两处 VERSION，**都 push/发出去**门店才看得到新号。
+⚠⚠ **顺序：先 `publish_release.sh`，后 push 源码仓。** 反过来的话，
+门店会先看到新版本号（源码仓那边已经能读到）再去发行仓下载 ——
+而那时 Release 还是旧的，`releases/latest` 给下来的是**上一版**，
+`apply_update` 装完把 `BUILD.txt` 写成旧号、`has_update` 还是真的 ⇒
+**一直提示有更新、装上去又没变**，直到你把 Release 补上为止。
 ⚠ `whatsnew.NOTES` 不必为每个时间戳手写键 —— 发版号格式对不上时回落 `DEFAULT_NOTE`。
 
 ⚠ **beta 包和正式包的版本号同源** —— 它表示"**这一版正在测**"，
@@ -297,12 +331,17 @@ Python 按 locale 编码写输出（中文 Windows 是 GBK）。这时打印 `�
 `<b>v1.4.6</b>`。这个坑踩过**三次**。
 → `{ html: ... }`；`TestFrontendWiring` 里有两条测试盯着。
 
-**4. 检查更新/下载都要走 `api.github.com`，别用 raw / codeload**
+**4. 检查更新/下载都要走 `api.github.com`，别用 raw / codeload / github.com**
 
 `raw.githubusercontent.com` 有 ~5 分钟 CDN 缓存（加时间戳参数没用），
-刚发的版本它还在返回旧的；`codeload` 会发**缓存的旧 zip**。
-→ 版本读 `api.github.com/.../contents`，zip 下 `api.github.com/.../zipball`
-（`_zip_urls()` / `_version_api_url()`），另一个源留作退路。
+刚发的版本它还在返回旧的；`codeload` 会发**缓存的旧 zip**；
+`github.com` 更糟 —— **本机实测 curl 20s 超时，同一时刻 `api.github.com` 0.35s**
+（门店网络多半更糟，而且那两个域名本来也从没被用过）。
+→ 版本读 `api.github.com/.../contents`（发行仓 `VERSION` 优先，源码仓 `src/version.py` 退路）；
+zip 走 Release 资产的 **api 直链**（`_release_asset_url()`，要带
+`Accept: application/octet-stream`，不然返回的是元数据 JSON 而不是字节），
+`github.com/.../releases/download/...` 只是第二候选，源码仓 zipball / codeload 是最后退路
+（`_zip_urls()` / `_version_sources()`）。
 
 **5. 自更新只许碰代码**
 

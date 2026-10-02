@@ -2,15 +2,30 @@
 
 **设计取舍**
 
-* **不走 git**：门店电脑上不装 git，也不该装。下载的是仓库的 zip 包
-  （两个源，优先 `api.github.com` 的 zipball，见下面的 `ZIP_URLS`），
+* **不走 git**：门店电脑上不装 git，也不该装。下载的是**发行包**，
   解开来**照着铺一遍**就完事了。所以"解压正式包"和"git clone"两种装法，
   更新效果完全一样。
-* **检查**读的是仓库里的 `src/version.py`（raw 文件，不走 API）——
-  这样不用维护第二个版本号来源，改代码时只动一个地方。也不吃 GitHub API
-  的速率限制（门店电脑没配 token，匿名只有 60 次/小时）。
 * **只覆盖代码，绝不碰数据**：`config/`、`.secrets/`、`out/` 三处一根手指都不碰 ——
   碰了就是丢门店配置 / 华为会话 / 历史报告。
+
+**两个仓库，各管一半**（2026-10-02 起源码仓 / 发行仓分离）
+
+* `RELEASE_REPO`（**公开**，见下面 `RELEASE_ASSET`）—— 客户端**唯一依赖**的仓库：
+  版本号在它的 `VERSION` 里，更新包在它的 Releases 里。它**不含任何 `.py` 源码**。
+* `REPO`（源码仓，将改 **Private**）—— 只作**退路**：发行仓出问题时才问它。
+  源码仓私有化之后这条路会 404，但**正常情况下根本走不到**（发行仓先成功），
+  所以门店不会因为源码仓变私有而失去更新能力。
+
+⚠ **顺序绝对不能反**：发行仓必须排在源码仓前面。反过来的话，
+  源码仓一私有，还在跑旧代码的门店**当场就查不到更新**，而且没有任何补救 ——
+  这是整次迁移里唯一不可逆的一步，顺序就是它的保险。
+
+⚠ **全程不碰 `github.com`**。实测（本机直连，无代理）：
+  `api.github.com` 0.35s / `codeload` 0.5s / `objects.githubusercontent.com` 2.4s，
+  而 `github.com` **curl 20s 超时**（门店网络多半更糟）。所以：
+  版本走 `api.github.com/.../contents`，下载走 Release 资产的
+  **`api.github.com` 资产地址**（带 `Accept: application/octet-stream`，见
+  `_release_asset_url`），`github.com/.../releases/download/...` 只当最后的直链退路。
 
 **仓库布局 == 安装布局**（`packaging/` 中间层已经删了），所以更新就是
 **照仓库原样铺到安装目录**，不需要任何映射表。只有 `NEVER_TOUCH` 里的顶层目录
@@ -37,41 +52,113 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-# 更新源。想换仓库改这一行即可。
+# ------------------------------------------------------------------ 两个仓库
+# ⚠ **发行仓是公开的，而且不含源码** —— 它只放：`VERSION`（一行版本号）、
+#   Releases 里的更新包、CHANGELOG、安装说明和用户文档。
+#   源码仓（`REPO`）将来改 Private，那时它只作下面的退路。
+RELEASE_REPO = "HappyJoy95/cbg-reconcile-release"
+RELEASE_BRANCH = "main"
+
+#: 发行仓里更新包的**固定名字** —— 每条 Release 都叫这个，
+#: 于是 `/releases/latest/download/<它>` 永远指向最新那一版，不用先查 API。
+RELEASE_ASSET = "cbg-reconcile-update.zip"
+
+# 源码仓。**发行仓排在它前面**（见模块文档里那条"顺序绝对不能反"）。
 REPO = "HappyJoy95/cbg-reconcile"
 BRANCH = "main"
 
-RAW_VERSION = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/src/version.py"
-# ⚠ 版本检查**优先用这个**，不是 raw。
+# 版本源：`(标签, api 地址, raw 地址)`，**按可靠性排序**。
 #
-# 实测踩到：`raw.githubusercontent.com` 有 ~5 分钟的 CDN 缓存
-# （`cache-control: max-age=300`）。刚发的版本它还在返回旧的 ——
-# 表现就是"明明发了 v1.3.4，检查更新却说没有新版"，而且加时间戳参数没用
-# （CDN 层的缓存不看 query）。`contents` 接口拿到的是当前提交，实测是新的。
-#
-# 代价：匿名每小时 60 次配额。门店一天查一次，够用；raw 留作退路。
+# ⚠ 第一个必须是 `api.github.com`，不是 raw —— 实测踩到：`raw.githubusercontent.com`
+#   有 ~5 分钟的 CDN 缓存（`cache-control: max-age=300`）。刚发的版本它还在返回旧的
+#   —— 表现就是"明明发了新版，检查更新却说没有新版"，而且加时间戳参数没用
+#   （CDN 层的缓存不看 query）。`contents` 接口拿到的是当前提交，实测是新的。
+#   代价：匿名每小时 60 次配额。门店一天查几次，够用；raw 留作退路。
+def _version_sources() -> list:
+    """按可靠性排序的版本源：`[(标签, api_url, raw_url), ...]`。
 
-# ⚠ 下载 zip 也是**两个源，优先 API 的 zipball**。
-#
-# 实测：`codeload.github.com` 会发**缓存的旧 zip** —— 仓库已经改成新布局了，
-# 它还在给旧的那份（加时间戳参数也没用）。对更新功能来说这是**危险**的：
-# 你以为更新了，实际拿到的是旧代码，甚至是旧的目录结构。
-# `api.github.com/.../zipball` 拿到的是当前提交，实测是新的。
-#
-# `ref` 可以是分支名或 tag（升级走 main；一般不用 sha）。
-WEB_URL = f"https://github.com/{REPO}"
-
-
-def _zip_urls(ref: str) -> tuple:
-    """按 ref 生成两个下载地址（api 优先，codeload 退路）。"""
-    return (
-        f"https://api.github.com/repos/{REPO}/zipball/{ref}",
-        f"https://codeload.github.com/{REPO}/zip/refs/heads/{ref}",
-    )
+    发行仓一个都没问到，才轮到源码仓 —— 源码仓私有化之后它会一路 404，
+    但那时发行仓早就成功了，根本走不到这儿。
+    """
+    return [
+        (f"api.github.com/{RELEASE_REPO}",
+         f"https://api.github.com/repos/{RELEASE_REPO}/contents/VERSION?ref={RELEASE_BRANCH}",
+         f"https://raw.githubusercontent.com/{RELEASE_REPO}/{RELEASE_BRANCH}/VERSION"),
+        (f"api.github.com/{REPO}",
+         f"https://api.github.com/repos/{REPO}/contents/src/version.py?ref={BRANCH}",
+         f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/src/version.py"),
+    ]
 
 
-def _version_api_url(ref: str = BRANCH) -> str:
-    return f"https://api.github.com/repos/{REPO}/contents/src/version.py?ref={ref}"
+def _version_api_url(ref: str = RELEASE_BRANCH) -> str:
+    """发行仓 `VERSION` 的 api 地址（版本检查的第一源）。"""
+    return f"https://api.github.com/repos/{RELEASE_REPO}/contents/VERSION?ref={ref}"
+
+
+#: 下载 Release 资产要用的请求头 —— 没有它，`api.github.com` 的资产地址
+#: 返回的是**元数据 JSON**，而不是文件字节。
+_OCTET_HEADERS = {"Accept": "application/octet-stream"}
+
+WEB_URL = f"https://github.com/{RELEASE_REPO}"
+
+
+def _release_asset_url(timeout: int = 15) -> tuple:
+    """问 `api.github.com` 要最新 Release 里那个更新包的**直链**，返回 `(url, tag)`。
+
+    拿不到返回 `("", "")` —— **绝不抛**：调用方还有好几条退路，
+    这里失败不该把整次下载判死。
+
+    ⚠ 为什么绕这一圈，不直接用 `browser_download_url`：
+      后者是 `github.com/<owner>/<repo>/releases/download/...`，而**那个域名
+      在门店和本机网络里时通时断**（实测 curl 20s 超时，同一时刻
+      `api.github.com` 0.35s）。资产 JSON 里的 `url` 字段却是 **`api.github.com`**
+      上的地址，带上 `Accept: application/octet-stream` 就直接吐文件字节，
+      再 302 到 `objects.githubusercontent.com`（实测可达）—— 全程不碰 `github.com`。
+
+    ⚠ `tries=1`：这是**最前面**的候选源，不通就赶紧换后面几条，
+      别在这儿耗掉三次重试（每次都要等退避）。
+    """
+    try:
+        r = _get(f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest",
+                 timeout=timeout, tries=1)
+        info = r.json()
+    except Exception:                                          # noqa: BLE001
+        return "", ""
+    if not isinstance(info, dict):
+        return "", ""
+    tag = str(info.get("tag_name") or "")
+    want = RELEASE_ASSET
+    for a in (info.get("assets") or []):
+        if isinstance(a, dict) and a.get("name") == want and a.get("url"):
+            return str(a["url"]), tag
+    return "", tag
+
+
+def _zip_urls(ref: str) -> list:
+    """候选下载地址，**按可靠性排序** —— 每项是 `(url, headers)`。
+
+    1. Release 资产的 **api 直链**（`_release_asset_url` 现查，最可靠）；
+    2. `github.com/.../releases/download/<tag>/…` —— 不吃 API 配额，但那个域名
+       在门店/本机网络里时通时断（见模块文档），所以只排第二；
+    3. `github.com/.../releases/latest/download/<固定名>` —— 同上，且不用知道 tag；
+    4~5. **源码仓退路**（`api` 的 zipball + `codeload`）——
+       源码仓私有化之后会 404，但正常走不到（发行仓先成功）。
+
+    `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
+    """
+    urls = []
+    asset, tag = _release_asset_url()
+    if asset:
+        urls.append((asset, _OCTET_HEADERS))
+    if tag:
+        urls.append((f"https://github.com/{RELEASE_REPO}/releases/download/"
+                     f"{tag}/{RELEASE_ASSET}", None))
+    urls.append((f"https://github.com/{RELEASE_REPO}/releases/latest/download/"
+                 f"{RELEASE_ASSET}", None))
+    urls.append((f"https://api.github.com/repos/{REPO}/zipball/{ref}", None))
+    urls.append((f"https://codeload.github.com/{REPO}/zip/refs/heads/{ref}", None))
+    return urls
+
 
 
 # 检查结果的缓存：别每刷一次页面就去问一次 GitHub。
@@ -202,8 +289,12 @@ def _proxy_broken(e) -> bool:
     return "ProxyError" in text or "Unable to connect to proxy" in text
 
 
-def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None):
+def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None,
+         headers: Optional[dict] = None):
     """带重试的 GET。每次都用**新的 Session** —— 连接池里的坏连接别再复用。
+
+    `headers` 是给 Release 资产直链用的（`Accept: application/octet-stream`，
+    见 `_release_asset_url`）—— 不传就一个请求头都不加，行为跟从前一样。
 
     ⚠ **代理不通就脱掉代理直连再来一轮**（2026-09-29 用户：「加个兜底吧」）：
       代理软件重启 / 换端口那阵，环境变量还指着一个没人听的端口 ⇒ 每一发都是
@@ -218,13 +309,13 @@ def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None):
     for attempt in range(1, n + 1):
         try:
             with requests.Session() as s:
-                r = s.get(url, timeout=timeout, stream=stream)
+                r = s.get(url, timeout=timeout, stream=stream, headers=headers)
                 r.raise_for_status()
                 return r
         except requests.RequestException as e:
             if _proxy_broken(e):
                 return _get_direct(url, timeout=timeout, stream=stream,
-                                   tries=n, proxy_err=e)
+                                   tries=n, proxy_err=e, headers=headers)
             last = e
             if attempt < n:
                 time.sleep(BACKOFF * attempt)
@@ -232,7 +323,7 @@ def _get(url: str, *, timeout: int, stream: bool = False, tries: int = None):
 
 
 def _get_direct(url: str, *, timeout: int, stream: bool = False, tries: int = 1,
-                proxy_err=None):
+                proxy_err=None, headers: Optional[dict] = None):
     """上一条的兜底：**这一次请求不走代理**，别的环境行为照旧。
 
     ⚠ 只把 `proxies` 三个键置 `None`（`httputil.NO_PROXY`），
@@ -246,7 +337,7 @@ def _get_direct(url: str, *, timeout: int, stream: bool = False, tries: int = 1,
         try:
             with requests.Session() as s:
                 r = s.get(url, timeout=timeout, stream=stream,
-                          proxies=httputil.NO_PROXY)
+                          proxies=httputil.NO_PROXY, headers=headers)
                 r.raise_for_status()
                 return r
         except requests.RequestException as e:
@@ -294,9 +385,9 @@ def has_update(latest: str, current: str, *, beta: Optional[bool] = None) -> boo
         有更新 = 远端 > 本地                    ← 原有
               或 远端 == 本地 且 本地是 beta 包   ← 新增
 
-    **为什么"同号也算"可以放宽**：GitHub 上只有一条 `main`，它**就是正式线**，
-    从那儿下下来的必然是正式包；而且 `apply_update` 装完会把 `BUILD.txt`
-    重写成 `GitHub main · v2.1.1`（不含 beta）⇒ 判据回到"远端 > 本地"，
+    **为什么"同号也算"可以放宽**：GitHub 上那条 `main`（以及发行仓的最新 Release）
+    **就是正式线**，从那儿下下来的必然是正式包；而且 `apply_update` 装完会把
+    `BUILD.txt` 重写成 `Release · v2.1.1`（不含 beta）⇒ 判据回到"远端 > 本地"，
     **不会反复提示**。
 
     ⚠ **不能写成 `>=`**：本地在测**更高版本**的 beta（比如 2.2.0）时，
@@ -320,30 +411,36 @@ def _version_in_text(text: str) -> str:
 
 
 def remote_version(timeout: int = 15) -> str:
-    """去 GitHub 读最新版本号。
+    """去 GitHub 读最新版本号 —— **先问发行仓，再问源码仓**（顺序见 `_version_sources`）。
 
-    ⚠ **优先走 api.github.com，不是 raw**。实测踩到：`raw.githubusercontent.com`
+    ⚠ **每个仓库内部都是 api 优先，不是 raw**。实测踩到：`raw.githubusercontent.com`
     有大约 5 分钟的 CDN 缓存（`cache-control: max-age=300`），刚发的新版本它还在
-    返回旧的 —— 表现就是"明明发了 v1.3.4，检查更新却说没有新版"。
+    返回旧的 —— 表现就是"明明发了新版，检查更新却说没有新版"。
     加时间戳参数没用（那是 CDN 层的缓存，不看 query）。
 
     `api.github.com/.../contents` 没有这个问题，代价是匿名每小时 60 次配额 ——
-    门店一天查一次，完全够。raw 留作退路（不吃配额，但会慢一个 CDN 周期）。
+    门店一天查几次，完全够。raw 留作退路（不吃配额，但会慢一个 CDN 周期）。
+
+    ⚠ 源码仓私有化之后，它那两个源都会 404 —— 那是**预期之内**的：
+      发行仓排在前面，正常情况下根本轮不到它。只有发行仓整体挂掉时才会走到，
+      那时报错里会多一条，无伤大雅（总比把门店卡死强）。
     """
     errs = []
-    for label, fetch in (_api_version_source(timeout), _raw_version_source(timeout)):
-        try:
-            return fetch()
-        except UpdateError as e:
-            errs.append(f"{label}: {str(e)[:70]}")
+    for label, api_url, raw_url in _version_sources():
+        for tag, fetch in (_api_version_source(api_url, timeout),
+                           _raw_version_source(raw_url, timeout)):
+            try:
+                return fetch()
+            except UpdateError as e:
+                errs.append(f"{tag}/{label}: {str(e)[:70]}")
     raise UpdateError("拿不到最新版本号 —— " + "；".join(errs))
 
 
-def _api_version_source(timeout: int):
+def _api_version_source(api_url: str, timeout: int):
     """(标签, 取值函数) —— api.github.com，**没有 CDN 缓存**。"""
     def fetch() -> str:
         # tries=1：这个源不通就赶紧换 raw，别在这儿耗掉三次重试
-        r = _get(_version_api_url(), timeout=timeout, tries=1)
+        r = _get(api_url, timeout=timeout, tries=1)
         try:
             content = r.json().get("content") or ""
         except ValueError as e:
@@ -359,10 +456,10 @@ def _api_version_source(timeout: int):
     return "api.github.com", fetch
 
 
-def _raw_version_source(timeout: int):
+def _raw_version_source(raw_url: str, timeout: int):
     """(标签, 取值函数) —— raw，不吃配额，但有 ~5 分钟 CDN 缓存。"""
     def fetch() -> str:
-        r = _get(RAW_VERSION, timeout=timeout)
+        r = _get(raw_url, timeout=timeout)
         return _version_in_text(r.text)
     return "raw.githubusercontent.com", fetch
 
@@ -396,7 +493,7 @@ def check(root, current: str, *, force: bool = False, timeout: int = 15) -> dict
         return _recompute(cached, current)
 
     now = time.time()
-    info = {"at": now, "current": current, "repo": REPO, "web": WEB_URL}
+    info = {"at": now, "current": current, "repo": RELEASE_REPO, "web": WEB_URL}
     try:
         latest = remote_version(timeout=timeout)
         info.update({"latest": latest, "has_update": has_update(latest, current),
@@ -556,18 +653,22 @@ def _describe_payload(blob: Path, status: int, ctype: str) -> str:
 
 
 def download(timeout: int = 120, ref: str = BRANCH) -> Path:
-    """把仓库的 zip 下到临时目录，返回解压出来的根目录。
+    """把**发行包**下到临时目录，返回解压出来的根目录。
 
-    `ref` 可以是分支名或 tag（默认 main）。
+    候选地址按可靠性排序（见 `_zip_urls`）：Release 资产的 api 直链 →
+    两条 `github.com` 直链 → 源码仓的 zipball / codeload（**退路**，
+    源码仓私有化之后会 404，但正常走不到）。
+
+    `ref` 只作用在源码仓那两条上（发行仓的包跟着"最新 Release"走）。
     """
     import requests
     tmp = Path(tempfile.mkdtemp(prefix="cbg-update-"))
     blob = tmp / "src.zip"
     errors = []
-    for url in _zip_urls(ref):
+    for url, headers in _zip_urls(ref):
         host = url.split("/")[2]
         try:
-            r = _get(url, timeout=timeout, stream=True)
+            r = _get(url, timeout=timeout, stream=True, headers=headers)
             with open(blob, "wb") as fp:
                 for chunk in r.iter_content(64 * 1024):
                     fp.write(chunk)
@@ -1251,11 +1352,11 @@ def apply_update(root, *, current: str = "", ref: str = BRANCH, staging=None,
                     "rolled_back": bool(back.get("ok")),
                     "journal": str(journal_path(root))})
 
-        # 打完补丁写个指纹 —— 从 GitHub 更新过来的没有打包时间戳
+        # 打完补丁写个指纹 —— 从发行仓更新过来的没有打包时间戳
         if remote:
             try:
                 (root / "BUILD.txt").write_text(
-                    f"GitHub {BRANCH} · v{remote}", encoding="utf-8")
+                    f"Release · v{remote}", encoding="utf-8")
             except OSError:
                 pass
 

@@ -662,11 +662,11 @@ class TestApply(_ApplyCase):
         self.assertNotIn("src/cli.py", res["changed"])
 
     def test_writes_a_build_stamp(self):
-        """从 GitHub 更新过来的没有打包时间戳 —— 写一个，界面才显示得出是哪一版。"""
+        """从发行仓更新过来的没有打包时间戳 —— 写一个，界面才显示得出是哪一版。"""
         self._apply({"src/version.py": 'VERSION = "1.3.0"\n'})
         stamp = (self.root / "BUILD.txt").read_text(encoding="utf-8")
         self.assertIn("1.3.0", stamp)
-        self.assertIn("GitHub", stamp)
+        self.assertIn("Release", stamp)
 
     def test_a_foreign_zip_is_rejected(self):
         """⚠ 现在是"照原样铺"（不是白名单），所以得先确认**这确实是我们的包**。
@@ -1347,54 +1347,109 @@ class Test打包规则对账(unittest.TestCase):
 
 
 class TestDownloadSources(unittest.TestCase):
-    """⚠ 实测：`codeload.github.com` 会发**缓存的旧 zip**。
+    """下载候选源的**顺序**—— 源码仓 / 发行仓分离之后，这就是私有化的保险。
 
-    仓库已经改成新布局了，它还在给旧的那份（加时间戳参数也没用）。
-    对更新功能来说这是**危险**的 —— 你以为更新了，拿到的是旧代码甚至是旧的
-    目录结构。所以优先走 `api.github.com/.../zipball`，codeload 只当退路。
+    见 `selfupdate` 模块文档：发行仓必须排在源码仓前面。顺序一反，
+    源码仓改 Private 的那一刻，还在跑旧代码的门店**当场就查不到更新**，
+    而且没有任何补救 —— 那是整次迁移里唯一不可逆的一步。
     """
 
-    def test_api_zipball_is_tried_first(self):
-        urls = selfupdate._zip_urls(selfupdate.BRANCH)
-        self.assertEqual(len(urls), 2, "退路没了")
-        self.assertIn("api.github.com", urls[0])
-        self.assertIn("codeload", urls[1])
+    #: 发行仓资产的 api 直链（`Accept: application/octet-stream` 才吐字节）
+    ASSET = ("https://api.github.com/repos/HappyJoy95/cbg-reconcile-release"
+             "/releases/assets/4242")
+    TAG = "v26.0929.191128"
 
-    def test_zip_urls_follow_the_requested_ref(self):
-        """`download(ref=…)` 要能把地址里的 ref 换成指定分支/tag。"""
+    def _patch_release(self, asset=ASSET, tag=TAG):
+        """把"问 API 要资产地址"这一步**离线化** —— `_zip_urls` 会现查它。"""
+        return mock.patch.object(selfupdate, "_release_asset_url",
+                                 lambda timeout=15: (asset, tag))
+
+    def _urls(self, ref=None, asset=ASSET, tag=TAG):
+        with self._patch_release(asset, tag):
+            return selfupdate._zip_urls(ref or selfupdate.BRANCH)
+
+    @staticmethod
+    def _release_urls(urls):
+        """只留发行仓的地址 —— 收 `(url, headers)` 或裸 `url` 都认。"""
+        return [u if isinstance(u, str) else u[0] for u in urls
+                if (u if isinstance(u, str) else u[0]).find("/releases/") >= 0]
+
+    @staticmethod
+    def _source_urls(urls):
+        """只留源码仓的地址（zipball / codeload）—— 同上。"""
+        out = []
+        for u in urls:
+            u = u if isinstance(u, str) else u[0]
+            if "zipball" in u or "codeload" in u:
+                out.append(u)
+        return out
+
+    def test_release_asset_is_tried_first(self):
+        """**发行仓排在源码仓前面** —— 顺序反了，源码仓私有化就是灾难。"""
+        urls = [u for u, _ in self._urls()]
+        rel, src = self._release_urls(urls), self._source_urls(urls)
+        self.assertTrue(rel, "发行仓一个候选源都没有")
+        self.assertTrue(src, "源码仓退路没了")
+        self.assertEqual(urls[0], self.ASSET, "第一个必须是发行仓的资产直链")
+        self.assertLess(max(urls.index(u) for u in rel),
+                        min(urls.index(u) for u in src),
+                        "发行仓的候选源必须整体排在源码仓前面")
+
+    def test_asset_url_carries_octet_stream_header(self):
+        """不带这个请求头，`api.github.com` 的资产地址返回的是**元数据 JSON**，
+        解压时会报"这不是 zip" —— 而报错完全看不出是请求头的问题。"""
+        pairs = self._urls()
+        self.assertEqual(pairs[0][1], selfupdate._OCTET_HEADERS)
+        # 没有请求头的那些必须是 None（别让每个源都带上无用的头）
+        for url, headers in pairs[1:]:
+            self.assertIsNone(headers, url)
+
+    def test_source_repo_urls_follow_the_requested_ref(self):
+        """`download(ref=…)` 要能把源码仓那两条的 ref 换成指定分支/tag。
+
+        ⚠ 发行仓那几条**故意不跟 ref 走** —— 它们的包跟着"最新 Release"。
+        """
         sha = "abc1234def5678"
-        urls = selfupdate._zip_urls(sha)
-        self.assertIn(sha, urls[0])
-        self.assertIn(sha, urls[1])
-        self.assertNotIn(selfupdate.BRANCH, urls[0].replace(f"zipball/{sha}", ""))
+        src = self._source_urls(self._urls(sha))
+        self.assertEqual(len(src), 2, "源码仓的两条退路没了")
+        for u in src:
+            self.assertIn(sha, u)
+        for u in self._release_urls(self._urls(sha)):
+            self.assertNotIn(sha, u)
 
-    def test_falls_back_to_the_second_source(self):
-        """第一个源挂了要用第二个 —— 门店网络什么样都有。"""
-        import requests as real
+    def test_release_repo_unreachable_still_has_the_source_fallback(self):
+        """发行仓整个挂了（问不到资产地址）—— 源码仓那两条还在。"""
+        urls = [u for u, _ in self._urls(asset="", tag="")]
+        self.assertTrue(self._source_urls(urls), "退路没了")
+        self.assertTrue(any("releases/latest/download" in u for u in urls),
+                        "拿不到 tag 也该留一条固定名的直链")
+
+    def test_release_asset_url_never_raises(self):
+        """这条是**最前面**的候选源 —— 它抛异常会把整次下载判死。
+        拿不到就返回空，让后面的退路上。"""
+        with mock.patch.object(selfupdate, "_get",
+                               side_effect=selfupdate.UpdateError("挂了")):
+            self.assertEqual(selfupdate._release_asset_url(), ("", ""))
+
+    def test_tries_every_source_then_reports_them_all(self):
+        """一个个试过去，全挂了要把**每个源**都写进报错 —— 门店要靠它判断
+        是"整个 GitHub 都不通"还是"只有发行仓出事"。"""
         tried = []
 
-        def fake_get(url, *, timeout, stream=False):
+        def fake_get(url, *, timeout, stream=False, **kw):
             tried.append(url)
-            if "api.github.com" in url:
-                raise selfupdate.UpdateError("第一个源挂了")
-            raise selfupdate.UpdateError("第二个也挂了")
+            raise selfupdate.UpdateError("挂了")
 
-        with mock.patch.object(selfupdate, "_get", fake_get):
+        with self._patch_release(), mock.patch.object(selfupdate, "_get", fake_get):
             with self.assertRaises(selfupdate.UpdateError) as cm:
                 selfupdate.download()
-        self.assertEqual(len(tried), 2)
-        self.assertIn("下载失败", str(cm.exception))
-
-    def test_error_mentions_both_sources(self):
-        def fake_get(url, *, timeout, stream=False):
-            raise selfupdate.UpdateError("连不上")
-
-        with mock.patch.object(selfupdate, "_get", fake_get):
-            with self.assertRaises(selfupdate.UpdateError) as cm:
-                selfupdate.download()
+        self.assertEqual(tried[0], self.ASSET, "发行仓资产必须最先试")
+        self.assertIn("zipball", tried[-2])
+        self.assertIn("codeload", tried[-1], "codeload 是最后一道退路")
         msg = str(cm.exception)
         self.assertIn("api.github.com", msg)
-        self.assertIn("codeload", msg, "报错要说清两个源都试过了")
+        self.assertIn("codeload", msg, "报错要说清源码仓那两条都试过了")
+        self.assertIn("下载失败", msg)
 
 
 class TestFailureDiagnostics(unittest.TestCase):
@@ -1500,6 +1555,85 @@ class TestFailureDiagnostics(unittest.TestCase):
         self.assertTrue((self.tmp / "src" / "cli.py").is_file())
 
 
+class Test发行仓发布脚本(unittest.TestCase):
+    """`tools/publish_release.sh` —— **对着公开仓库的那道闸**。
+
+    发行仓是公开的，所以"打包时注入的密钥不许上去"这件事**不能靠人记得**：
+    `build_package.sh` 当年就是靠 `--exclude` + 反查两道才稳住的，这里照抄那个形状。
+    """
+
+    SH = ROOT / "tools" / "publish_release.sh"
+
+    def _text(self) -> str:
+        return self.SH.read_text(encoding="utf-8")
+
+    def test_发行仓地址从_selfupdate_读而不是写死(self):
+        """写死一份迟早和 `selfupdate.RELEASE_REPO` 对不上 ——
+        那时的表现是**客户端去问 A 仓、发布脚本往 B 仓发**，两边都不报错。"""
+        t = self._text()
+        self.assertIn('sed -n', t)
+        self.assertIn("RELEASE_REPO", t)
+        self.assertNotIn('RELEASE_REPO = "HappyJoy95/', t,
+                         "发行仓地址必须从 src/selfupdate.py 读，不许在这儿再写一份")
+
+    def test_两把密钥都在禁发名单里(self):
+        """`central-mail.env`（中台授权码）和 `mail-key.json`（附件加密密钥）
+        —— 进了公开 Release 就**收不回来**（CDN 缓存 / 别人的 clone 里还在）。"""
+        t = self._text()
+        m = re.search(r"BAN_NAMES\s*=\s*\{([^}]+)\}", t)
+        self.assertIsNotNone(m, "找不到禁发名单 BAN_NAMES")
+        names = set(re.findall(r'"([^"]+)"', m.group(1)))
+        for must in ("central-mail.env", "mail-key.json"):
+            self.assertIn(must, names, f"{must} 不在禁发名单里")
+
+    def test_区长名单不进公开资产(self):
+        """`config/managers.yaml` = 区长名单，里面是**云商登录名和私人邮箱**。
+
+        它在 `selfupdate.NEVER_TOUCH` 里（`config/` 整个目录）⇒ 更新本来就
+        不会覆盖它，从更新包里拿掉对已装机器零影响。但它已经在公开源码仓里
+        躺过一轮了（源码仓私有化会顺带解决）—— **发行仓这份不能再带上**。
+        """
+        t = self._text()
+        m = re.search(r"BAN_PATHS\s*=\s*\{([^}]+)\}", t)
+        self.assertIsNotNone(m, "找不到按路径禁发的 BAN_PATHS")
+        paths = set(re.findall(r'"([^"]+)"', m.group(1)))
+        self.assertIn("config/managers.yaml", paths)
+
+        # 三处判据必须一致：剔除 / 反查 / 实际写出 —— 少一处就是漏
+        self.assertGreaterEqual(t.count("BAN_PATHS"), 3,
+                                "BAN_PATHS 只在一处生效 —— 剔除、反查、写出要三处都认")
+
+    def test_反查排在上传之前(self):
+        """⚠ 断言必须在**动作之前**拦下来 —— 上传完再发现就晚了，
+        而且 GitHub 的 release 资产删掉也不保证 CDN 上没了。"""
+        t = self._text()
+        check = t.find("反查没过")
+        upload = t.find("gh release create")
+        self.assertGreater(check, 0, "找不到反查断言")
+        self.assertGreater(upload, 0, "找不到上传那一步")
+        self.assertLess(check, upload, "反查排在上传后面 —— 那是事后诸葛亮")
+
+    def test_beta_包不动发行仓的_VERSION(self):
+        """beta 的版本号和正式版**同号**（AGENTS 发版那节）。
+        beta 要是把发行仓的 VERSION 改了，门店会看到一个假的"有新版"，
+        点下去装的却是测试包。"""
+        t = self._text()
+        guard = t.find('if [ -z "${BETA}" ]; then')
+        put = t.find('put_file "VERSION"')
+        self.assertGreater(guard, 0, "找不到 beta 判断")
+        self.assertGreater(put, 0, "找不到写 VERSION 那一步")
+        self.assertLess(guard, put, "VERSION 写在 beta 判断外面了")
+
+    def test_资产名和客户端读的是同一个(self):
+        """脚本上传的文件名必须 == `selfupdate.RELEASE_ASSET`，
+        否则 `_zip_urls` 那条固定名的退路永远 404。"""
+        t = self._text()
+        self.assertIn("RELEASE_ASSET", t)
+        m = re.search(r'RELEASE_ASSET=.*?sed -n[^\n]+', t)
+        self.assertIsNotNone(m, "资产名不是从 selfupdate.py 读的")
+        self.assertIn("src/selfupdate.py", m.group(0))
+
+
 class TestVersionSourcePriority(unittest.TestCase):
     """版本检查**必须优先走 api.github.com**。
 
@@ -1538,6 +1672,44 @@ class TestVersionSourcePriority(unittest.TestCase):
         self.assertEqual(v, "1.3.4")
         self.assertIn("api.github.com", tried[0], "第一个必须问 api，不能是 raw")
         self.assertNotIn("raw.githubusercontent", tried[0])
+
+    def test_release_repo_is_asked_before_the_source_repo(self):
+        """⚠ **发行仓必须排在源码仓前面** —— 这是"源码仓私有化"的保险。
+
+        顺序反了的话：源码仓改 Private 的那一刻，还没升上来的门店当场 404，
+        再也收不到更新，而那时已经没有任何补救（唯一不可逆的一步）。
+        """
+        tried = []
+
+        def fake_get(url, **kw):
+            tried.append(url)
+            return self._api_payload("9.9.9")
+
+        with mock.patch.object(selfupdate, "_get", fake_get):
+            selfupdate.remote_version()
+        self.assertEqual(len(tried), 1, "第一个源就答上来了，不该再问第二个")
+        self.assertIn(selfupdate.RELEASE_REPO, tried[0],
+                      f"第一个问的是源码仓，不是发行仓：{tried[0]}")
+        self.assertIn("contents/VERSION", tried[0],
+                      "发行仓的版本号在根目录的 VERSION 里，不是 src/version.py")
+
+    def test_source_repo_is_the_last_resort(self):
+        """发行仓两个源全挂了，才轮到源码仓（源码仓私有化之后它会 404，
+        但那时发行仓已经答上来了）。"""
+        seen = []
+
+        def fake_get(url, **kw):
+            seen.append(url)
+            if selfupdate.RELEASE_REPO in url:
+                raise selfupdate.UpdateError("发行仓不通")
+            return self._api_payload("1.3.4")
+
+        with mock.patch.object(selfupdate, "_get", fake_get):
+            self.assertEqual(selfupdate.remote_version(), "1.3.4")
+        self.assertEqual(len(seen), 3, "发行仓 api+raw 两发，源码仓 api 一发")
+        self.assertIn(selfupdate.RELEASE_REPO, seen[0])
+        self.assertIn("raw.githubusercontent", seen[1])
+        self.assertIn(selfupdate.REPO + "/contents", seen[2])
 
     def test_decodes_base64_with_newlines(self):
         """GitHub 的 content 是 base64 **带换行** —— 不洗掉就解不出来。"""
@@ -1908,10 +2080,10 @@ class TestNetworkRetry(unittest.TestCase):
         self.assertEqual(calls["n"], 2, "第一次失败后没有重试")
 
     def test_gives_up_after_tries(self):
-        """两个源都试过、都放弃之后才报错。
+        """每个源都试过、都放弃之后才报错。
 
-        ⚠ 现在是**两个源**（api 优先、raw 退路），所以总尝试次数是
-        api 的 1 次 + raw 的 TRIES 次 —— 不再是单纯的 TRIES。
+        ⚠ 现在是**两个仓库 × (api + raw) = 四个源**（发行仓优先、源码仓退路）：
+        api 那两条各试 1 次（不通就赶紧换下一个源），raw 那两条各试 TRIES 次。
         """
         import requests as real
         fake, calls = self._fake_requests([real.exceptions.SSLError("boom")])
@@ -1919,7 +2091,8 @@ class TestNetworkRetry(unittest.TestCase):
                 mock.patch.object(selfupdate.time, "sleep", lambda s: None):
             with self.assertRaises(selfupdate.UpdateError) as cm:
                 selfupdate.remote_version()
-        self.assertEqual(calls["n"], 1 + selfupdate.TRIES)
+        self.assertEqual(calls["n"], len(selfupdate._version_sources())
+                         * (1 + selfupdate.TRIES))
         self.assertIn("试了", str(cm.exception))
 
     def test_each_attempt_uses_a_fresh_session(self):

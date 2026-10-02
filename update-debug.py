@@ -32,7 +32,7 @@ try:
 except Exception:                                                 # noqa: BLE001
     pass
 
-head("下载 zipball（和自更新同一个地址）")
+head("下载更新包（和自更新同一个地址 —— 见 src/selfupdate.py::_zip_urls）")
 try:
     zip_root = su.download(timeout=120)
 except Exception as e:                                            # noqa: BLE001

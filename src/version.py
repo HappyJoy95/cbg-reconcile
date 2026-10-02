@@ -11,8 +11,8 @@
 
 三个来源，按优先级：
 
-1. `BUILD.txt` —— 打包时 `tools/build_package.sh` 写时间戳；从 GitHub 自更新
-   之后由 `src/selfupdate.py` 写成 `GitHub main · v1.2.0`。
+1. `BUILD.txt` —— 打包时 `tools/build_package.sh` 写时间戳；从发行仓自更新
+   之后由 `src/selfupdate.py` 写成 `Release · v1.2.0`。
 2. `.git/HEAD` —— **clone 下来的仓库**没有 `BUILD.txt`（那文件是未跟踪的），
    但 `.git` 里就有分支和 commit。直接读文件，**不调 git 命令**：
    门店电脑上不装 git，装到一半的机器上也未必有。
@@ -33,8 +33,11 @@ from .paths import ROOT
 #:
 #: ⚠ 2026-09-19 改过名（用户：「3.0.0的项目名能改吗，cbg-reconcile 名字有点怪。
 #:   **仓库和链接就别改了**」）：`CBG报量对账` → `盛联门店数据平台`。
-#:   仓库名（`HappyJoy95/cbg-reconcile`）和自更新链接**一个字都没动** ——
+#:   仓库名（`HappyJoy95/cbg-reconcile`）和当时的自更新链接**一个字都没动** ——
 #:   `selfupdate` 根本不读 `APP_NAME`。
+#:   （**2026-10-02 更新链接动了**：自更新改读发行仓 `cbg-reconcile-release`，
+#:    见 `selfupdate.RELEASE_REPO`。那件事跟产品名无关 —— 仓库名和 `APP_NAME`
+#:    依然是两回事，别因为这行注释就把它们当成一回事。）
 #:
 #: ⚠ 它进了**开机自启的注册表键名**和**计划任务名** ⇒ 改名会"出现两份"、
 #:   开机启两次。所以 `autostart.LEGACY_APP_NAMES` 记着旧名字，建新的时顺手删旧的。
