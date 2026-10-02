@@ -34,6 +34,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt "pyinstaller==5.13.2"
+          # ⚠ pytest **不在** requirements.txt 里（那是门店装机的依赖，不是开发依赖）
+          python -m pip install pytest
 
       - name: 跑单元测试（3.8，跟门店同一档）
         run: python -m pytest tests/ -q
