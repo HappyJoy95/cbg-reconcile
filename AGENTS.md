@@ -14,7 +14,7 @@
 `bootstrap.py autostart --elevated`，而那条路会让抓会话失败，见坑 7）。
 
 ```bash
-python -m pytest tests/ -q          # 2578 条，约 110 秒。改完必须全绿（**三个头都要绿**）
+python -m pytest tests/ -q          # 当前约 3679 条（以实际收集为准）；改完必须全绿（**三个头都要绿**）
 python bootstrap.py selftest        # 逐项自检（版本 / 门店 / 依赖 / 会话 / 服务）
 python -m src.cli serve             # 起控制台 → http://127.0.0.1:8787
 python -m src.cli daily --steps dump,erp-dump,pos,pools,attain   # 日常流程（**必须点名**）
@@ -51,13 +51,15 @@ python -m src.cli daily --steps dump,erp-dump,pos,pools,attain   # 日常流程�
 
 ```
 入口层   src/cli.py        命令行入口 + 所有 cmd_* 子命令 / argparse（**永远留在原地**）
-         src/web.py        控制台后端（HTTP + JSON API，无框架）与 App/Handler
+         src/web.py        旧 Web 导入兼容入口；实现见 src/http/
+         src/http/app.py   控制台 HTTP + JSON API、App/Handler、serve（标准库，无框架）
+         src/http/policy.py 页面可见性与操作权限规则的派生逻辑
          src/run_daily.py  日常流程编排（**必须 `--steps` 点名**；名单从注册表派生，见下）
          web/app.js        控制台前端（原生 JS，**无构建步骤**，改完刷新即可）
          web/index.html    页面骨架（id 要和 app.js 里 $('#xxx') 对得上）
          web/theme.css     共享非配色令牌 / 动效总开关（配色在 web/themes/）
          web/themes/       **一主题一文件**（2026-09-22）：default.css + 各主题覆盖色
-         web/inventory*    **库存盘点那一页**（M16 接进来的独立一页，见下面那条）
+         web/features/inventory/page.js 库存页同文档接入、懒加载与扫码焦点管理
 
 能力层   src/modules/      **六个系统模块**（功能模块只跟它们打交道）
 （系统）   auth/ 登录验证 · fetch/ 数据抓取 · notify/ 推送
@@ -96,22 +98,22 @@ python -m src.cli daily --steps dump,erp-dump,pos,pools,attain   # 日常流程�
 
 ⚠ **左下角那一组**（账号与人员 / 检查更新 / 通用 / **数据交换** / 玲珑授权 / 定时器设置）
 **不是功能模块**：它们在 `index.html` 的 `#side-foot` 里**手写**，页面落在
-`#panel-settings` 里，可见性写在 `web.FOOT_PAGES`（**不在注册表**）。
+`#panel-settings` 里，可见性声明在 `src/http/policy.py::FOOT_PAGES`（**不在注册表**；
+`src.web` 仍兼容导出旧 Web 符号）。
 ⚠ 「数据交换」（M20 的每店一张卡）就在这儿 —— **只有区长 / 平台看得见**（`multi`），
 而且 `/api/report/stores` 对门店**直接 403**。
 
 ### ⚠ 库存盘点那一页（M16，2026-09-20）——两条别踩
 
-**① 它是一整页，但嵌在控制台的 iframe 里。**
-`web/index.html` 的 `#panel-inventory` 里是 `<iframe src="/inventory.html?embed=1">`
-（**懒挂载**：切到那一页才填 `src`）。两个坑：
+**① 它是控制台里的同文档子面板，不是 iframe。**
+`web/index.html` 的 `#panel-inventory #subpanel-inventory` 直接放置库存页结构；
+`web/features/inventory/page.js` 注册挂载、首次进入时按 `core → api → store → xlsx → ui`
+懒加载资源，并管理离页时的监听清理。不要恢复旧的独立页面或 iframe 接入。
 
-* **扫码枪的焦点**：扫码枪就是个键盘，输入必须落在 iframe 的扫码框里。用户点一下
-  控制台别处焦点就跑了（"扫了没反应"）。所以有两道兜底（`app.js` 的
-  `mountInventory` / `focusFrame` / 那段 `postMessage({ic:'scan-key'})`，
-  对面 `ui.js` 的 `onParentKey`）—— **只转第一下按键**，之后焦点已经在框里，
-  父页面收不到那些事件，所以不会重复。
-* **`?embed=1`** 让它藏掉自己的大标题和「回控制台」（控制台自己有）。
+* **扫码枪的焦点**：扫码枪就是键盘输入，扫码时必须让库存扫码框持有焦点。
+  `page.js` 的 `focusInvScan()` 在库存扫码台可见时恢复焦点；鼠标回到库存面板，
+  或用户在库存面板按下字符键时，也会兜底聚焦。若用户正在输入设置表单，不能抢焦点。
+  这里是同一份 document，不需要 `postMessage` 转发按键。
 
 **② `web/inventory/{core,store,xlsx}.js` 是从上游项目原样搬来的，别在这儿改。**
 它们装着盘点**全部口径**（uid / 在途拆分 / 匹配引擎 / xlsx 生成），
@@ -121,32 +123,40 @@ python -m src.cli daily --steps dump,erp-dump,pos,pools,attain   # 日常流程�
 `ui.js` / `api.js` / `style.css` 是**接过的那三个**（取数改走后端、导出接推送、
 账号不再存在浏览器里），在这儿改就行。
 
-**还没搬的**（§4.5.5 的步 4/6/7）：`http/`（拆 `web.py`）、`integrations/`、`desktop/` ——
-现在还是散在 `src/` 下的单文件：
+### 运行支撑模块搬迁后的路径
+
+`http/`、`integrations/`、`desktop/` 的实现已迁入对应目录。根目录保留的旧模块名是
+**兼容入口**，用于维持既有导入路径、模块身份和测试补丁点；改实现时去新目录，
+不要把兼容文件误当成第二份实现，也不要顺手删除它们。
+
+```text
+src/web.py                         → src/http/（实现：app.py、policy.py）
+src/{erp,erp_stub,cbg,browser,cdp,tdoc,pmall,mailer,wecom}.py
+                                  → src/integrations/
+src/{autostart,elevate,runtime,schedule,service,winutil,runner}.py
+                                  → src/desktop/
+src/pools.py                       → src/features/compliance/comparison/
+```
+
+`src/http/app.py` 仍集中放置 App、Handler、API dispatch 和 serve；页面/操作权限派生
+在 `src/http/policy.py`。不要为了“拆小文件”继续拆散模块级补丁契约，尤其是 Web 启动、
+路由和 Handler 生命周期；要进一步调整先补兼容设计和测试。
+
+下面这些实现目前仍在 `src/` 根目录；它们不属于上述搬迁计划，是否再按职责拆分应另行定范围：
 
 ```
 src/dump.py        华为订单 → SQLite（out/cbg-<年>.db，一年一个库）
-src/tdoc.py        腾讯文档匿名读（周度任务目标分配）
 src/bugreport.py   「上报 bug」：收集现场 → 打包 → 推送（**先落盘再发**）
 src/whatsnew.py    每版的「改了什么 + 门店要做什么」（更新后弹一次）
                    ⚠ **升 VERSION 必须在这里补一条**，有测试拦着
 src/upgrade.py     升级记录 + **大版本升级就把「要做的事」推出去**
-src/browser.py     自动抓华为会话（CDP 读 cookie + localStorage 取 csrf）
-src/cbg.py         华为 CBG 接口客户端（订单列表、门店详情、ping）
-src/erp.py         云商 ERP 客户端（销售明细、登录换 token、验证码）
 src/reconcile.py   对账核心：两边串号做差集
 src/report.py      差异清单落盘（xlsx + json）
 src/selfupdate.py  自更新 / 历史版本回退 / 版本检查
-src/runner.py      起子进程 + 日志缓冲（**按点名的几步起**：`start_steps`/`start_argv`，
-                    ⚠ 那个"按预设起一趟"的 `start()` 2026-09-21 晚删了）
-src/schedule.py    计划任务（schtasks / crontab）+ 自己记的注册参数
-                   （`.secrets/schedule.json`，见坑 7 第 3 条）
-src/autostart.py   开机自启（**默认注册表 Run·普通权限**；计划任务那条要显式开）
-src/winutil.py     schtasks 的两个坑（输出编码、字段本地化）集中在这里
-src/runtime.py     记住"安装时用的是哪个 Python"（多 Python 机器不装错）
-src/elevate.py     按需提权：只把"删旧任务/建定时任务"那一步弹一次 UAC
+src/pools_history.py / src/pools_notify.py  报量池历史记录与通知
+src/mailcrypto.py  邮件附件与发行包加解密
 bootstrap.py       所有 .bat 的统一入口（**纯标准库**，装依赖前就能跑）
-tests/             2578 条单元测试（pytest）—— 注册表/布局/模块各有专门的钉子
+tests/             pytest 测试——注册表 / 布局 / 模块各有专门的钉子；数量以实际收集为准
 tools/build_package.sh  打发布包（见下）
 运维手册.md         完整手册（部署/维护用，**不发门店**）
 门店操作手册.md     发门店的精简版（五六步，打包时进包的是这份）
@@ -432,7 +442,8 @@ zip 走 Release 资产的 **api 直链**（`_release_asset_url()`，要带
   因为删不掉一直留着，于是**三个症状同时出现**：① 怎么启动都提示管理员；
   ② 抓会话还是失败；③ 连"每天定时对账"也注册不了（旧的是管理员建的，
   普通权限 `/f` 覆盖不了）。所以光提示不行，得让用户**能一键做掉**。
-* **按需提权**（`src/elevate.py`）：这两件事只有管理员能做，而它们都是一次性的 ——
+* **按需提权**（实现位于 `src/desktop/elevate.py`；根目录 `src/elevate.py` 是兼容入口）：
+  这两件事只有管理员能做，而它们都是一次性的 ——
   所以只把**那一步**弹一次 UAC 重跑（`ShellExecuteW(runas)` + 结果写文件回传），
   **不要**让用户"右键 install.bat 以管理员身份运行"，那会把 `pip install` 一起提权跑掉。
   界面上是「以管理员身份修复」按钮（只在 `mode == 'task'` 时露出来）和定时任务
@@ -622,7 +633,7 @@ one(...).replace('<td class="plan-store">', '<td class="plan-store plan-store-op
 → `features/inventory/push.py::_channel_on()` 就是干这个的；读配置失败时**当"没开"**
   （宁可少发一条、界面上说明白，也别擅自往群里发东西）。
 
-**16. 嵌在 iframe 里的那一页：扫码枪的焦点得自己兜，而且形态别自己定**
+**16. 库存页嵌在控制台里：扫码枪的焦点得自己兜，而且形态别自己定**
 
 两件事记在一起，因为它们是同一天同一件事的两半（M16 库存盘点）：
 
@@ -630,13 +641,11 @@ one(...).replace('<td class="plan-store">', '<td class="plan-store plan-store-op
   （扫码枪要独占焦点）—— 用户当天就否了：「**做嵌套进来吧，现在单独打开一个页面很奇怪**」。
   教训：**技术理由充分不等于用户要的形态对** —— 涉及"东西长在哪"这种
   一眼能看出来的事，先问一句，别拿工程理由替用户决定。
-* **嵌进去之后，焦点就得自己兜**：扫码枪是"键盘模拟"，输入只落在**有焦点**的那个文档里。
-  用户在控制台别处点一下，焦点就跑到 iframe 外面了 —— 表现是"扫了没反应"，
-  而这是最难查的一类故障（上游 README 的 FAQ 第一条就是它）。两道兜底：
-  ① 切到这一页 / 鼠标回到面板 ⇒ `focusFrame()` 把焦点还给 iframe；
-  ② 焦点真在外面 ⇒ 父页面 `postMessage({ic:'scan-key', key})` 把那**一下按键**转进去。
-  **只转第一下**：转过去之后扫码框拿到焦点，后面的字符直接在框里落字
-  （父页面收不到那些事件），所以不会"一个字符进两次"。
+* **嵌进去之后，焦点就得自己兜**：扫码枪是"键盘模拟"，输入必须落在扫码框。
+  用户在控制台其他控件操作后，焦点可能离开扫码框，表现就是"扫了没反应"。
+  当前同文档接入由 `web/features/inventory/page.js::focusInvScan()` 恢复焦点；
+  它只在扫码台可见时生效，设置表单正在输入时不抢焦点。库存页和控制台共享 document，
+  不要加回 iframe 或跨文档按键转发。
 
 **17. 同一个仓库**同时**开两个会话改，改动会被对方的缓冲区覆盖掉**
 
@@ -657,16 +666,16 @@ one(...).replace('<td class="plan-store">', '<td class="plan-store plan-store-op
 
 现在的形状（改这块之前先读这段）：
 
-* **判据只有 `web.role_scope(app)` 一处**（区长 → 平台 → 门店，**区长必须优先** ——
+* **判据只有 `src.http.app.role_scope(app)` 一处**（区长 → 平台 → 门店，**区长必须优先** ——
   区长的账号恰恰是"能看到 >1 家店"的那种，先判平台就会把他当平台岗、静默看全部门店）。
 * **每个 `/api/*` 都要有一行 `forbid(scope, ...)`**；越权回 **403 + `error` 文案**。
 * **可见性词表四档**：`""`（都看）· `experience` / `partner`（按"这家店要不要玲珑"）·
   **`multi`（管多店的身份：区长 / 平台，M20 加的）**。⚠ 一个人**同时**属于几档
-  （区长 = `multi` + 玲珑那档）⇒ 判据是**集合相交**（`web.scope_types()`），
+  （区长 = `multi` + 玲珑那档）⇒ 判据是**集合相交**（`src.http.app.scope_types()`），
   写成"等于某一个词"会让区长要么丢掉多店视图、要么丢掉五项合规。
 * **可见性表的唯一来源**：**功能模块**那半在注册表的 `Feature.types` / `Sub.types`，
-  **左下角那一组**（账号/更新/通用/数据交换/玲珑/定时）在 `web.FOOT_PAGES`
-  （它们不是功能模块，见目录那节）—— `web._build_page_rules()` 把两边合一，
+  **左下角那一组**（账号/更新/通用/数据交换/玲珑/定时）在 `src/http/policy.py::FOOT_PAGES`
+  （它们不是功能模块，见目录那节）—— `src/http/policy.py::build_page_rules()` 把两边合一，
   派生成 `PAGE_RULES` → `role_scope()["pages"]` → 前端
   `applyProfile(role)` 只按它打 `hidden`。⚠ 加新页时**只改注册表**
   （左下角那种就在 `FOOT_PAGES` 加一行）；
@@ -747,7 +756,7 @@ ProxyError: HTTPSConnection(host='127.0.0.1', port=7897): Connection refused
 
 ⚠ **区长看哪些店 = 区域**（2026-09-21 用户拍的 B 方案）：区域是**门店的属性**，
 区长只写区名 ⇒ 新店在名单里**标了区域就自动进**对应区长。
-判据只有一处：`config_io.stores_of_manager()`（`web.role_scope()` 与
+判据只有一处：`config_io.stores_of_manager()`（`src.http.app.role_scope()` 与
 `attain/split.py::managers_of()` 都走它）；老写法 `stores: [店名…]` 仍然认。
 ⚠ 改名单时跑一下 `config_io.region_audit()`（`selftest` 也会打印）——
 区名打错会让那位区长**一家店都看不到**，而界面上只会显示"没有数据"。
