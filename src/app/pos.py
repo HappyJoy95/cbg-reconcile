@@ -96,7 +96,12 @@ def compute(db, *, root=None) -> PosRun:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     try:
+        # 一个读事务同时覆盖指标读取和门店身份快照；避免订单库在两次查询之间
+        # 更新，导致汇总与授权证明不对应。
+        conn.execute("BEGIN")
         orders, returns = pos_report.load(conn)
+        source_stores = pos_report.store_identities(conn)
+        conn.commit()
     finally:
         conn.close()
 
@@ -136,6 +141,7 @@ def compute(db, *, root=None) -> PosRun:
     out.write_text(json.dumps({
         "generated_at": _now().strftime("%Y-%m-%d %H:%M:%S"),
         "year": year, "db": db_rel, "orders": len(orders), "returns": len(returns),
+        "source_stores": source_stores,
         "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
 
     return PosRun(ok=True, db=db_rel, year=year, out_path=str(out),

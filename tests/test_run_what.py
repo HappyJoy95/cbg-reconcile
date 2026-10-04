@@ -28,7 +28,15 @@ from src.app.pos import PosRun
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
+
+
+def patch_step_run(command, fn):
+    """替换注册表中指定步骤的执行函数；Step.run 在导入时已绑定函数对象。"""
+    from src.features import registry
+    step = next(item for item in registry.BUILTIN_STEPS if item.cmd == command)
+    return mock.patch.object(step, "run", fn)
 
 
 class Test预设层已经删掉(unittest.TestCase):
@@ -88,7 +96,7 @@ class TestDailySkipFlags(unittest.TestCase):
                             "erp-dump": 0}
 
         def mk(k):
-            def f(_a):
+            def f(ctx):
                 calls.append(k)
                 return codes[k]
             return f
@@ -124,21 +132,25 @@ class TestDailySkipFlags(unittest.TestCase):
         # ⚠ `plan_run` 也得挡（2026-09-23）：月度计划 `root=None` ⇒ 真写**项目根**
         #   `out/plan-2026.json`（固定名 tmp 三头并行抢 ⇒ FileNotFoundError 偶发红）。
         #   ⚠ 注释不能写进下面的 `\` 续行链 —— 桩不记 calls（断言是"五步"）。
-        with mock.patch.object(cli, "load_config",
+        with mock.patch("src.features.sales.attain.config_io.load_raw",
+                        return_value={"erp_store_name": "青岛CBD万达店",
+                                      "store_code": "SCN328987", "marker": "C"}), \
+             mock.patch.object(cli, "load_config",
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(cli, "cmd_dump", mk("dump")), \
+             patch_step_run("dump", mk("dump")), \
              mock.patch.object(cli, "cmd_check", mk("check")), \
-             mock.patch.object(run_daily, "pos_run", mk_pos()), \
-             mock.patch.object(cli, "cmd_pools", mk("pools")), \
-             mock.patch.object(cli, "cmd_erp_dump", mk("erp-dump")), \
-             mock.patch.object(run_daily, "attain_run", mk_attain()), \
-             mock.patch.object(run_daily, "report_run",
+             mock.patch("src.app.pos.run", mk_pos()), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        mk("pools")), \
+             patch_step_run("erp-dump", mk("erp-dump")), \
+             mock.patch("src.features.sales.attain.attain.run", mk_attain()), \
+             mock.patch("src.app.report.run",
                                mk_kw("report", {"ok": True})), \
-             mock.patch.object(run_daily, "inbox_run",
+             mock.patch("src.app.report_inbox.run",
                                mk_kw("report-inbox", {"ok": True, "skipped": "没配收信"})), \
-             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}), \
+             mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}), \
              contextlib.redirect_stdout(buf), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")):
@@ -201,12 +213,13 @@ class TestDailySkipFlags(unittest.TestCase):
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(run_daily, "pos_run", fake_pos), \
+             mock.patch("src.app.pos.run", fake_pos), \
              mock.patch.object(cli, "cmd_check", boom), \
-             mock.patch.object(cli, "cmd_dump", boom), \
-             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
-             mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
+             patch_step_run("dump", boom), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        lambda _ctx: 0), \
+             mock.patch("src.features.sales.attain.attain.run", lambda **k: {"ok": True}), \
+             mock.patch("src.app.report.run", lambda **k: {"ok": True}), \
              contextlib.redirect_stdout(buf):
             rc = run_daily.main(["--steps", "pos"])
         self.assertTrue(seen.get("pos"))
@@ -220,14 +233,15 @@ class TestDailySkipFlags(unittest.TestCase):
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(cli, "cmd_dump", lambda a: 99), \
-             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
-             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
-             mock.patch.object(run_daily, "pos_run",
+             patch_step_run("dump", lambda ctx: 99), \
+             patch_step_run("erp-dump", lambda ctx: 0), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        lambda _ctx: 0), \
+             mock.patch("src.app.pos.run",
                                lambda **k: PosRun(ok=True)), \
              contextlib.redirect_stdout(buf):
             # ⚠ `dump` 会回 99（失败），但它**没被点名** ⇒ 不该把退出码带坏
-            #   （⚠ `cmd_erp_dump` 必须挡：不挡的话这条会**真去登云商**拉数据）
+            #   （⚠ `erp-dump` 执行入口必须挡：不挡会**真去登云商**拉数据）
             rc = run_daily.main(["--steps", "erp-dump,pos,pools"])
         self.assertEqual(rc, 0, "没点名的步骤不该把退出码带坏")
 
@@ -461,8 +475,8 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
         calls = []          # ⚠ `mk_attain` 会往里记 —— 别删（删了就是 NameError）
 
         def mk(k):
-            def f(a):
-                seen[k] = a
+            def f(ctx):
+                seen[k] = ctx
                 return 0
             return f
         buf = io.StringIO()
@@ -493,21 +507,24 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(cli, "cmd_dump", mk("dump")), \
+             patch_step_run("dump", mk("dump")), \
              mock.patch.object(cli, "cmd_check", mk("check")), \
-             mock.patch.object(run_daily, "pos_run", mk_pos()), \
-             mock.patch.object(cli, "cmd_pools", mk("pools")), \
-             mock.patch.object(cli, "cmd_erp_dump", mk("erp-dump")), \
-             mock.patch.object(run_daily, "attain_run", mk_attain()), \
-             mock.patch.object(run_daily, "report_run",
+             mock.patch("src.app.pos.run", mk_pos()), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        mk("pools")), \
+             patch_step_run("erp-dump", mk("erp-dump")), \
+             mock.patch("src.features.sales.attain.config_io.load_raw",
+                        side_effect=lambda path: cli.load_config(path)), \
+             mock.patch("src.features.sales.attain.attain.run", mk_attain()), \
+             mock.patch("src.app.report.run",
                                lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "inbox_run",
+             mock.patch("src.app.report_inbox.run",
                                lambda **k: {"ok": True, "skipped": "没配收信"}), \
-             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}), \
+             mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}), \
              mock.patch.object(cli, "_find_pos_db",
                                return_value=Path("/tmp/cbg-2026.db")), \
              contextlib.redirect_stdout(buf):
-            # ⚠⚠ **`cmd_erp_dump` 和 `attain_run` 必须一起挡**（2026-09-21 补）：
+            # ⚠⚠ **`erp-dump` 注册入口和 `attain_run` 必须一起挡**（2026-09-21 补）：
             #   漏了的话这条会**真去登云商抓数**（网络）并**真算一遍达成**
             #   —— 而达成会 `tmp + rename` 写**项目根**的 `out/attain-2026.json`。
             #   三个头并行跑时两个进程同时 rename 同一个 tmp ⇒
@@ -516,19 +533,11 @@ class TestTargetDateOnlyAffectsReconcile(unittest.TestCase):
             run_daily.main(extra)
         return seen
 
-    def test_抓取玲珑数据收不到目标日(self):
+    def test_抓取步骤经注册上下文运行(self):
         seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
                            "--date", "2026-09-10", "--lookback", "3", "--lookahead", "1"])
-        for attr in ("date", "days_ago", "lookback", "lookahead"):
-            with self.subTest(attr=attr):
-                self.assertFalse(hasattr(seen["dump"], attr),
-                                 "dump 不该收到 %s —— 它固定抓当月" % attr)
-
-    def test_抓取玲珑数据只看当月或全量(self):
-        seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
-                           "--date", "2026-09-10"])
-        self.assertTrue(hasattr(seen["dump"], "month"))
-        self.assertTrue(hasattr(seen["dump"], "all"))
+        self.assertTrue(seen["dump"].daily_step)
+        self.assertTrue(seen["erp-dump"].daily_step)
 
     def test_POS_收不到目标日(self):
         seen = self._seen(["--steps", ",".join(run_daily.MANUAL_STEPS),
@@ -725,13 +734,17 @@ class Test点名模式不打无关的日志(unittest.TestCase):
         from src import run_daily as rd
         buf = io.StringIO()
         with contextlib.ExitStack() as stack:
-            for target in ("src.cli.cmd_dump", "src.cli.cmd_erp_dump",
-                           "src.cli.cmd_pools"):
-                stack.enter_context(mock.patch(target, side_effect=lambda *a, **k: 0))
-            stack.enter_context(mock.patch("src.run_daily.attain_run",
+            stack.enter_context(patch_step_run("dump", lambda ctx: 0))
+            stack.enter_context(patch_step_run("erp-dump", lambda ctx: 0))
+            stack.enter_context(mock.patch(
+                "src.features.compliance.comparison.execution.run",
+                side_effect=lambda *a, **k: 0))
+            stack.enter_context(mock.patch("src.features.sales.attain.config_io.load_raw",
+                                           side_effect=lambda path: cli.load_config(path)))
+            stack.enter_context(mock.patch("src.features.sales.attain.attain.run",
                                            side_effect=lambda **k: {"ok": True}))
             stack.enter_context(mock.patch(
-                "src.run_daily.pos_run",
+                "src.app.pos.run",
                 side_effect=lambda **k: __import__("types").SimpleNamespace(
                     ok=True, why="")))
             stack.enter_context(mock.patch("src.modules.health.auto_update",

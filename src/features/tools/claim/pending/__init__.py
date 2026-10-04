@@ -11,4 +11,7 @@ from ....registry import Sub
 
 from . import compute, metric, status  # noqa: F401
 
-SUB = Sub(key="claim-pending", label="权益领取", order=20)
+SUB = Sub(
+    ops={op: ("store", "manager", "platform") for op in ("view", "enter", "modify")},
+    data="authorized", key="claim-pending", label="权益领取", order=20,
+)

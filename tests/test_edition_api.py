@@ -52,15 +52,14 @@ class Test接口404(unittest.TestCase):
     def test_对账类接口被拦(self):
         for p in ("/api/pools/history", "/api/attain", "/api/plan",
                   "/api/pos", "/api/report", "/api/erp", "/api/inventory/ready",
-                  "/api/staff", "/api/sn-trace"):
+                  "/api/staff"):
             self.assertTrue(self._gone(p), p)
 
     def test_保留接口不拦(self):
         for p in ("/api/setup", "/api/session", "/api/session/ping",
                   "/api/session/store-code",
                   "/api/hwlogin", "/api/refresh", "/api/claim-pending",
-                  "/api/health", "/api/boot", "/api/store-account/logout",
-                  "/api/report-bug"):
+                  "/api/health", "/api/boot", "/api/report-bug"):
             self.assertFalse(self._gone(p), p)
 
     def test_前缀是整段匹配_不误伤兄弟路径(self):
@@ -69,10 +68,10 @@ class Test接口404(unittest.TestCase):
         self.assertFalse(self._gone("/api/report-bug"))
         # 段边界之外的"同前缀不同名"也不该被拦
         self.assertFalse(self._gone("/api/possession"))
-        # 白名单例外优先：logout 在 store-account 前缀下也放行
+        # Lifehall 不能通过旧 ERP logout 接口清掉本机进入编码。
         self.assertTrue(self._gone("/api/store-account"))
         self.assertTrue(self._gone("/api/store-account/list"))
-        self.assertFalse(self._gone("/api/store-account/logout"))
+        self.assertTrue(self._gone("/api/store-account/logout"))
 
     def test_full版一律不拦(self):
         with mock.patch.dict(os.environ, {"CBG_EDITION": "full"}):
@@ -88,9 +87,9 @@ class Test接口404(unittest.TestCase):
         夹具里没有真门店配置）。`lifehall_gone(path)` 那行必须出现在
         `SETUP_ALLOW` 门禁那行**之前**。
         """
-        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
-        i_gone = src.index("if lifehall_gone(path):")
-        i_gate = src.index('if path.startswith("/api/") and not path.startswith(SETUP_ALLOW):')
+        src = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        i_gone = src.index("if lifehall_gone(path, app.root)")
+        i_gate = src.index('if path.startswith("/api/") and (not path.startswith(SETUP_ALLOW) or setup_aware):')
         self.assertLess(i_gone, i_gate, "404 拦截必须排在 SETUP_ALLOW 门禁之前")
 
 

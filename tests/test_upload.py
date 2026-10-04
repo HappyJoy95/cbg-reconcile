@@ -500,6 +500,36 @@ class Test收信落库(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = make_root(Path(self.tmp.name))
 
+    def test_收信未提供范围时默认不导入(self):
+        pkg = make_package(self.root, code="SCN-OUTSIDE")
+        item = {"subject": "[CBG上报] 未知范围门店", "attachments": [
+            {"filename": Path(pkg).name, "data": Path(pkg).read_bytes()}]}
+        from src.modules.fetch import mail as fetch_mail
+
+        with mock.patch.object(report_inbox, "configured", return_value=(True, "")), \
+             mock.patch.object(fetch_mail, "recent", return_value=[item]):
+            result = report_inbox.run(self.root, cfg={})
+
+        self.assertEqual(result["ok_packages"], 0)
+        self.assertEqual(result["skipped_packages"], 1)
+        self.assertEqual(report_inbox.stores(self.root), [])
+        self.assertFalse((Path(self.root) / report_inbox.INBOX_REL
+                          / Path(pkg).name).exists())
+
+    def test_只有显式全量范围才导入所有门店(self):
+        pkg = make_package(self.root, code="SCN-OUTSIDE")
+        item = {"subject": "[CBG上报] 平台授权门店", "attachments": [
+            {"filename": Path(pkg).name, "data": Path(pkg).read_bytes()}]}
+        from src.modules.fetch import mail as fetch_mail
+
+        with mock.patch.object(report_inbox, "configured", return_value=(True, "")), \
+             mock.patch.object(fetch_mail, "recent", return_value=[item]):
+            result = report_inbox.run(self.root, cfg={}, allowed_store_codes=None)
+
+        self.assertEqual(result["ok_packages"], 1)
+        self.assertEqual([row["store_code"] for row in report_inbox.stores(self.root)],
+                         ["SCN-OUTSIDE"])
+
     def test_落库_台账加行(self):
         res = report_inbox.import_package(self.root, make_package(self.root))
         self.assertTrue(res["ok"], res)
@@ -595,7 +625,9 @@ class Test收信落库(unittest.TestCase):
         with mock.patch.object(report_inbox, "configured",
                                lambda cfg=None, root=None: (True, "")), \
                 mock.patch.object(fetch_mail, "recent", fake_recent):
-            res = report_inbox.run(self.root, cfg={}, emit=None)
+            res = report_inbox.run(
+                self.root, cfg={}, allowed_store_codes=frozenset({"SCN231409"}),
+                emit=None)
         # ⚠ 2026-09-21（M21）：**筛从"传给 recent"改成"自己在本地筛"** ——
         #   现在要认**两个**主题前缀（`[CBG上报]` + `[目标拆分]`），
         #   而 `recent()` 只收一个 `subject_contains`；调它两遍 = 白连两次 IMAP。
@@ -606,6 +638,60 @@ class Test收信落库(unittest.TestCase):
         self.assertEqual(res["rows"], 3)
         self.assertTrue((Path(self.root) / report_inbox.INBOX_REL
                          / Path(pkg).name).is_file(), "附件没落地")
+
+    def test_受限收信不保存也不导入授权范围外的包(self):
+        pkg = make_package(self.root, code="SCN-OUTSIDE")
+        item = {"subject": "[CBG上报] SCN-OUTSIDE 2026-09-21",
+                "attachments": [{"filename": Path(pkg).name,
+                                 "data": Path(pkg).read_bytes()}]}
+        from src.modules.fetch import mail as fetch_mail
+
+        with mock.patch.object(report_inbox, "configured", return_value=(True, "")), \
+             mock.patch.object(fetch_mail, "recent", return_value=[item]):
+            result = report_inbox.run(
+                self.root, cfg={}, allowed_store_codes=frozenset({"SCN-IN-SCOPE"}))
+
+        self.assertEqual(result["ok_packages"], 0)
+        self.assertEqual(result["stores"], [])
+        self.assertFalse((Path(self.root) / report_inbox.INBOX_REL
+                          / Path(pkg).name).exists(), "越权包原件被保存到收信目录")
+        self.assertEqual(report_inbox.stores(self.root), [])
+
+    def test_受限收信不在日志暴露无法解密附件的文件名和原因(self):
+        from src.modules.fetch import mail as fetch_mail
+        cases = (
+            ("[CBG上报] 未授权门店", "SCN-OUTSIDE-private-report.db"),
+            ("[目标拆分] 未授权门店", "SCN-OUTSIDE-private-split.json"),
+        )
+        with mock.patch.object(report_inbox, "configured", return_value=(True, "")), \
+             mock.patch("src.modules.fetch.unseal_attachment",
+                        return_value=(b"", {"state": "failed", "why": "outside key detail"})):
+            for subject, filename in cases:
+                with self.subTest(filename=filename):
+                    logs = []
+                    item = {"subject": subject, "attachments": [
+                        {"filename": filename, "data": b"sealed"}]}
+                    with mock.patch.object(fetch_mail, "recent", return_value=[item]):
+                        result = report_inbox.run(
+                            self.root, cfg={},
+                            allowed_store_codes=frozenset({"SCN-IN-SCOPE"}),
+                            emit=logs.append)
+
+                    self.assertEqual(result["problems"], [])
+                    self.assertEqual(result["skipped_packages"], 1)
+                    self.assertNotIn("SCN-OUTSIDE", "\n".join(logs))
+                    self.assertNotIn("outside key detail", "\n".join(logs))
+
+            # 显式全量调用的平台仍可看到解密诊断，便于排障。
+            logs = []
+            item = {"subject": "[CBG上报] 平台排障", "attachments": [
+                {"filename": "SCN-OUTSIDE-private-report.db", "data": b"sealed"}]}
+            with mock.patch.object(fetch_mail, "recent", return_value=[item]):
+                result = report_inbox.run(self.root, cfg={},
+                                          allowed_store_codes=None,
+                                          emit=logs.append)
+        self.assertIn("SCN-OUTSIDE-private-report.db", result["problems"][0])
+        self.assertIn("outside key detail", "\n".join(logs))
 
     def test_没有附件的那封只记问题不收(self):
         from src.modules.fetch import mail as fetch_mail
@@ -844,7 +930,7 @@ class Test接线(unittest.TestCase):
             (root / "config" / "stores.yaml").write_text(
                 "stores:\n  - erp_name: 青岛麦凯乐店\n    tdoc_name: 麦凯乐\n"
                 "    kind: 合作店\n    marker: ''\n", encoding="utf-8")
-            with mock.patch.object(run_daily, "report_run",
+            with mock.patch("src.app.report.run",
                                    lambda **k: called.append(k) or {"ok": True}), \
                     mock.patch.object(run_daily.cli, "ROOT", root):
                 run_daily.main(["--config", str(root / "config" / "store-X.yaml"),
@@ -943,9 +1029,25 @@ class Test目标拆分走邮件(unittest.TestCase):
         with mock.patch.object(report_inbox, "configured",
                                lambda cfg=None, root=None: (True, "")), \
                 mock.patch.object(fetch_mail, "recent", lambda **k: [item]):
-            res = report_inbox.run(self.root, cfg={}, emit=None)
+            res = report_inbox.run(
+                self.root, cfg={}, allowed_store_codes=frozenset({"SCN231409"}),
+                emit=None)
         self.assertEqual(res.get("splits"), ["SCN231409 2026-W38（2 人）"])
         self.assertTrue(report_inbox.split_of(self.root, "青岛城阳万达店", "2026-W38"))
+
+    def test_受限收信不保存也不导入授权范围外的拆分(self):
+        from src.modules.fetch import mail as fetch_mail
+        item = _split_item(self.root, code="SCN-OUTSIDE")
+        filename = item["attachments"][0]["filename"]
+
+        with mock.patch.object(report_inbox, "configured", return_value=(True, "")), \
+             mock.patch.object(fetch_mail, "recent", return_value=[item]):
+            result = report_inbox.run(
+                self.root, cfg={}, allowed_store_codes=frozenset({"SCN-IN-SCOPE"}))
+
+        self.assertEqual(result.get("splits", []), [])
+        self.assertFalse(report_inbox.split_of(self.root, "SCN-OUTSIDE", "2026-W38"))
+        self.assertFalse((Path(self.root) / report_inbox.INBOX_REL / filename).exists())
 
     def test_别的功能的_json_不碰(self):
         from src.modules.fetch import mail as fetch_mail

@@ -49,7 +49,7 @@ class FetchBusy(RuntimeError):
 
 def _erp_client():
     """造客户端（延迟 import：`src.erp` 拉 requests，别让纯读路径付这笔钱）。"""
-    from ...erp import ErpClient
+    from ...integrations.erp import ErpClient
     return ErpClient()
 
 
@@ -61,7 +61,7 @@ def run(root: Optional[Path] = None, start: datetime.date = None,
     `client` 供测试注入（假客户端不碰网络）。`on_progress(段起, 段止, 行数)`
     透传给 `sales_range` 打进度。
     """
-    from ...erp import ErpError
+    from ...integrations.erp import ErpError
 
     today = datetime.date.today()
     end = end or today

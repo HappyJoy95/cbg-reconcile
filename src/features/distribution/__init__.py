@@ -88,5 +88,23 @@ SUBS = [
 #:   想"仅平台"只能写 `platform`（平台 = `{multi, platform}`，区长不含它）。
 #: ⚠ 藏菜单从来不算权限（坑 18）：路由 `if path.startswith("/api/dist")`
 #:   那道统一 403 也一并收紧成 `role != ROLE_PLATFORM`，接口另有一道 `dist.write/export`。
-FEATURE = Feature(key="distribution", label="分销", order=45, types="platform",
+#: ⭐ 操作/数据范围（协议 v2，2026-10-02）：整组三档操作**都只给平台岗**
+#:   —— 原路由层那道 `role != platform` 统一 403 和 `_can_for` 的 dist.write/export
+#:   全从这一份声明派生（`require(scope, "distribution", …)`；子页不写 ops 继承父）。
+FEATURE = Feature(audience=("platform",), key="distribution", label="分销", order=45, types="platform",
+                  ops={"view": ("platform",),
+                       "modify": ("platform",),
+                       "export": ("platform",)},
+                  data="authorized",
                   children=SUBS)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/dist/board', 'distribution', 'view'),
+    ('GET', '/api/dist/detail', 'distribution', 'view'),
+    ('GET', '/api/dist/map', 'distribution', 'view'),
+    ('POST', '/api/dist/fetch', 'distribution', 'modify'),
+    ('POST', '/api/dist/zone', 'distribution', 'modify'),
+    ('POST', '/api/dist/map/reset', 'distribution', 'modify'),
+    ('POST', '/api/dist/export', 'distribution', 'export'),
+)

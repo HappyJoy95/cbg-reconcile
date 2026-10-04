@@ -97,6 +97,9 @@ class Test清单(unittest.TestCase):
     def test_内置凭据文件在裁剪清单(self):
         """erp.py 里有内置公司账号凭据 —— 生活馆包绝不能带（用户点名要裁）。"""
         self.assertIn("src/erp.py", edition.PRUNE)
+        self.assertIn("src/integrations/erp.py", edition.PRUNE)
+        self.assertNotIn("src/integrations/erp_stub.py", edition.PRUNE,
+                         "生活馆需要无云商哨兵，但不能带真实 ERP 客户端")
 
     def test_保留名单(self):
         self.assertIn("tools", edition.LIFEHALL_PAGES)
@@ -115,6 +118,7 @@ class Test清单(unittest.TestCase):
 
     def test_pruned前缀匹配(self):
         self.assertTrue(edition.pruned("src/erp.py"))
+        self.assertTrue(edition.pruned("src/integrations/erp.py"))
         self.assertTrue(edition.pruned("src/features/compliance/pos/x.py"))
         self.assertTrue(edition.pruned("src\\features\\compliance\\__init__.py"))
         self.assertFalse(edition.pruned("src/features/tools/claim/pending.py"))

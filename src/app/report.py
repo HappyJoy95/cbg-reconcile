@@ -550,7 +550,7 @@ def _recipients(root, store_name) -> Tuple[List[str], str]:
       （"判据只有一处"是这个项目的规矩：两处各判各的迟早走散）。
     """
     from ..features.sales.attain import split as attain_split
-    from .. import mailer
+    from ..integrations import mailer
     try:
         got = attain_split.managers_of(store_name, root) or []
     except Exception:                                          # noqa: BLE001

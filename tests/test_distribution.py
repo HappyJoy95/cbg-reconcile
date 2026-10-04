@@ -614,7 +614,9 @@ class Test日期区间(unittest.TestCase):
 class Test下钻前端接线(unittest.TestCase):
     """点开这件事漏了接线 = 「点了没反应」—— 这个项目最怕的失败。"""
 
-    APP = (ROOT_DIR / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((ROOT_DIR / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js",
+                                        "features/distribution/page.js", "app.js"))
     CSS = (ROOT_DIR / "web" / "style.css").read_text(encoding="utf-8")
 
     def test_属性_函数_样式都在(self):

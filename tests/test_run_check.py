@@ -12,6 +12,7 @@
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,8 @@ LAUNCHER = ROOT / "run_check.py"
 
 
 def _run(args, **kw):
-    return subprocess.run([sys.executable, str(LAUNCHER), *args],
+    launcher = os.environ.get("CBG_TEST_LAUNCHER", str(LAUNCHER))
+    return subprocess.run([sys.executable, launcher, *args],
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=90, cwd=str(ROOT), **kw)
 
@@ -47,7 +49,16 @@ class _TempLogCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.log = Path(tmp.name) / "run.log"
-        p = mock.patch.dict(os.environ, {"CBG_RUN_LOG": str(self.log)})
+        # 子进程不继承 pytest 的 monkeypatch，复制纯源码形成独立安装根。
+        # 空安装根没有现场入口/凭据/配置，仍真跑启动器和 CLI。
+        install = Path(tmp.name) / "install"
+        install.mkdir()
+        shutil.copytree(ROOT / "src", install / "src",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        self.launcher = install / "run_check.py"
+        shutil.copy2(LAUNCHER, self.launcher)
+        p = mock.patch.dict(os.environ, {"CBG_RUN_LOG": str(self.log),
+                                         "CBG_TEST_LAUNCHER": str(self.launcher)})
         p.start()
         self.addCleanup(p.stop)
 
@@ -65,7 +76,7 @@ class TestLauncherAlwaysLeavesEvidence(_TempLogCase):
         都 import 不到，模拟门店电脑上"依赖没装 / python 是假的"。
         以前这种情况下日志**一个字都没有**。
         """
-        r = subprocess.run([sys.executable, "-S", str(LAUNCHER),
+        r = subprocess.run([sys.executable, "-S", str(self.launcher),
                             "-c", "config/store-SCN231409.yaml",
                             "check", "--days-ago", "1"],
                            capture_output=True, text=True, encoding="utf-8",
@@ -95,7 +106,7 @@ class TestLauncherAlwaysLeavesEvidence(_TempLogCase):
             "sys.stdout = None; sys.stderr = None;"
             "sys.argv = ['run_check.py', '-c', 'config/no-such-store.yaml',"
             "            'check', '--days-ago', '1'];"
-            "runpy.run_path(r'" + str(LAUNCHER) + "', run_name='__main__')"
+            "runpy.run_path(r'" + str(self.launcher) + "', run_name='__main__')"
         )
         r = subprocess.run([sys.executable, "-c", code], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",

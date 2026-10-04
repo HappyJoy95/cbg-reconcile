@@ -20,7 +20,8 @@ from unittest import mock
 from src import version, whatsnew
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 

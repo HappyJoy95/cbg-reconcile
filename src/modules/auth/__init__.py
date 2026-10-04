@@ -72,13 +72,13 @@ def accounts(cfg: dict, root=None) -> dict:
     ⚠ **一个密码都不回**（`describe_*` 那几个函数本来就只回 `has_*`）。
     """
     from ...paths import ROOT
-    from ... import browser
-    from ... import edition as _edition
+    from ...integrations import browser
+    from . import runtime
     erp = None
-    if not _edition.is_lifehall():
+    if not runtime.is_lifehall(root):
         # 生活馆包里 `erp.py` 不存在（edition.PRUNE）—— erp 留 None，
         # 下面两段云商凭据整段跳过（回"没有云商"的空档）。
-        from ... import erp
+        from ...integrations import erp
     root = Path(root) if root else ROOT
     cfg = cfg or {}
 
@@ -129,13 +129,13 @@ def state(cfg: dict, root=None) -> dict:
     """
     from ...paths import ROOT
     from ...session import CbgAuthError, CbgSession
-    from ... import edition
+    from . import runtime
     root = Path(root) if root else ROOT
     cfg = cfg or {}
     acc = accounts(cfg, root)
     items = []
 
-    if not edition.is_lifehall():
+    if not runtime.is_lifehall(root):
         # ① 云商：凭据齐不齐（**两套账号任一可用就算通**）
         erp_acc = acc.get("erp") or {}
         st_acc = acc.get("erp_store") or {}

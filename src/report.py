@@ -176,9 +176,15 @@ def load_report(path) -> dict:
     path = Path(path)
     sheets = read_sheets(path)
     side = path.with_suffix(".json")
+    summary = None
     if side.exists():
-        summary = json.loads(side.read_text(encoding="utf-8"))
-    else:
+        try:
+            loaded = json.loads(side.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            summary = loaded
+    if summary is None:
         summary = {"store": "", "date": "", "generated_at": "",
                    "missing": max(len(sheets.get("玲珑无但云商有", [])) - 1, 0),
                    "matched": max(len(sheets.get("已报量", [])) - 1, 0),

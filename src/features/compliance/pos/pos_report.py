@@ -77,6 +77,27 @@ def load(conn):
     return orders, returns
 
 
+def store_identities(conn):
+    """返回本次 POS 计算所读订单/退货的门店身份快照。
+
+    汇总 JSON 不保留逐店指标，因此保存它覆盖了哪些门店，供读取端执行授权范围。
+    老库缺少身份列时返回 None；有限范围身份会据此 fail closed。
+    """
+    identities = set()
+    for table in ("orders", "returns"):
+        try:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(%s)" % table)}
+            if not {"store_code", "store_name"}.issubset(columns):
+                return None
+            for row in conn.execute(
+                    "SELECT DISTINCT store_code, store_name FROM %s" % table):
+                identities.add((str(row[0] or "").strip(), str(row[1] or "").strip()))
+        except sqlite3.Error:
+            return None
+    return [{"store_code": code, "store_name": name}
+            for code, name in sorted(identities)]
+
+
 # ------------------------------------------------------------------ 推送用
 #: 推送里最多列几个月。POS 是**月度**指标，全列会很长 ——
 #: 而企微 markdown 有 4096 **字节**上限（中文一个字 3 字节）。

@@ -168,7 +168,7 @@ def _probe_store_code(sess, window_days: int = 30) -> Tuple[str, str, str]:
     ⚠ 手上没会话（sess=None）按 authfail：没有登录态，本来就没得验。
     """
     import time
-    from .cbg import CbgAuthError, CbgClient
+    from .integrations.cbg import CbgAuthError, CbgClient
     if sess is None:
         return "", "authfail", "手上没有会话文件"
     now = int(time.time())
@@ -276,7 +276,7 @@ def check_after_save(sess, store_code: str) -> Tuple[bool, str]:
       「已保存，但自检没过」（2026-09-27 抓取超时排查时顺出来的毛刺）。
     ⚠ 有店码就正经 ping —— 那时的失败是真失败，照旧拦。
     """
-    from .cbg import CbgClient
+    from .integrations.cbg import CbgClient
     if not str(store_code or "").strip():
         return True, ("会话已保存（这 30 天没订单，店码还没认出来"
                       " —— 抓到销售后自动补上）")
@@ -299,7 +299,7 @@ def verify_with_identity(sess, root, config_path, emit=None) -> Tuple[bool, str]
       保存点那次 `identify` 会播报同一句，两处都说就是刷屏（浏览器对
       "自检通过"只说通过、不复述 why，紧跟着保存点就会补上）。
     """
-    from .cbg import CbgAuthError, CbgClient, CbgError
+    from .integrations.cbg import CbgAuthError, CbgClient, CbgError
     res = identify(root, config_path, sess)
     code = res.get("store_code") or ""
     if code:

@@ -21,7 +21,7 @@ if not _edition.is_lifehall():
     # 生活馆包里 `erp.py` 不存在（edition.PRUNE）—— 人员名单整个来自云商，
     # 所以下面会碰 ErpClient 的函数在生活馆直接走"没有人员设置"分支。
     from ... import erp
-    from ...erp import DEFAULT_ENV_FILE, ErpClient, load_credentials
+    from ...integrations.erp import DEFAULT_ENV_FILE, ErpClient, load_credentials
 
 #: 门店手动打过的勾（**存"被剔除的"**，不是存"在职的"）
 STAFF_REL = ".secrets/staff.json"
@@ -199,6 +199,61 @@ def active_accounts(root=None, config_path=None, env_file=None) -> list:
     """在职那批的登录名 —— 门禁/别的模块要的是这个（不是整份字典）。"""
     st = staff_state(root, config_path, env_file)
     return [r["account"] for r in (st.get("people") or []) if r["active"]] if st.get("ok") else []
+
+
+def inbox_state(root, scope, *, scope_store_ok=None) -> dict:
+    """区长/平台读取各店**上报来的**人员状态；不连接云商，也不接受包内自报授权。
+
+    `scope_store_ok` 由公共权限层注入，复用其门店别名映射；缺失时按拒绝处理。
+    """
+    from ...app import report_inbox as inbox_mod
+    rows = inbox_mod.tables_of(root, "staff")
+    by_code = {}
+    try:
+        roster = config_io.stores_table(root)
+    except Exception:                                        # noqa: BLE001
+        roster = []
+    for store_row in roster:
+        store_code = str(store_row.get("huawei_code") or "").strip()
+        aliases = {str(store_row.get(key) or "").strip()
+                   for key in ("erp_name", "tdoc_name")
+                   if str(store_row.get(key) or "").strip()}
+        if store_code and aliases:
+            by_code.setdefault(store_code, set()).update(aliases)
+    allowed = scope_store_ok or (lambda _scope, _name: False)
+    platform_full = scope.get("role") == "platform" and scope.get("stores") is None
+    out = []
+    for code, one in rows:
+        code = str(code or "").strip()
+        name = str(one.get("store_name") or "").strip()
+        if not platform_full:
+            aliases = by_code.get(code) if code else None
+            if code:
+                # 店码为身份主键；冲突/未知店码不回退到包内自报名称。
+                if (not aliases or (name and name not in aliases)
+                        or not all(allowed(scope, alias) for alias in aliases)):
+                    continue
+            elif not allowed(scope, name):
+                continue
+        people = one.get("rows") or []
+        out.append({
+            "store_code": code, "store_name": name,
+            "report_date": one.get("report_date") or "",
+            "imported_at": one.get("imported_at") or "",
+            "mail_subject": one.get("subject") or "",
+            "people": people,
+            "count": len(people),
+            "active_count": sum(1 for person in people if person.get("active")),
+        })
+    out.sort(key=lambda row: row.get("store_name") or row.get("store_code") or "")
+    return {"ok": True, "readonly": True, "from_mail": True,
+            "scope": {"role": scope.get("role"), "label": scope.get("label"),
+                      "count": len(out)},
+            "stores": out,
+            "count": sum(row["count"] for row in out),
+            "active_count": sum(row["active_count"] for row in out),
+            "hint": ("这些是**门店发过来的**人员状态表（每天那趟上报包里带的）—— "
+                     "只有门店能改，这边只读。还没收到过的话，等那家店跑完一天。")}
 
 
 # --------------------------------------------------------------- 保存后自动上报

@@ -195,3 +195,31 @@ class Test算完就落盘(_NotifyCase):
         self.assertTrue(out.is_file(), "JSON 没落盘")
         self.assertTrue(str(out).startswith(str(root)), "落到项目根外面去了")
         self.assertEqual(res.state("wecom"), SKIPPED)
+
+    def test_落盘包含计算来源门店快照(self):
+        import json
+        import sqlite3
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "out").mkdir()
+        db = root / "out" / "cbg-2026.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript("""
+            CREATE TABLE orders (store_code TEXT, store_name TEXT);
+            CREATE TABLE returns (store_code TEXT, store_name TEXT);
+            INSERT INTO orders VALUES ('SCN-A', '甲店');
+            INSERT INTO returns VALUES ('SCN-B', '乙店');
+        """)
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(app_pos.pos_report, "load", return_value=([], [])):
+            res = app_pos.compute(db, root=root)
+
+        payload = json.loads(Path(res.out_path).read_text(encoding="utf-8"))
+        self.assertEqual(payload["source_stores"], [
+            {"store_code": "SCN-A", "store_name": "甲店"},
+            {"store_code": "SCN-B", "store_name": "乙店"},
+        ])

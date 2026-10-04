@@ -9,4 +9,4 @@ from __future__ import annotations
 
 from ...registry import Sub
 
-SUB = Sub(key="valueadd-settings", label="设置", order=90)
+SUB = Sub(ops={"view": ("store", "manager", "platform"), "modify": ("store", "manager", "platform")}, key="valueadd-settings", label="设置", order=90)

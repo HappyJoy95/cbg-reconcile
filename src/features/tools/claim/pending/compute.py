@@ -193,7 +193,7 @@ def load_sales(db: Path, start: str, end: str, stores=None,
         conn.close()
 
 
-def load_sales_linglong(db: Path, start: str, end: str) -> List[dict]:
+def load_sales_linglong(db: Path, start: str, end: str, store_code=None) -> List[dict]:
     """生活馆版：玲珑销售单（`orders` × `order_lines`，池A）→ 与
     `load_sales` **同形状**的行，喂给同一个 `build_rows`。
 
@@ -229,8 +229,13 @@ def load_sales_linglong(db: Path, start: str, end: str) -> List[dict]:
             "   AND NOT EXISTS (SELECT 1 FROM returns r"
             "                    WHERE r.related_doc_no = o.document_no)"
         ) % category_sql
+        params = [start, end_ex]
+        if store_code is not None:
+            # FULL 安装可留有其他店旧库；生活馆只按已保存编码读本店。
+            sql += " AND o.store_code = ?"
+            params.append(str(store_code).strip())
         out = []
-        for r in conn.execute(sql, (start, end_ex)):
+        for r in conn.execute(sql, params):
             category_id = str(r["category_id"] or "").strip()
             if category_id in LINGLONG_NON_DEVICE_CATEGORIES:
                 continue
@@ -297,11 +302,18 @@ def build_rows(sales: List[dict], activities: List[dict],
     return metric.sort_rows(joined), skipped
 
 
-def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
+def load(root=None, stores: Optional[List[str]] = None, day=None, source=None, store_code=None) -> dict:
     """一页数据：活动 + 待领行 + 合计。"""
-    from ..... import edition as _edition          # ⚠ 5 个点 = src（本文件在 pending/ 下）
-    lifehall = _edition.is_lifehall()
+    from .....modules.auth import runtime
     root = Path(root or ROOT)
+    if source not in (None, "linglong", "erp"):
+        raise ValueError("不认识的销售数据源：%s" % source)
+    if runtime.is_lifehall(root):
+        if source == "erp":
+            raise ValueError("生活馆入口不支持云商销售数据源")
+        if not str(store_code or "").strip():
+            raise ValueError("生活馆待领清单缺少本店门店编码")
+    lifehall = source == "linglong" if source is not None else runtime.is_lifehall(root)
     acts = catalog.load_activities(root)
     statuses = status_mod.load(root)
     db = find_db(root)
@@ -326,7 +338,7 @@ def load(root=None, stores: Optional[List[str]] = None, day=None) -> dict:
         end = today.isoformat()
     try:
         if lifehall:
-            sales = load_sales_linglong(db, start, end)
+            sales = load_sales_linglong(db, start, end, store_code=store_code)
             stock_map = {}                       # 没有云商库存表，86码反查不存在
         else:
             stock_map = load_stock_sn_map(db)

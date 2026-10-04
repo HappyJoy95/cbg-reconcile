@@ -11,7 +11,8 @@ from pathlib import Path
 
 import yaml
 
-# 前端允许改的字段（白名单）。其余一律不碰。
+# 配置读写的字段白名单，供 `pick()` / `update()` 共用。
+# HTTP `/api/config` 还会额外拒绝这里列出的身份字段；它们仅由已验证的进入/登录流程写入。
 EDITABLE = (
     # `erp_branch_id` = 这家店在**云商组织架构**里的机构 Id（跟华为编码不是一回事）——
     # 「人员设置」要靠它筛出本店员工（`UserList?BranchId=`）。

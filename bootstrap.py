@@ -587,7 +587,7 @@ def ask_autostart() -> None:
     那次 UAC 除了一件事都换不来，那件事还正好是坏事。
     """
     try:
-        from src import autostart            # 纯标准库，这时候能 import
+        from src import autostart             # 纯标准库，这时候能 import
     except Exception as e:                   # noqa: BLE001
         print(f"（读不到开机自启模块，跳过：{e}）")
         return

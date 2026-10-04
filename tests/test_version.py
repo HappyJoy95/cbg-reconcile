@@ -61,7 +61,7 @@ class TestBuildStamp(unittest.TestCase):
         import inspect
         src = inspect.getsource(web.App.overview)
         self.assertIn("version.build_id()", src, "overview 没带构建指纹")
-        src2 = inspect.getsource(web.Handler._api)
+        src2 = inspect.getsource(web.Handler._api_unlocked)
         self.assertIn('"build"', src2, "/api/health 没带构建指纹")
 
 
@@ -224,7 +224,7 @@ class TestSelftestShowsTheStore(unittest.TestCase):
 class TestAutostartModeIsPlumbed(unittest.TestCase):
     def test_api_accepts_an_explicit_elevated_flag(self):
         import inspect
-        src = inspect.getsource(web.Handler._api)
+        src = inspect.getsource(web.Handler._api_unlocked)
         self.assertIn('body.get("elevated")', src,
                       "接口没接 elevated —— 界面上的「启动方式」就白做了")
 

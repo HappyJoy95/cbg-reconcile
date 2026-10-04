@@ -22,9 +22,16 @@ from ..registry import Feature
 #:   中间插进五项合规(20)/库存盘点(30)会让菜单读起来散。
 #: ⚠ `types=""`：**三类门店都看**（数据范围由 `web.role_scope()` 管：门店只看自己那家）。
 FEATURE = Feature(
+    audience=("erp", "platform"), data="authorized", ops={"view": ("store", "manager", "platform")},
     key="plan", label="月度生意计划", order=15, types="",
     children=[
         monthly.SUB,
         settings.SUB,
     ],
+)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/plan', 'monthly', 'view'),
+    ('POST', '/api/plan/export', 'monthly', 'export'),
 )

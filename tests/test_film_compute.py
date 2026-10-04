@@ -325,7 +325,7 @@ class Test口径(unittest.TestCase):
 class Test前端拆到人(unittest.TestCase):
     """点门店名拆到人 —— 钉住属性直接拼（别用 replace 补，坑 12）。"""
 
-    APP = open("web/app.js", encoding="utf-8").read()
+    APP = open("web/features/valueadd/film/page.js", encoding="utf-8").read()
     HTML = open("web/index.html", encoding="utf-8").read()
     CSS = open("web/style.css", encoding="utf-8").read()
 

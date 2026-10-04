@@ -40,7 +40,11 @@ from src.modules import notify                                        # noqa: E4
 from src.storage import runlog                                        # noqa: E402
 from src.xlsx_io import read_sheets                                   # noqa: E402
 
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/valueadd/film/page.js",
+                              "features/valueadd/benefit/page.js",
+                              "features/sales/attain/page.js", "app.js"))
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 
@@ -439,9 +443,15 @@ class Test门店不能导出(_ServerCase):
         self.assertIn("导出", d["error"])           # ⚠ 前端 `api()` 只认 error / message
         self.assertFalse((self.root / "out" / "exports").exists(), "被拦了却还是写了文件")
 
-    def test_按钮照后端的_can_藏_前端不自己判断(self):
-        """⚠ 判据只有一处（`web._can_for` 的 `role.can`）—— 见 `applyProfile`。"""
-        self.assertIn("role.can['attain.export']", APP_JS)
+    def test_按钮照注册role_ops隐藏_前端不自己判断(self):
+        """注册的 export 操作同时驱动前端按钮和后端 require。"""
+        self.assertIn("[data-op]", APP_JS)
+        self.assertIn("role.ops", APP_JS)
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        button = re.search(r'<button[^>]*id="btn-export-attain"[^>]*>', html, re.S)
+        self.assertIsNotNone(button)
+        self.assertIn('data-op="export"', button.group(0))
+        self.assertIn('data-op-page="attain"', button.group(0))
         # ⚠ **剥掉注释再查**：这条规矩的说明本身就写在 `applyProfile` 那段注释里，
         #   直接 assertNotIn 会被**自己的注释**顶掉（`test_web` 为这个坑专门写了
         #   `_strip_js_comments`）。
@@ -525,15 +535,31 @@ class Test区长导出(_ServerCase):
         self.assertFalse((self.root / "out" / "exports").exists(), "失败还留了个目录/空文件")
 
     def test_下载只认一个文件名(self):
-        _st, d = self.export()
+        post_status, d = self.export()
+        self.assertEqual(post_status, 200, d)
         st, raw = self.srv.request("GET", "/api/export/download?name=" + quote(d["file"]))
-        self.assertEqual(st, 200)
+        self.assertEqual(st, 200, raw)
         self.assertEqual(raw[:2], b"PK")                        # 就是个 xlsx
         for bad in ("", "nope.xlsx", "../../src/web.py", "..%2F..%2Fsrc%2Fweb.py",
                     d["file"] + "/../" + d["file"]):
             st2, d2 = self.srv.request("GET", "/api/export/download?name=" + quote(bad))
             self.assertEqual(st2, 404, bad)
             self.assertTrue(d2.get("error"), bad)
+
+    def test_下载重验页面导出权限和当前范围(self):
+        _status, exported = self.export()
+        original_scope = web.role_scope(self.srv.app)
+        narrower = dict(original_scope, stores={"鲁疆广场"})
+        with mock.patch.object(web, "role_scope", lambda _app: narrower):
+            status, body = self.srv.request(
+                "GET", "/api/export/download?name=" + quote(exported["file"]))
+        self.assertEqual(status, 403, body)
+
+        with mock.patch.dict(web.PERM_RULES, {
+                "attain": {"data": "authorized", "ops": {"export": frozenset()}}}):
+            status, body = self.srv.request(
+                "GET", "/api/export/download?name=" + quote(exported["file"]))
+        self.assertEqual(status, 403, body)
 
     def test_点两次不覆盖(self):
         _s1, d1 = self.export()

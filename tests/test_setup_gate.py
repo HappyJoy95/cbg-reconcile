@@ -303,6 +303,55 @@ class Test接口被真的挡住(_Base):
         code, _ = self._call("/api/overview")
         self.assertEqual(code, 200)
 
+    def test_预览模式只放行界面不返回缓存业务数据(self):
+        """预览是看界面；已有的本地快照、报告不能借它绕过登录门禁。"""
+        self.cfg("青岛CBD万达店", "SCN328987", "C")
+        (self.root / "out" / "attain-2026.json").write_text(
+            json.dumps({"exists": True, "period": "SYNTHETIC-PREVIEW",
+                        "rows": [{"store": "青岛CBD万达店",
+                                  "erp_name": "青岛CBD万达店",
+                                  "sentinel": "PREVIEW-MUST-NOT-LEAK"}],
+                        "weights": []}), encoding="utf-8")
+        report_name = "差异_20261004_青岛CBD万达店.xlsx"
+        (self.root / "out" / report_name).write_bytes(b"synthetic")
+        (self.root / "out" / "差异_20261004_青岛CBD万达店.json").write_text(
+            json.dumps({"store": "青岛CBD万达店", "date": "2026-10-04",
+                        "missing": 1, "matched": 0}), encoding="utf-8")
+
+        code, enabled = self._call("/api/setup/preview", method="POST",
+                                   body={"on": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(enabled["preview"])
+
+        code, data = self._call("/api/attain")
+        self.assertEqual(code, 403, "预览不应放行缓存达成业务数据")
+        self.assertNotIn("PREVIEW-MUST-NOT-LEAK", json.dumps(data))
+
+        code, _ = self._call("/api/session")
+        self.assertNotEqual(code, 403, "预览中仍须能继续玲珑授权流程")
+
+        code, overview = self._call("/api/overview")
+        self.assertEqual(code, 200)
+        self.assertEqual(overview.get("reports"), [], "预览总览不得返回本地业务报告")
+        self.assertNotIn("PREVIEW-MUST-NOT-LEAK", json.dumps(overview))
+
+    def test_不满足预览条件时接口不能直接开启(self):
+        """前端隐藏按钮不是门禁；无云商身份或玲珑已有效时不能写预览标记。"""
+        self.cfg()
+        code, result = self._call("/api/setup/preview", method="POST",
+                                   body={"on": True})
+        self.assertEqual(code, 403)
+        self.assertFalse(result.get("ok"))
+        self.assertFalse(web.preview_on(self.app))
+
+        self.cfg("青岛CBD万达店", "SCN328987", "C")
+        self.app.session_info = lambda: {"exists": True, "check_ok": True}
+        code, result = self._call("/api/setup/preview", method="POST",
+                                   body={"on": True})
+        self.assertEqual(code, 403)
+        self.assertFalse(result.get("ok"))
+        self.assertFalse(web.preview_on(self.app))
+
 
 class Test重新登录按钮(_Base):
     """⚠ 用户 2026-09-19：「我点重新登陆怎么不好使啊」—— **我自己写出来的 bug**。
@@ -317,7 +366,11 @@ class Test重新登录按钮(_Base):
     def setUp(self):
         super().setUp()
         import re
-        raw = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        raw = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/valueadd/film/page.js",
+                              "features/valueadd/benefit/page.js",
+                              "features/tools/claim/page.js", "app.js"))
         raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
         self.js = "\n".join(
             (l[:re.search(r"(?<!:)//", l).start()] if re.search(r"(?<!:)//", l) else l)
@@ -325,18 +378,13 @@ class Test重新登录按钮(_Base):
         self.html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
     def test_按钮不走_checkSetup(self):
-        """⚠ 这是那个 bug 的根：`checkSetup()` 在 ready 时**藏**页面。"""
+        """ERP 重新登录仍强制显示登录页；生活馆不再从玲珑页打开旧登录门。"""
         i = self.js.index("async function openSetup()")
         blk = self.js[i:i + 400]
-        self.assertIn("showSetup(", blk, "手动打开要**强制显示**")
         self.assertNotIn("checkSetup(", blk)
-        # ⚠ `#btn-open-setup`（通用设置里那张"门店"卡上的按钮）2026-09-21
-        #   跟着卡一起删了（用户：「通用设置里第一块门店去掉」）——
-        #   现在登录入口只有玲珑授权页那个 `-ll`，加上登录门禁自己。
-        for ident in ("btn-open-setup-ll",):
-            with self.subTest(ident=ident):
-                j = self.js.index("$('#%s')?.addEventListener" % ident)
-                self.assertIn("openSetup", self.js[j:j + 120])
+        self.assertIn("showSetup(setupState)", blk)
+        self.assertNotIn('id="btn-open-setup-ll"', self.html)
+        self.assertNotIn("$('#btn-open-setup-ll')", self.js)
 
     def test_重新登录要清除门店登录数据(self):
         """用户 2026-09-19：「重新登陆这个操作应该是**清除掉门店登录数据**的」。
@@ -351,17 +399,14 @@ class Test重新登录按钮(_Base):
         self.assertIn("showSetup(", blk)
         # 后端那条接口真的会删文件
         import inspect
-        src = inspect.getsource(web.Handler._api)
+        src = inspect.getsource(web.Handler._api_unlocked)
         self.assertIn("/api/store-account/logout", src)
         self.assertIn("unlink()", src)
 
-    def test_退出按钮关页面但不停服务(self):
-        """用户：「读取本店信息那个按钮改成退出，点击了就关掉浏览器页面了，
-        **但是不退出后台**」。"""
-        i = self.js.index("$('#btn-sa-quit')")
-        blk = self.js[i:i + 500]
-        self.assertIn("window.close()", blk)
-        self.assertNotIn("/api/shutdown", blk, "别把后台服务也停了")
+    def test_登录门改用换入口不提供退出(self):
+        self.assertNotIn('id="btn-sa-quit"', self.html)
+        self.assertNotIn("$('#btn-sa-quit')", self.js)
+        self.assertIn('id="btn-entry-switch"', self.html)
 
 
 class Test人员设置(_Base):
@@ -513,7 +558,7 @@ class Test平台岗(_Base):
         src = inspect.getsource(web.store_lookup)
         self.assertIn('"platform": False', src)
 
-    def test_平台岗看到所有功能页面(self):
+    def test_平台岗看到有查看权限的功能页面(self):
         """⚠ 用户 2026-09-19：「云商平台岗账号……不是按我要求的
         **给到所有功能页面的权限**」。
 
@@ -521,14 +566,14 @@ class Test平台岗(_Base):
         表里"只有走玲珑的身份才看得见"的那几页，平台岗全算数。
         **这才是"整理到一起"的意思。**
 
-        ⚠ 2026-09-21（M17 甲方案）：可见性表从 HTML 搬到了后端 ——
-        现在断言的是 `pages_for()` 给出 `PAGE_RULES` 的**全部 key**（一页不漏）。
+        ⚠ 2026-10-03：页面还须受注册表 `view` 操作权限约束；收银虽是平台版可用
+        功能，但实际操作权限只给门店身份，因此不应出现在平台菜单。
         """
         from src import config_io, web
         p = config_io.store_profile({"platform": True}, self.root)
         self.assertEqual(p["type"], "platform")
         self.assertEqual(web.pages_for({"role": web.ROLE_PLATFORM}),
-                         sorted(web.PAGE_RULES), "平台岗该看得见**每一页**")
+                         sorted(k for k in web.PAGE_RULES if k != "cashier"))
         # 平台岗不该被门禁拦住
         (self.root / "config" / "store-X.yaml").write_text("platform: true\n",
                                                            encoding="utf-8")
@@ -539,17 +584,20 @@ class Test前端接线(unittest.TestCase):
     def setUp(self):
         import re
         self.html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-        raw = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        raw = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/valueadd/film/page.js",
+                              "features/valueadd/benefit/page.js",
+                              "features/tools/claim/page.js", "app.js"))
         raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
         self.js = "\n".join(
             (l[:re.search(r"(?<!:)//", l).start()] if re.search(r"(?<!:)//", l) else l)
             for l in raw.splitlines())
 
     def test_登录页在HTML里(self):
-        # ⚠ 「我已登录完，重新检查」「收起」两个按钮 2026-09-19 被用户去掉了；
-        #   想走就点「退出」（关页面、后台照常跑）。
+        # 入口切换放在登录卡片底部；登录步骤仅保留登录和状态控件。
         for ident in ("setup-mask", "setup-step-erp", "setup-step-linglong",
-                      "btn-sa-quit", "setup-erp-why", "setup-linglong-why"):
+                      "btn-entry-switch", "setup-erp-why", "setup-linglong-why"):
             with self.subTest(ident=ident):
                 self.assertIn('id="%s"' % ident, self.html)
 

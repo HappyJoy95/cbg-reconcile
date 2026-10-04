@@ -72,6 +72,11 @@ class _WinCase(unittest.TestCase):
         p = mock.patch.dict(sys.modules, {"winreg": self.reg})
         p.start()
         self.addCleanup(p.stop)
+        from src import schedule
+        q = mock.patch.object(schedule, "_win_task_names_query",
+                              return_value=([], True))
+        q.start()
+        self.addCleanup(q.stop)
         for name, val in (("kind", lambda: "windows"),
                           ("platform", mock.Mock(system=lambda: "Windows")),
                           ("is_elevated", lambda: True),
@@ -93,6 +98,13 @@ class _WinCase(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         return calls
+
+    def _listed_task(self, name=None):
+        from src import schedule
+        task_name = name or autostart.AUTOSTART_TASK
+        return mock.patch.object(
+            schedule, "_win_task_names_query",
+            return_value=(["\\" + task_name], True))
 
 
 def _ok(stdout=""):
@@ -188,6 +200,26 @@ class TestInstall(_WinCase):
         self.assertIn("/xml", calls[0])
         self.assertEqual(calls[0][calls[0].index("/tn") + 1], autostart.AUTOSTART_TASK)
 
+    def test_new_task_creation_does_not_force_overwrite_a_racing_collision(self):
+        calls = self._schtasks([_ok()])
+        result = autostart._win_install(self.root, elevated=True)
+        self.assertTrue(result["ok"])
+        self.assertIn("/create", calls[0])
+        self.assertNotIn("/f", calls[0])
+
+    def test_verified_owned_task_can_be_updated_with_force(self):
+        xml = autostart.task_xml(self.root)
+
+        def script(args):
+            return _ok(xml) if "/xml" in args else _ok()
+
+        calls = self._schtasks([script])
+        with self._listed_task():
+            result = autostart._win_install(self.root, elevated=True)
+        self.assertTrue(result["ok"])
+        create = next(args for args in calls if "/create" in args)
+        self.assertIn("/f", create)
+
     def test_falls_back_to_command_line_when_xml_rejected(self):
         """不同 Windows 版本对任务 XML 的校验宽严不一 —— 命令行那条路要能兜住。"""
         calls = self._schtasks([_fail("XML 格式错误"), _ok()])
@@ -249,11 +281,14 @@ class TestInstall(_WinCase):
         # ⚠ 按**命令**判断，不按调用顺序 —— 改名迁移会多出 `/query`、
         #   `/delete` 几次调用，按顺序写的脚本一加调用就错位（实测踩到）。
         def script(args):
+            if "/xml" in args:
+                return _ok(autostart.task_xml(self.root))
             if "/delete" in args:
                 return _fail(stderr="错误: 拒绝访问。")
             return _ok()
         calls = self._schtasks([script])
-        res = autostart._win_install(self.root, elevated=False)
+        with self._listed_task():
+            res = autostart._win_install(self.root, elevated=False)
         self.assertTrue(res["ok"], "注册表那条本身还是成功的")
         self.assertTrue(res.get("task_leftover"), "要标记出来，界面才提示得到")
         self.assertIn("旧的提权任务没删掉", res["message"])
@@ -288,16 +323,23 @@ class TestInstall(_WinCase):
         但用户看到"我明明关了开机自启，怎么还有个任务"只会更慌。
         """
         # 切到普通权限 → 要删掉提权任务
-        self.reg.store[autostart.APP_NAME] = "old"
-        calls = self._schtasks([_ok()])
-        autostart._win_install(self.root, elevated=False)
+        self.reg.store[autostart.APP_NAME] = autostart.command(self.root)
+        xml = autostart.task_xml(self.root)
+
+        def script(args):
+            return _ok(xml) if "/xml" in args else _ok()
+
+        calls = self._schtasks([script])
+        with self._listed_task():
+            autostart._win_install(self.root, elevated=False)
         self.assertTrue(any("/delete" in a for a in calls),
                         "切到普通权限时没把计划任务删掉")
 
         # 切回管理员 → 要清掉注册表项
-        self.reg.store[autostart.APP_NAME] = "old"
-        calls2 = self._schtasks([_ok()])
-        res = autostart._win_install(self.root, elevated=True)
+        self.reg.store[autostart.APP_NAME] = autostart.command(self.root)
+        calls2 = self._schtasks([script])
+        with self._listed_task():
+            res = autostart._win_install(self.root, elevated=True)
         self.assertEqual(res["mode"], "task")
         self.assertNotIn(autostart.APP_NAME, self.reg.store,
                          "切回管理员时注册表项没清掉")
@@ -305,8 +347,9 @@ class TestInstall(_WinCase):
     def test_reports_failure_when_everything_fails(self):
         # 计划任务两条路都挂，且写注册表也抛错
         self._schtasks([_fail("拒绝"), _fail("拒绝")])
-        boom = mock.Mock()
+        boom = mock.MagicMock()
         boom.CreateKeyEx.side_effect = OSError("注册表被锁")
+        boom.QueryValueEx.side_effect = FileNotFoundError()
         p = mock.patch.dict(sys.modules, {"winreg": boom})
         p.start()
         self.addCleanup(p.stop)
@@ -321,6 +364,86 @@ class TestInstall(_WinCase):
         self.assertNotIn("/tr", calls[0])
 
 
+class TestTaskOwnership(_WinCase):
+    def _listed_task(self, name=None):
+        from src import schedule
+        return mock.patch.object(
+            schedule, "_win_task_names_query",
+            return_value=(["\\" + (name or autostart.AUTOSTART_TASK)], True))
+
+    def test_same_name_task_with_another_boot_script_is_foreign(self):
+        xml = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        with self._listed_task(), mock.patch.object(
+                autostart, "schtasks", return_value=_ok(xml)):
+            state = autostart._task_ownership(autostart.AUTOSTART_TASK, self.root)
+        self.assertEqual(state, "foreign")
+
+    def test_listed_task_with_unreadable_action_is_unknown(self):
+        with self._listed_task(), mock.patch.object(
+                autostart, "schtasks", return_value=_fail("拒绝访问")):
+            state = autostart._task_ownership(autostart.AUTOSTART_TASK, self.root)
+        self.assertEqual(state, "unknown")
+
+    def test_elevated_install_does_not_overwrite_a_foreign_same_name_task(self):
+        xml = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append(args)
+            return _ok(xml)
+
+        with self._listed_task(), mock.patch.object(autostart, "schtasks", fake):
+            result = autostart._win_install(self.root, elevated=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("不属于本程序", result["message"])
+        self.assertFalse(any("/create" in args for args in calls))
+
+    def test_normal_install_does_not_add_runkey_beside_a_foreign_task(self):
+        xml = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        with self._listed_task(), mock.patch.object(
+                autostart, "schtasks", return_value=_ok(xml)):
+            result = autostart._win_install(self.root, elevated=False)
+        self.assertFalse(result["ok"])
+        self.assertNotIn(autostart.APP_NAME, self.reg.store)
+
+    def test_remove_does_not_delete_a_foreign_same_name_task(self):
+        xml = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append(args)
+            return _ok(xml)
+
+        with self._listed_task(), mock.patch.object(autostart, "schtasks", fake):
+            result = autostart._win_remove(self.root)
+        self.assertFalse(result["ok"])
+        self.assertIn("不属于本程序", result["message"])
+        self.assertFalse(any("/delete" in args for args in calls))
+
+    def test_runkey_with_another_command_is_foreign(self):
+        self.reg.store[autostart.APP_NAME] = r'"C:\\other-app\\startup.exe" --start'
+        self.assertEqual(autostart._runkey_ownership(autostart.APP_NAME, self.root),
+                         "foreign")
+
+    def test_normal_install_does_not_overwrite_a_foreign_runkey(self):
+        foreign = r'"C:\\other-app\\startup.exe" --start'
+        self.reg.store[autostart.APP_NAME] = foreign
+        result = autostart._win_install(self.root, elevated=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.reg.store[autostart.APP_NAME], foreign)
+
+    def test_remove_does_not_delete_a_foreign_runkey(self):
+        foreign = r'"C:\\other-app\\startup.exe" --start'
+        self.reg.store[autostart.APP_NAME] = foreign
+        result = autostart._win_remove(self.root)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.reg.store[autostart.APP_NAME], foreign)
+
+
 class TestStatus(_WinCase):
     def _query_returns(self, xml_text_):
         def fake(args, **kw):
@@ -333,7 +456,8 @@ class TestStatus(_WinCase):
 
     def test_reads_elevated_task(self):
         self._query_returns(autostart.task_xml(self.root))
-        st = autostart._win_status()
+        with self._listed_task():
+            st = autostart._win_status(self.root)
         self.assertTrue(st["installed"])
         self.assertEqual(st["mode"], "task")
         self.assertTrue(st["elevated"])
@@ -342,32 +466,49 @@ class TestStatus(_WinCase):
     def test_detects_non_elevated_task(self):
         xml = autostart.task_xml(self.root).replace("HighestAvailable", "LeastPrivilege")
         self._query_returns(xml)
-        st = autostart._win_status()
+        with self._listed_task():
+            st = autostart._win_status(self.root)
         self.assertTrue(st["installed"])
         self.assertFalse(st["elevated"], "LeastPrivilege 不是提权，不能显示成管理员")
 
     def test_detects_runkey_fallback(self):
         self._query_returns("")           # 任务不存在
         self.reg.SetValueEx(_FakeWinreg._Key(self.reg), autostart.APP_NAME, 0,
-                            _FakeWinreg.REG_SZ, r'"C:\py\pythonw.exe" "D:\cbg\boot.py"')
-        st = autostart._win_status()
+                            _FakeWinreg.REG_SZ, autostart.command(self.root))
+        st = autostart._win_status(self.root)
         self.assertTrue(st["installed"])
         self.assertEqual(st["mode"], "runkey")
         self.assertFalse(st["elevated"])
 
     def test_not_installed(self):
         self._query_returns("")
-        st = autostart._win_status()
+        st = autostart._win_status(self.root)
         self.assertFalse(st["installed"])
         self.assertIsNone(st["mode"])
+
+    def test_foreign_same_name_task_is_not_reported_as_ours(self):
+        xml = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        self._query_returns(xml)
+        with self._listed_task():
+            st = autostart._win_status(self.root)
+        self.assertFalse(st["installed"])
+        self.assertTrue(st["ownership_unverified"])
+        self.assertNotIn("registered", st)
 
 
 class TestRemove(_WinCase):
     def test_clears_both_task_and_runkey(self):
-        self.reg.store[autostart.APP_NAME] = "old"
+        self.reg.store[autostart.APP_NAME] = autostart.command(self.root)
         # 现在先 `/query` 问任务在不在，再 `/delete` —— 两次调用
-        calls = self._schtasks([_ok(), _ok()])
-        res = autostart._win_remove()
+        xml = autostart.task_xml(self.root)
+
+        def script(args):
+            return _ok(xml) if "/xml" in args else _ok()
+
+        calls = self._schtasks([script])
+        with self._listed_task():
+            res = autostart._win_remove(self.root)
         self.assertTrue(res["ok"])
         self.assertTrue(any("/query" in c for c in calls), "要先问任务在不在")
         self.assertIn("/delete", calls[-1])
@@ -381,9 +522,15 @@ class TestRemove(_WinCase):
         "管理员"，比不切还难查。而删它**需要管理员权限**，偏偏"切回普通权限"
         这个动作常常正好是在非管理员进程里做的，删不掉是常态。
         """
-        calls = self._schtasks([_ok(), _fail(stderr="错误: 拒绝访问。")])
-        res = autostart._win_remove()
-        self.assertIn("没删掉", res.get("message", ""),
+        xml = autostart.task_xml(self.root)
+
+        def script(args):
+            return _ok(xml) if "/xml" in args else _fail(stderr="错误: 拒绝访问。")
+
+        calls = self._schtasks([script])
+        with self._listed_task():
+            res = autostart._win_remove(self.root)
+        self.assertIn("未更改", res.get("message", ""),
                       "删不掉要让用户看见，而不是当成功")
         self.assertIn("任务计划程序", res.get("message", ""), "要给能照着做的下一步")
 
@@ -395,13 +542,13 @@ class TestRemove(_WinCase):
         按它判断等于把逻辑绑死在某一种系统语言上。
         """
         self._schtasks([_fail(stderr="错误: 系统找不到指定的文件。")])
-        res = autostart._win_remove()
+        res = autostart._win_remove(self.root)
         self.assertTrue(res["ok"])
         self.assertNotIn("没删掉", res.get("message", ""))
 
     def test_removing_when_nothing_registered_is_ok(self):
         self._schtasks([_fail()])
-        res = autostart._win_remove()
+        res = autostart._win_remove(self.root)
         self.assertTrue(res["ok"])
 
 

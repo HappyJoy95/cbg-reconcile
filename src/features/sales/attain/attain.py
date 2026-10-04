@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -74,7 +75,7 @@ def read_plan(root=None, doc: str = DOC, session=None) -> M.Plan:
       我们就会照它算**上一周** —— 所以要提醒（界面上标"数据截至"），
       但**不硬失败**（周一早上办公室可能还没改完）。
     """
-    from .... import tdoc
+    from ....integrations import tdoc
     try:
         # ⚠ 一张 HTML 读两遍 tab：`read_tab` 每次都重下首页，干脆自己拿着用
         html = tdoc.fetch_html(doc, session=session)
@@ -99,7 +100,7 @@ def _grid_of(tdoc, name: str, doc: str, html, session):
 
 def build_plan(m_grid: dict, t_grid: dict, rich=None) -> M.Plan:
     """两张 grid → `Plan` —— **纯拼装**（网络那半在 `read_plan`，这样好测）。"""
-    from .... import tdoc
+    from ....integrations import tdoc
     info = tdoc.read_mapping(m_grid)                  # 抛 TdocError：表空 / C1D1 没日期
     targets = tdoc.read_targets(t_grid, rich=rich,
                                mapping_columns=[c[0] for c in info["columns"]])
@@ -538,6 +539,7 @@ def notify(payload: dict, *, config_path=None, no_push: bool = False,
 # ------------------------------------------------------------------ 历史存档
 #: 归档目录（一周一个文件，**一旦写进去就不再改** —— 用户要的"锁住存档"）
 ARCHIVE_DIR = "out/attain-history"
+_ARCHIVE_PERIOD = re.compile(r"\d{4}-W(?:0[1-9]|[1-4][0-9]|5[0-3])")
 
 
 def archive_dir(root) -> Path:
@@ -545,7 +547,10 @@ def archive_dir(root) -> Path:
 
 
 def archive_path(root, period: str) -> Path:
-    return archive_dir(root) / ("%s.json" % (period or "unknown"))
+    value = str(period or "")
+    if not _ARCHIVE_PERIOD.fullmatch(value):
+        raise ValueError("历史期间格式无效")
+    return archive_dir(root) / ("%s.json" % value)
 
 
 def archive_rolled(root, payload: dict, *, emit=None) -> str:
@@ -605,7 +610,10 @@ def history_list(root) -> list:
 
 def history_load(root, period: str) -> dict:
     """读某一周的存档（**只读** —— 它就是"锁住"的那份）。"""
-    p = archive_path(root, period)
+    try:
+        p = archive_path(root, period)
+    except ValueError:
+        return {"exists": False, "error": "历史期间格式无效"}
     if not p.is_file():
         return {"exists": False, "error": "没有这一周的存档：%s" % period}
     try:

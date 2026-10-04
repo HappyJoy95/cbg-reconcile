@@ -228,7 +228,11 @@ def take_due(root=None, now=None, selected=None) -> List[dict]:
     chosen = None if selected is None else set(selected)
     grace = datetime.timedelta(hours=ONCE_GRACE_HOURS)
     due, keep, expired = [], [], []
+    from ..auth import runtime
     for x in items:
+        if not runtime.step_available(x.get("cmd"), root, recurring=True):
+            keep.append(x)
+            continue
         when = _parse(x.get("at") or "")
         if when is None:
             expired.append((x, "时间读不出来（%r）" % (x.get("at"),)))

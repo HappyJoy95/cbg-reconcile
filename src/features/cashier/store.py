@@ -258,14 +258,19 @@ def _clean_entry(data: dict, entry_id=None):
     }, None
 
 
-def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
+def save_entry(root=None, data: dict = None, entry_id=None, store_code=None) -> dict:
     """录/改一笔。给了 `entry_id` 就改那条（不存在回 why，不静默新建）。"""
+    from . import ownership
     row, why = _clean_entry(data, entry_id)
     if why:
         return {"ok": False, "why": why}
     now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     path = ensure(root)
     with _db.tx(str(path)) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         if entry_id:
             try:
                 # ⚠ UPDATE **故意不带 status**：改一笔不改变它入没入库
@@ -298,29 +303,39 @@ def save_entry(root=None, data: dict = None, entry_id=None) -> dict:
         return {"ok": True, "id": int(cur.lastrowid)}
 
 
-def delete_entry(root=None, entry_id=None) -> dict:
+def delete_entry(root=None, entry_id=None, store_code=None) -> dict:
     """删一笔。"""
+    from . import ownership
     try:
         eid = int(entry_id)
     except (TypeError, ValueError):
         return {"ok": False, "why": "id 不对"}
     with _db.tx(str(ensure(root))) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         cur = conn.execute("DELETE FROM sale_entries WHERE id=?", (eid,))
         if cur.rowcount == 0:
             return {"ok": False, "why": "没有这条流水（id=%s）" % eid}
         return {"ok": True, "id": eid}
 
 
-def exclude_entry(root=None, entry_id=None) -> dict:
+def exclude_entry(root=None, entry_id=None, store_code=None) -> dict:
     """玲珑卡的 ✕ —— **软排除**（记标记，不删 dump 库的原单，再导入也不回来）。
 
     手工单（source=manual）不许走这儿：它的 ✕ 是真删（`delete_entry`）。
     """
+    from . import ownership
     try:
         eid = int(entry_id)
     except (TypeError, ValueError):
         return {"ok": False, "why": "id 不对"}
     with _db.tx(str(ensure(root))) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         row = conn.execute("SELECT source FROM sale_entries WHERE id=?",
                            (eid,)).fetchone()
         if not row:
@@ -376,16 +391,21 @@ def list_entries(root=None, day: str = "") -> List[dict]:
         conn.close()
 
 
-def commit_entries(root=None, day: str = "") -> dict:
+def commit_entries(root=None, day: str = "", store_code=None) -> dict:
     """「保存并记录」—— 把**那天**的暂存行转成已入库（`status` staged → saved）。
 
     ⚠ 只转点名那天：暂存是"今天这一屏还没结的账"，别的天的暂存不该被顺手结掉。
     ⚠ 没有暂存也回 `ok`（重复点 / 空手点不该报错），`saved` 说清转了几条。
     """
+    from . import ownership
     day = str(day or "").strip()
     if len(day) != 10 or day[4] != "-" or day[7] != "-":
         return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
     with _db.tx(str(ensure(root))) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         # ⚠ 只改 status，**不碰 updated_at** —— 「保存并记录」是入账动作，
         #   不是"改了内容"，动了它整屏卡片会跟着重排（用户：别乱动位置）
         cur = conn.execute(
@@ -408,7 +428,7 @@ def sellers(root=None) -> List[str]:
         conn.close()
 
 
-def entries_from_orders(root=None, day: str = "") -> dict:
+def entries_from_orders(root=None, day: str = "", store_code=None) -> dict:
     """把 `orders` 表里那天的销售单变成当日卡片（`source='linglong'`）。
 
     ⚠ **只读本机库**：拉网络在 web.App.cashier_import 那层做（先合并 orders，
@@ -422,6 +442,7 @@ def entries_from_orders(root=None, day: str = "") -> dict:
     ⚠ 生成的卡片是**暂存**（`status='staged'`）—— 2026-09-30 两段式：
       导入不入账，等汇总条「保存并记录」那天一起转正。
     """
+    from . import ownership
     day = str(day or "").strip()
     if len(day) != 10 or day[4] != "-" or day[7] != "-":
         return {"ok": False, "why": "日期格式不对（要 2026-09-30）"}
@@ -430,12 +451,21 @@ def entries_from_orders(root=None, day: str = "") -> dict:
     now = datetime.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     imported = skipped_black = skipped_dup = 0
     with _db.tx(str(path), named=True) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         try:
+            from ...modules.auth import runtime
+            bound = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cashier_owner'").fetchone()
+            scoped = bool(store_code) and (runtime.is_lifehall(root) or bool(bound))
+            extra = " AND store_code = ?" if scoped else ""
+            params = (day + "%", store_code) if scoped else (day + "%",)
             orders = conn.execute(
                 "SELECT document_no, doc_create_time, included_tax_amount, remark,"
                 " consumer_guide_name FROM orders WHERE doc_create_time LIKE ?"
-                " ORDER BY doc_create_time",
-                (day + "%",)).fetchall()
+                 + extra + " ORDER BY doc_create_time",
+                params).fetchall()
         except Exception:                                   # noqa: BLE001
             return {"ok": False, "why": "还没有 orders 表（先点一次导入拉单）"}
         have = {r[0] for r in conn.execute(
@@ -524,7 +554,7 @@ def entries_from_orders(root=None, day: str = "") -> dict:
 
 
 # ---------------------------------------------------------------- 政策
-def save_policy(root=None, rows: list = None, fetched_at: str = "") -> dict:
+def save_policy(root=None, rows: list = None, fetched_at: str = "", store_code=None) -> dict:
     """存一份政策快照（**按快照保留，不再先清后写** —— 用户 2026-09-30：
     「老的也保留可查」）。
 
@@ -532,6 +562,7 @@ def save_policy(root=None, rows: list = None, fetched_at: str = "") -> dict:
     每次调用 = 一份新快照（`fetched_at` 打时间戳）；反查 / 新鲜度 /
     导出的政策表都只认**最新那份**（见 `lookup` / `policy_meta`）。
     """
+    from . import ownership
     rows = rows or []
     if not rows:
         return {"ok": False, "why": "没有行可存"}
@@ -539,6 +570,10 @@ def save_policy(root=None, rows: list = None, fetched_at: str = "") -> dict:
     fetched = (fetched_at or datetime.datetime.now(CST).strftime(fmt))
     written = 0
     with _db.tx(str(ensure(root))) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        denied = ownership.failure(root, store_code, write=True, conn=conn)
+        if denied:
+            return denied
         # ⚠ 快照边界 = `fetched_at`：**同一秒存两份会打平**（连点两次刷新、
         #   测试连存两份）⇒ 撞上就往后挪一秒，别让"最新一份"数不清。
         try:

@@ -4,13 +4,10 @@
 
 * { box-sizing: border-box; }
 
-/* lifehall：三个工具平铺为一级入口；左下角只留主题与玲珑授权。 */
+/* lifehall：工具入口与收银；设置、主题、玲珑、检查更新由运行页面策略放行。 */
 .nav-lifehall { display: none; }
 body.lifehall-edition .nav-lifehall { display: block; }
-body.lifehall-edition .nav-item[data-tab="tools"]:not(.nav-lifehall) { display: none; }
 body.lifehall-edition #side-foot [data-foot="account"],
-body.lifehall-edition #side-foot [data-foot="update"],
-body.lifehall-edition #side-foot [data-foot="general"],
 body.lifehall-edition #side-foot [data-foot="stores"],
 body.lifehall-edition #side-foot [data-foot="scheduler"] { display: none; }
 .lifehall-weather-row { display: none; }
@@ -908,6 +905,18 @@ input[type="checkbox"], input[type="radio"] {
 }
 .setup-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 .setup-head h2 { margin: 0; font-size: 17px; }
+/* ── 进入方式选择页（2026-10-02 统一进入流程）────────────────── */
+.entry-options { display: grid; gap: 10px; margin: 14px 0 6px; }
+.entry-opt {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); cursor: pointer; text-align: left;
+  font: inherit; color: inherit;
+}
+.entry-opt b { font-size: 15px; }
+.entry-opt:hover { border-color: var(--brand); background: var(--hover); }
+.entry-opt:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
 .setup-step { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
 .setup-step-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
 .setup-step-head b { font-size: 14.5px; }
@@ -1200,16 +1209,13 @@ body.setup-locked .shell { visibility: hidden; }
 .nav-item[data-tab="plan"]:hover .nav-menu,
 .nav-item[data-tab="plan"].open .nav-menu { height: 72px; }
 .nav-item[data-tab="inventory"]:hover .nav-menu,
-.nav-item[data-tab="inventory"].open .nav-menu { height: 72px; }
+.nav-item[data-tab="inventory"].open .nav-menu { height: 35px; }
 .nav-item[data-tab="valueadd"]:hover .nav-menu,
 .nav-item[data-tab="valueadd"].open .nav-menu { height: 109px; }
-.nav-item[data-tab="tools"]:hover .nav-menu,
-.nav-item[data-tab="tools"].open .nav-menu { height: 146px; }
-/* ⚠ 分销 4 个二级项（2026-09-29 加的）—— **忘了写这条**就落默认 109px：
-   4 项塞不进去，flex 默认 `shrink:1` 会把每行压到 ~26px ⇒ 用户看到的是
-   「二级标签间隔有点近」（不是 gap 的事，是**高度不够被压扁**）。 */
+/* ⚠ 小工具 2026-10-02 起 3 项（串号追踪下线）—— 落默认 109px，不用单写。 */
+/* 分销导航精简成一个入口；四种视角在工作区内切换。 */
 .nav-item[data-tab="distribution"]:hover .nav-menu,
-.nav-item[data-tab="distribution"].open .nav-menu { height: 146px; }
+.nav-item[data-tab="distribution"].open .nav-menu { height: 35px; }
 .nav-menu .subtab {
   width: 100%; text-align: left; border: 0; background: none;
   border-radius: 8px;
@@ -1875,6 +1881,29 @@ main.tools-frame-mode .subpanel.active {
   font-weight: 600;
   color: var(--ink-2, var(--ink));
 }
+.dist-view-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.dist-view-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 7px 7px 0 0;
+  padding: 7px 12px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.dist-view-tab:hover { color: var(--text); background: var(--hover); }
+.dist-view-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--brand);
+  font-weight: 600;
+}
+.dist-view[hidden] { display: none; }
 /* 环形图组件在自己的半区里水平居中（svg + 图例整组居中） */
 .dist-donut-pair .dist-donut-wrap {
   justify-content: center;
@@ -2049,4 +2078,3 @@ tr.dist-drill tbody tr:hover { background: transparent; }
   border: 0; background: none; font-size: 17px; line-height: 1; cursor: pointer;
   color: var(--muted); padding: 6px; }
 .cc-close:hover { color: var(--bad); }
-

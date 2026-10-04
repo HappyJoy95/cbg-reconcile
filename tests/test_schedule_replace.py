@@ -26,8 +26,9 @@ sys.path.insert(0, str(ROOT))
 
 from src import schedule as S                              # noqa: E402
 
-WEB_PY = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+WEB_PY = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
 INDEX = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 LEGACY_FULL = "\\CBG报量对账-21点20"
@@ -54,9 +55,15 @@ class _Base(unittest.TestCase):
             return {"ok": remove_ok,
                     "message": "已删除" if remove_ok else "错误: 拒绝访问。"}
 
+        def fake_status(root):
+            tasks = [{"name": full.rsplit("\\", 1)[-1], "full_name": full}
+                     for full in legacy]
+            return {"tasks": tasks}
+
         return (
             mock.patch.object(S, "install", fake_install),
             mock.patch.object(S, "legacy_task_names", lambda root: list(legacy)),
+            mock.patch.object(S, "status", fake_status),
             mock.patch.object(S, "kind", lambda: "windows"),
             mock.patch.object(S, "_win_remove", fake_remove),
             mock.patch.object(S, "_unix_remove", fake_remove),
@@ -124,6 +131,26 @@ class TestRemoveFailure(_Base):
         res = self.run_replace(legacy=(LEGACY_FULL, r"\CBG报量对账-21点00"))
         self.assertEqual(self.calls, ["install", "remove", "remove"])
         self.assertEqual(len(res["removed"]), 2)
+
+
+class TestUnverifiedLegacyTask(_Base):
+    def test_详情不可读的旧名任务可见但不会被自动删除(self):
+        task = {"name": LEGACY_LEAF, "full_name": LEGACY_FULL,
+                "ownership_unverified": True, "unreadable": True}
+        install = mock.Mock(return_value={"ok": True, "message": "已注册"})
+        remove = mock.Mock(return_value={"ok": True, "message": "已删除"})
+        with mock.patch.object(S, "install", install), \
+                mock.patch.object(S, "legacy_task_names", return_value=[LEGACY_FULL]), \
+                mock.patch.object(S, "status", return_value={"tasks": [task]}), \
+                mock.patch.object(S, "kind", lambda: "windows"), \
+                mock.patch.object(S, "_win_remove", remove):
+            result = S.replace_legacy(self.root, "21:00", 1, "config/store-X.yaml")
+
+        self.assertTrue(result["installed"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("unverified"), [LEGACY_LEAF])
+        self.assertIn("无法确认归属", result["message"])
+        remove.assert_not_called()
 
 
 class TestLegacyName(unittest.TestCase):
@@ -195,7 +222,7 @@ class TestWiring(unittest.TestCase):
 
     def test_先普通权限试_不行才提权(self):
         """⚠ 首选普通权限：建出来的任务归当前用户，以后读改删都不用管理员。"""
-        i_replace = WEB_PY.index('"/api/schedule/replace"')
+        i_replace = WEB_PY.index('if path == "/api/schedule/replace" and method == "POST":')
         seg = WEB_PY[i_replace:i_replace + 2600]
         self.assertLess(seg.index("schedule.replace_legacy"), seg.index("run_elevated"),
                         "得先用普通权限试一次")
@@ -203,7 +230,7 @@ class TestWiring(unittest.TestCase):
     def test_提权走的是_schedule_replace_一个子命令(self):
         """⚠ 一个 UAC 里做完"建新的 + 删老的" —— 分成两次会弹两次 UAC，
         而且中间那次失败会留下'删了没建'的烂摊子。"""
-        i = WEB_PY.index('"/api/schedule/replace"')
+        i = WEB_PY.index('if path == "/api/schedule/replace" and method == "POST":')
         self.assertIn('"schedule-replace"', WEB_PY[i:i + 2600])
 
     def test_前端有弹窗和按钮(self):

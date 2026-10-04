@@ -56,7 +56,7 @@ class Test待领滤店(unittest.TestCase):
         }
 
     def test_门店只看到本店(self):
-        def load(root=None, stores=None, day=None):
+        def load(root=None, stores=None, day=None, **kwargs):
             # 模拟 compute 已按 stores 粗滤，再经 web 用 scope_store_ok 精滤
             all_rows = self._fake_rows("甲店", "乙店").get("rows")
             if stores is not None:

@@ -20,12 +20,29 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+INV_PAGE_PATH = ROOT / "web" / "features" / "inventory" / "page.js"
+INV_PAGE_JS = INV_PAGE_PATH.read_text(encoding="utf-8") if INV_PAGE_PATH.exists() else ""
+STORE_PAGE_PATH = ROOT / "web" / "features" / "store" / "page.js"
+STORE_PAGE_JS = STORE_PAGE_PATH.read_text(encoding="utf-8") if STORE_PAGE_PATH.exists() else ""
+APP_FILES = ["common/base.js", "common/nav.js"]
+if INV_PAGE_PATH.exists():
+    APP_FILES.append("features/inventory/page.js")
+APP_FILES.extend(("features/valueadd/film/page.js", "features/valueadd/benefit/page.js",
+                  "features/sales/attain/page.js", "features/compliance/pos/page.js",
+                  "features/compliance/comparison/page.js", "features/distribution/page.js",
+                  "features/plan/monthly/page.js", "features/cashier/page.js",
+                  "features/tools/claim/page.js"))
+if STORE_PAGE_PATH.exists():
+    APP_FILES.append("features/store/page.js")
+APP_FILES.append("app.js")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8") for _p in APP_FILES)
 STYLE_CSS = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 #: ⚠ 设计令牌（颜色/尺寸/圆角/阴影/动效）2026-09-18 搬去了 `theme.css` ——
 #:   只读 style.css 的话，"某个令牌只有一处定义"这类断言会全部找不到锚点。
@@ -376,8 +393,68 @@ class Test左下角那几行就是设置菜单(unittest.TestCase):
             with self.subTest(ident=ident):
                 self.assertIn('id="%s"' % ident, INDEX_HTML)
         # ⚠ 2026-09-21：「人员设置」并进这一页了（用户：「账号设置和人员设置合并到一起吧」）
-        #   ⇒ 切过来**两样都拉**：账号状态 + 本店人员。
-        self.assertIn("renderAccount(); loadStaff();", APP_JS)
+        #   ⇒ 页面注册模块负责一起读取账号状态 + 人员名单。
+        self.assertIn("registerPage('account'", STORE_PAGE_JS)
+        self.assertIn("renderAccount()", STORE_PAGE_JS)
+        self.assertIn("loadStaff()", STORE_PAGE_JS)
+
+    def test_人员界面归store页面模块(self):
+        app_source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("function renderStaff(", app_source)
+        self.assertNotIn("async function loadStaff(", app_source)
+        self.assertIn("AbortController", STORE_PAGE_JS)
+        self.assertIn("unmount:", STORE_PAGE_JS)
+        script = '<script src="/features/store/page.js?v='
+        self.assertIn(script, INDEX_HTML)
+        self.assertLess(INDEX_HTML.index(script), INDEX_HTML.index('<script src="/app.js?v='))
+
+    def test_人员页离开时取消未完成的读取(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端生命周期检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const elements = new Map();
+const calls = [];
+let page;
+const context = {
+  AbortController,
+  $(selector) {
+    if (!elements.has(selector)) elements.set(selector, {
+      innerHTML: '', textContent: '', addEventListener() {}, removeEventListener() {},
+    });
+    return elements.get(selector);
+  },
+  $$(selector) { return []; },
+  esc(value) { return String(value); },
+  api(_path, options) {
+    calls.push(options.signal);
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('aborted'); error.name = 'AbortError'; reject(error);
+      });
+    });
+  },
+  renderAccount() {},
+  registerPage(key, lifecycle) { if (key === 'account') page = lifecycle; },
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+(async () => {
+  page.mount();
+  const pending = page.load();
+  assert.equal(calls.length, 1);
+  page.unmount();
+  assert.equal(calls[0].aborted, true);
+  await pending;
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run([node, "-e", script, str(STORE_PAGE_PATH)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_通用设置面板没有介绍页(self):
         """⚠ 每一条都带着明确的 key 进来，落不到"介绍页"这种地方 ——
@@ -537,12 +614,249 @@ class Test二级标签接线(unittest.TestCase):
                               "二级标签 %s 没有对应的 subpanel" % name)
 
     def test_每个二级标签都有加载器(self):
-        """漏一个 = 切过去是空的（还可能是**上一页的旧数据**留在那儿）。"""
+        """每个页面都要有 loader 或显式生命周期注册，漏一个切过去就是空页。"""
         i = APP_JS.index("const SUBTAB_LOADERS = {")
         block = APP_JS[i:APP_JS.index("};", i)]
+        registered = set(re.findall(r"registerPage\(['\"]([^'\"]+)", APP_JS))
         for name in re.findall(r'data-subtab="([a-z-]+)"', INDEX_HTML):
             with self.subTest(subtab=name):
-                self.assertIn(name, block, "SUBTAB_LOADERS 里少了 %s" % name)
+                self.assertTrue(name in block or name in registered,
+                                "页面既没 loader 也没生命周期注册：%s" % name)
+
+
+class Test业务页面脚本归属(unittest.TestCase):
+    """页面业务代码按计划从总 app.js 拆到显式业务目录，仍由 index.html 明确加载。"""
+
+    def test_防护膜页面脚本独立并在app主脚本前加载(self):
+        page = ROOT / "web" / "features" / "valueadd" / "film" / "page.js"
+        self.assertTrue(page.is_file(), "防护膜页面应有自己的业务脚本")
+        film_js = page.read_text(encoding="utf-8")
+        self.assertIn("async function loadFilm()", film_js)
+        self.assertIn("function renderFilm(", film_js)
+        self.assertNotIn("async function loadFilm()", (ROOT / "web" / "app.js").read_text(
+            encoding="utf-8"), "防护膜页面逻辑仍堆在 app.js")
+
+        film_tag = '<script src="/features/valueadd/film/page.js?v='
+        app_tag = '<script src="/app.js?v='
+        self.assertIn(film_tag, INDEX_HTML)
+        self.assertLess(INDEX_HTML.index(film_tag), INDEX_HTML.index(app_tag),
+                        "页面脚本先声明 loadFilm，再由 app.js 初始化公共日期控件")
+
+    def test_防护膜HTTP分支归业务handler(self):
+        handler = ROOT / "src" / "features" / "valueadd" / "film" / "http.py"
+        self.assertTrue(handler.is_file(), "防护膜 HTTP 处理应归属防护膜业务目录")
+        handler_source = handler.read_text(encoding="utf-8")
+        self.assertIn("def handle(", handler_source)
+        self.assertNotIn("from src.web", handler_source,
+                         "业务 handler 不得反向导入 web.py")
+
+        web_source = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("film_http.handle(", web_source)
+        self.assertNotIn('if path == "/api/film"', web_source,
+                         "具体防护膜路由仍留在公共 web.py")
+
+    def test_公共导航支持页面挂载取消和刷新生命周期(self):
+        nav = (ROOT / "web" / "common" / "nav.js").read_text(encoding="utf-8")
+        self.assertIn("function registerPage(", nav)
+        self.assertIn("function activatePage(", nav)
+        self.assertIn("function refreshPage(", nav)
+        self.assertIn("previous.unmount", nav,
+                      "离开当前页面时应释放监听或取消未完成请求")
+
+        page = (ROOT / "web" / "features" / "valueadd" / "film" / "page.js").read_text(
+            encoding="utf-8")
+        self.assertIn("registerPage('film'", page)
+        self.assertIn("unmount: unmountFilm", page)
+        self.assertIn("filmRequestController.abort()", page,
+                      "防护膜页离开时要取消旧数据请求")
+
+    def test_周达成页面脚本独立并注册两个生命周期(self):
+        page = ROOT / "web" / "features" / "sales" / "attain" / "page.js"
+        self.assertTrue(page.is_file(), "周达成页面应有自己的业务脚本")
+        page_source = page.read_text(encoding="utf-8")
+        app_source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("async function loadAttain(", page_source)
+        self.assertIn("function renderAttain(", page_source)
+        self.assertIn("async function loadAttainHistory(", page_source)
+        self.assertIn("registerPage('attain'", page_source)
+        self.assertIn("registerPage('attain-history'", page_source)
+        self.assertIn("attainRequestController.abort()", page_source,
+                      "切离页面后应取消挂起中的请求")
+        self.assertIn("signal: request.controller.signal", page_source)
+        self.assertIn("if (attainRequestIsCurrent(request)) renderAttain(result)",
+                      page_source, "过期回包不能覆盖当前页面")
+        for moved in ("async function loadAttain(", "function renderAttain(",
+                      "async function loadAttainHistory(", "function renderAttainHistory(",
+                      "function toggleStoreDetail(", "$('#btn-export-attain')",
+                      "$('#btn-refresh-attain')"):
+            with self.subTest(moved=moved):
+                self.assertNotIn(moved, app_source,
+                                 "周达成的页面逻辑仍留在 app.js")
+        page_tag = '<script src="/features/sales/attain/page.js?v='
+        app_tag = '<script src="/app.js?v='
+        self.assertIn(page_tag, INDEX_HTML)
+        self.assertLess(INDEX_HTML.index(page_tag), INDEX_HTML.index(app_tag),
+                        "周达成模块应先注册页面，再初始化公共 app.js")
+
+    def test_权益页与HTTP处理归权益业务目录(self):
+        page = ROOT / "web" / "features" / "valueadd" / "benefit" / "page.js"
+        handler = ROOT / "src" / "features" / "valueadd" / "benefit" / "http.py"
+        self.assertTrue(page.is_file(), "权益页面应有自己的业务脚本")
+        self.assertTrue(handler.is_file(), "权益 HTTP 处理应归属权益业务目录")
+        page_source = page.read_text(encoding="utf-8")
+        self.assertIn("async function loadBenefit()", page_source)
+        self.assertIn("function renderBenefit(", page_source)
+        self.assertIn("registerPage('benefit'", page_source)
+        app_source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("function renderBenefit(", app_source)
+        self.assertNotIn("async function loadBenefit()", app_source)
+
+        handler_source = handler.read_text(encoding="utf-8")
+        self.assertIn("def handle(", handler_source)
+        self.assertNotIn("from src.web", handler_source)
+        web_source = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("benefit_http.handle(", web_source)
+        self.assertNotIn('if path == "/api/benefit"', web_source)
+
+    def test_分销工作区页面脚本归业务目录并注册生命周期(self):
+        page = ROOT / "web" / "features" / "distribution" / "page.js"
+        self.assertTrue(page.is_file(), "分销工作区应有自己的业务页面脚本")
+        page_source = page.read_text(encoding="utf-8")
+        self.assertIn("async function loadDistBoard(", page_source)
+        self.assertIn("async function loadDistDetail(", page_source)
+        self.assertIn("registerPage('dist-region'", page_source)
+        self.assertIn("unmount: unmountDistPage", page_source)
+        self.assertIn("controller.abort()", page_source,
+                      "离开分销页时应取消仍在进行的读取")
+
+        app_source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        for moved in ("function distDonut(", "async function loadDistBoard(",
+                      "async function loadDistDetail(", "$('#btn-dist-fetch')"):
+            with self.subTest(moved=moved):
+                self.assertNotIn(moved, app_source,
+                                 "分销页面逻辑仍留在 app.js")
+
+        page_tag = '<script src="/features/distribution/page.js?v='
+        app_tag = '<script src="/app.js?v='
+        self.assertIn(page_tag, INDEX_HTML)
+        self.assertLess(INDEX_HTML.index(page_tag), INDEX_HTML.index(app_tag),
+                        "分销页面应先注册，再初始化公共 app.js")
+
+    def test_分销页离开时会取消读取并丢弃迟到结果(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端生命周期检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const helperStart = source.indexOf('let distPageMounted = false;');
+const helperEnd = source.indexOf('function setDistView(', helperStart);
+const unmountStart = source.indexOf('function unmountDistPage()');
+const unmountEnd = source.indexOf('\nregisterPage(', unmountStart);
+const calls = [];
+const context = {
+  AbortController,
+  distDrillRows: { clear() {} },
+  api(_path, options) {
+    calls.push(options.signal);
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('aborted'); error.name = 'AbortError'; reject(error);
+      });
+    });
+  },
+};
+vm.createContext(context);
+vm.runInContext(source.slice(helperStart, helperEnd), context);
+vm.runInContext(source.slice(unmountStart, unmountEnd), context);
+vm.runInContext('distPageMounted = true;', context);
+(async () => {
+  const pending = vm.runInContext("distRead('/api/dist/board?kind=region')", context);
+  assert.equal(calls.length, 1);
+  vm.runInContext('unmountDistPage()', context);
+  assert.equal(calls[0].aborted, true);
+  assert.equal(await pending, null);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        page = ROOT / "web" / "features" / "distribution" / "page.js"
+        result = subprocess.run([node, "-e", script, str(page)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_月度生意计划页面脚本归业务目录并注册生命周期(self):
+        page = ROOT / "web" / "features" / "plan" / "monthly" / "page.js"
+        self.assertTrue(page.is_file(), "月度生意计划应有自己的业务页面脚本")
+        page_source = page.read_text(encoding="utf-8")
+        self.assertIn("async function loadPlan(", page_source)
+        self.assertIn("registerPage('monthly'", page_source)
+        self.assertIn("unmount: unmountPlanPage", page_source)
+        self.assertIn("planReadController.abort()", page_source,
+                      "离开月度页时应取消仍在进行的读取")
+
+        app_source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        for moved in ("function renderPlan(", "async function loadPlan(",
+                      "function planToggleCol(", "$('#btn-export-plan')"):
+            with self.subTest(moved=moved):
+                self.assertNotIn(moved, app_source,
+                                 "月度生意计划页面逻辑仍留在 app.js")
+
+        page_tag = '<script src="/features/plan/monthly/page.js?v='
+        app_tag = '<script src="/app.js?v='
+        self.assertIn(page_tag, INDEX_HTML)
+        self.assertLess(INDEX_HTML.index(page_tag), INDEX_HTML.index(app_tag),
+                        "月度页应先注册，再初始化公共 app.js")
+
+    def test_月度页离开时会取消读取并丢弃迟到结果(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端生命周期检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const helperStart = source.indexOf('let planPageMounted = false;');
+const helperEnd = source.indexOf('async function loadPlan()', helperStart);
+const loadStart = helperEnd;
+const loadEnd = source.indexOf("// 指标切换：", loadStart);
+const lifecycleStart = source.indexOf('function mountPlanPage()', loadEnd);
+const lifecycleEnd = source.indexOf("registerPage('monthly'", lifecycleStart);
+const calls = [];
+let rendered = 0;
+const context = {
+  AbortController,
+  api(_path, options) {
+    calls.push(options.signal);
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('aborted'); error.name = 'AbortError'; reject(error);
+      });
+    });
+  },
+  renderPlan() { rendered += 1; },
+  $() { return { textContent: '', innerHTML: '' }; },
+  toast() {}, esc(value) { return String(value); },
+};
+vm.createContext(context);
+vm.runInContext(source.slice(helperStart, helperEnd), context);
+vm.runInContext(source.slice(loadStart, loadEnd), context);
+vm.runInContext(source.slice(lifecycleStart, lifecycleEnd), context);
+(async () => {
+  vm.runInContext('mountPlanPage()', context);
+  const pending = vm.runInContext('loadPlan()', context);
+  assert.equal(calls.length, 1);
+  vm.runInContext('unmountPlanPage()', context);
+  assert.equal(calls[0].aborted, true);
+  await pending;
+  assert.equal(rendered, 0, '离开页面后迟到结果不能重画隐藏页面');
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        page = ROOT / "web" / "features" / "plan" / "monthly" / "page.js"
+        result = subprocess.run([node, "-e", script, str(page)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_点一级标签落第一个二级页(self):
         """⚠⚠ 口径**改过一次**，两次都是用户定的：
@@ -608,12 +922,78 @@ class Test二级标签接线(unittest.TestCase):
         self.assertIn("switchTab(item.dataset.tab, b.dataset.subtab)", APP_JS)
 
     def test_首屏落在第一个二级页(self):
-        """一级标签不可点 ⇒ 进来就得**自己落在某一页**上，
-        落的是第一个一级标签的第一个二级页（`switchTab` 不带 subtab 时的行为）。"""
-        i = APP_JS.index("(async () => {\n  // ⚠ **门禁在最前面**")
-        blk = APP_JS[i:i + 1200]
-        self.assertIn("switchTab('sales')", blk)
+        """首屏先拿到后端页面权限，再落到第一张可见页，避免打隐藏业务接口。"""
+        i = APP_JS.index("(async () => {\n  // ⭐ **选择页比门禁还靠前**")
+        blk = APP_JS[i:APP_JS.index("\n})();", i)]
+        self.assertIn("await loadOverview()", blk)
+        self.assertIn("openFirstAvailablePage()", blk)
+        self.assertLess(blk.index("await loadOverview()"),
+                        blk.index("openFirstAvailablePage()"))
+        self.assertNotIn("switchTab('sales')", blk)
         self.assertNotIn(".tab.active", blk, "别再按「当前亮着的页签」决定落哪儿了")
+        enter = APP_JS[APP_JS.index("async function enterConsole()"):
+                       APP_JS.index("async function chooseEntry", APP_JS.index(
+                           "async function enterConsole()"))]
+        self.assertLess(enter.index("await loadOverview()"),
+                        enter.index("openFirstAvailablePage()"))
+
+    def test_生活馆不读取旧华为自动登录配置(self):
+        """生活馆入口只用门店编码；不再请求旧 ERP 版本的华为自动登录配置。"""
+        start = APP_JS.index("async function loadHwLogin()")
+        end = APP_JS.index("\n}\n", start) + 3
+        block = APP_JS[start:end]
+        self.assertIn("setupState && setupState.runtime_lifehall", block)
+        self.assertLess(block.index("setupState && setupState.runtime_lifehall"),
+                        block.index("api('/api/hwlogin')"))
+
+    def test_首屏只切到可见页面的可见子页(self):
+        """生活馆隐藏「周度重点产品」后，启动不能再调用 attain loader。"""
+        self.assertIn("function openFirstAvailablePage()", APP_JS)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端执行检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function openFirstAvailablePage()');
+const end = source.indexOf('\n}\n', start) + 3;
+assert(start >= 0 && end > start, 'missing visible-page selector');
+const calls = [];
+const sub = (key, hidden) => ({ dataset: { subtab: key }, hidden });
+const salesSubs = [sub('attain', true), sub('attain-history', true), sub('sales-settings', true)];
+const toolsSubs = [sub('pricetag', false), sub('badge', true), sub('claim-pending', false)];
+const salesItem = { querySelectorAll: () => salesSubs };
+const toolsItem = { querySelectorAll: () => toolsSubs };
+let tabs = [
+  { hidden: true, dataset: { tab: 'sales' }, closest: () => salesItem },
+  { hidden: false, dataset: { tab: 'tools' }, closest: () => toolsItem },
+];
+const requests = [];
+const context = { $(selector) { return null; },
+  $$(selector) { return selector === '#sidebar .tab' ? tabs : []; },
+  switchTab(tab, subtab) {
+    calls.push([tab, subtab]);
+    if (subtab === 'attain') requests.push('/api/attain');
+  } };
+vm.createContext(context);
+vm.runInContext(source.slice(start, end), context);
+assert.equal(context.openFirstAvailablePage(), true);
+assert.deepEqual(calls, [['tools', 'pricetag']]);
+assert.deepEqual(requests, []);
+tabs = [
+  { hidden: false, dataset: { tab: 'sales' }, closest: () => salesItem },
+  { hidden: false, dataset: { tab: 'tools' }, closest: () => toolsItem },
+];
+salesSubs[0].hidden = false;
+assert.equal(context.openFirstAvailablePage(), true);
+assert.deepEqual(calls[1], ['sales', 'attain']);
+assert.deepEqual(requests, ['/api/attain']);
+""";
+        result = subprocess.run([node, "-e", script, str(ROOT / "web" / "common" / "nav.js")],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_菜单里的项点了才切(self):
         # ⚠ 锚在**那行绑定**上 —— `$$('.nav-item').forEach` 在 `closeNavMenus`
@@ -755,8 +1135,64 @@ class Test二级标签接线(unittest.TestCase):
                 else:
                     menu = _nav_item(tab) if tab == NAV_IDS[-1] else _nav_item(
                         tab, nxt=NAV_IDS[NAV_IDS.index(tab) + 1])
-                    self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', menu), subs)
+                    found = re.findall(r'data-subtab="([a-z-]+)"', menu)
+                    if tab == "inventory":
+                        # 盘点由一级入口直达，菜单只保留模块设置。
+                        self.assertEqual(found, ["inventory-settings"])
+                        self.assertEqual(re.findall(
+                            r'data-direct-subtab="([a-z-]+)"', menu), ["inventory"])
+                    else:
+                        self.assertEqual(found, subs)
 
+    def test_库存一级入口直达且分销四视角收在单页(self):
+        inv = _nav_item("inventory", nxt="valueadd")
+        self.assertIn('data-direct-subtab="inventory"', inv)
+        dist = _nav_item("distribution", nxt="cashier")
+        self.assertEqual(re.findall(r'data-subtab="([a-z-]+)"', dist), ["dist-region"])
+        self.assertIn('id="dist-toolbar"', INDEX_HTML)
+        for key in ("region", "model", "salesman", "detail"):
+            self.assertIn('data-dist-view="%s"' % key, INDEX_HTML)
+            self.assertIn('id="dist-view-%s"' % key, INDEX_HTML)
+        self.assertIn("function setDistView", APP_JS)
+
+    def test_分销页内切视角更新选中态并加载对应数据(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端执行检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf("let activeDistView = 'region';");
+const end = source.indexOf('function distMoney(v)', start);
+const code = source.slice(start, end);
+const kinds = ['region', 'model', 'salesman', 'detail'];
+const calls = [];
+const buttons = kinds.map(kind => ({ dataset: { distView: kind }, selected: null,
+  classList: { toggle(name, on){ this[name] = on; } },
+  setAttribute(name, value){ this[name] = value; },
+  addEventListener(_event, fn){ this.click = fn; } }));
+const views = kinds.map(kind => ({ id: 'dist-view-' + kind, hidden: kind !== 'region',
+  classList: { toggle(name, on){ this[name] = on; } } }));
+const context = { $$: selector => selector === '.dist-view-tab' ? buttons : views,
+  loadDistBoard(kind){ calls.push(kind); }, loadDistDetail(){ calls.push('detail'); } };
+vm.createContext(context);
+vm.runInContext(code, context);
+vm.runInContext('distPageMounted = true;', context);
+buttons[1].click();
+assert.equal(views[1].hidden, false);
+assert.equal(views[0].hidden, true);
+assert.equal(buttons[1]['aria-selected'], 'true');
+assert.deepEqual(calls, ['model']);
+buttons[3].click();
+assert.equal(views[3].hidden, false);
+assert.deepEqual(calls, ['model', 'detail']);
+""";
+        result = subprocess.run([node, "-e", script,
+                                 str(ROOT / "web" / "features" / "distribution" / "page.js")],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 class Test左下角菜单的行为(unittest.TestCase):
     """形态变了（浮层 → 就地变形），但几条**行为规矩**照旧：
@@ -943,12 +1379,10 @@ class Test介绍页已经删掉(unittest.TestCase):
 
 
 class Test首屏加载(unittest.TestCase):
-    """⚠ 首屏加载**必须跟着当前亮着的页签走**。
+    """首屏先应用服务端页面权限，再加载第一个当前身份可见的页面。
 
-    2026-09-18 改版前启动那段写死 `loadOverview()` —— 那时默认页正是报量查询，
-    所以没错。默认页换成「销售」之后，那样写的结果是：
-    **报量查询那页的数据白拉一遍，销售页却一片空白**（连空状态都没渲染，看着像坏了）。
-    截图实测抓到过这一次。"""
+    固定先切某个业务页会在裁剪版触发一个本版不支持的接口，
+    所以启动顺序必须是读取 overview/role.pages，再选择可见页。"""
 
     def _boot(self):
         i = APP_JS.index("/* ───────────────────────────── 启动")
@@ -957,16 +1391,101 @@ class Test首屏加载(unittest.TestCase):
         return APP_JS[i:i + 1400]
 
     def test_启动跟着当前页签(self):
-        self.assertIn("switchTab(", self._boot())
+        blk = self._boot()
+        self.assertIn("await loadOverview()", blk)
+        self.assertIn("openFirstAvailablePage()", blk)
+
+    def test_强制刷新按钮绑定销售设置修改权限(self):
+        button = re.search(r'<button\b(?=[^>]*id="btn-sales-rewrite")[^>]*>', BODY)
+        self.assertIsNotNone(button)
+        self.assertIn('data-op="modify"', button.group(0))
+        self.assertIn('data-op-page="sales-settings"', button.group(0))
+
+    def test_权限载荷缺失时导航内容与操作默认隐藏(self):
+        """权限 payload 缺失不能把受限菜单和操作按钮留在可见状态。"""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node 未安装，跳过前端执行检查")
+        script = r"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('let activeRoleOps = null;');
+const applyStart = source.indexOf('function applyProfile(', start);
+const end = source.indexOf('\n}\n', applyStart) + 3;
+assert(start >= 0 && applyStart > start && end > applyStart, 'missing permission renderer');
+const menu = [
+  { dataset: { tab: 'sales' }, hidden: false },
+  { dataset: { subtab: 'attain' }, hidden: false },
+  { dataset: { foot: 'timer' }, hidden: false },
+];
+const controls = [
+  { dataset: { op: 'export', opPage: 'attain' }, hidden: false },
+  { dataset: { op: 'export', opPage: 'monthly' }, hidden: false },
+  { dataset: { op: 'export', opPage: 'film' }, hidden: false },
+  { dataset: { op: 'export', opPage: 'benefit' }, hidden: false },
+  { dataset: { op: 'modify', opPage: 'attain' }, hidden: false },
+];
+const panels = [
+  { id: 'panel-sales', dataset: {}, hidden: false },
+  { id: 'subpanel-attain', dataset: {}, hidden: false },
+];
+const context = {
+  $$(selector) {
+    if (selector === '#sidebar [data-tab], #sidebar [data-subtab], #sidebar [data-foot]') return menu;
+    if (selector === '#sidebar .tab') return [];
+    if (selector === '[data-op]') return controls;
+    if (selector === '.panel, .subpanel') return panels;
+    return [];
+  },
+  $() { return null; },
+  document: { body: { classList: { toggle() {} } } },
+};
+vm.createContext(context);
+vm.runInContext(source.slice(start, end), context);
+context.applyProfile(undefined);
+assert(menu.every(item => item.hidden), 'missing role left menu visible');
+assert(controls.every(item => item.hidden), 'missing role left operation visible');
+assert(panels.every(item => item.hidden), 'missing role left page content visible');
+menu.forEach(item => { item.hidden = false; });
+controls.forEach(item => { item.hidden = false; });
+context.applyProfile({ role: 'store', can: {}, ops: {} });
+assert(menu.every(item => item.hidden), 'missing pages left menu visible');
+assert(controls.every(item => item.hidden), 'missing pages left operation visible');
+menu.forEach(item => { item.hidden = false; });
+controls.forEach(item => { item.hidden = false; });
+context.applyProfile({ role: 'store', pages: ['sales'] });
+assert(menu.every(item => item.hidden), 'missing role.ops left menu visible');
+assert(controls.every(item => item.hidden), 'missing role.ops left operation visible');
+assert(panels.every(item => item.hidden), 'missing role.ops left page content visible');
+context.applyProfile({ role: 'store', pages: ['sales', 'attain', 'monthly', 'film', 'benefit'],
+  ops: { attain: ['view'], monthly: ['view'], film: ['view'], benefit: ['view'] } });
+assert(controls.every(item => item.hidden), 'view-only role can see write/export controls');
+assert(panels.every(item => !item.hidden), 'valid profile kept page content hidden');
+context.applyProfile({ role: 'platform', pages: ['sales', 'attain', 'monthly', 'film', 'benefit'],
+  ops: { attain: ['view', 'export'], monthly: ['view', 'export'],
+    film: ['view', 'export'], benefit: ['view', 'export'] } });
+assert(controls.slice(0, 4).every(item => !item.hidden), 'authorized exports were hidden');
+assert(controls[4].hidden, 'platform role can see store-only modify control');
+""";
+        result = subprocess.run(
+            [node, "-e", script, str(ROOT / "web" / "common" / "nav.js")],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_总览读取失败会触发权限fail_closed(self):
+        start = APP_JS.index("async function loadOverview()")
+        end = APP_JS.index("\nasync function ", start + 1)
+        self.assertIn("applyProfile(null)", APP_JS[start:end])
 
     def test_侧边栏的状态也要拉(self):
-        """⚠ `loadOverview()` **不能删** —— 它不只是报量查询那页的数据，
+        """⚠ `loadOverview()` **不能删** —— 它不只是提供页面权限，
         侧边栏左下角的**门店名 / 会话·定时徽章**也是它填的。
 
         第一次改版时顺手删了它，左下角就一直停在「加载中…」、徽章也没字
-        （截图抓到的）。所以两个都要：`switchTab` 管当前页内容，
-        `loadOverview` 管这一圈的常驻状态。"""
-        self.assertIn("loadOverview();", self._boot(),
+        （截图抓到的）。所以首屏等它完成后再调用 `openFirstAvailablePage`。"""
+        self.assertIn("await loadOverview();", self._boot(),
                       "删了 loadOverview → 左下角门店信息永远是「加载中…」")
 
     def test_门店信息在左下角(self):
@@ -1180,14 +1699,15 @@ class Test历史记录页(unittest.TestCase):
             self.assertIn('id="%s"' % ident, seg)
 
     def test_加载器会去拉历史接口(self):
-        self.assertIn("'attain-history': () => loadAttainHistory()", APP_JS)
+        self.assertIn("registerPage('attain-history'", APP_JS)
+        self.assertIn("load: loadAttainHistory", APP_JS)
         self.assertIn("/api/attain/history", APP_JS)
 
     def test_刷新是回到最新那一周(self):
         """⚠ 用户预期是"刷新 = 看最新的"：停在 8 月那一周时点刷新，
         应该回到最新的那一周，而不是原地不动。"""
-        i = APP_JS.index("btn-refresh-attain-hist")
-        seg = APP_JS[i:i + 200]
+        i = APP_JS.index("function refreshAttainHistory")
+        seg = APP_JS[i:i + 180]
         self.assertIn("attainHistCur = ''", seg)
 
     def test_历史页的渲染里没有那条编辑链(self):
@@ -1472,12 +1992,16 @@ class Test三个刷新按钮会去抓新数据(unittest.TestCase):
     """
 
     def _handler(self, btn_id):
+        if btn_id == "btn-refresh-reports":
+            source = (ROOT / "web" / "features" / "compliance" / "comparison" / "page.js").read_text(
+                encoding="utf-8")
+            i = source.index("comparisonRefreshHandler = (event)")
+            return source[i:i + 400]
         i = APP_JS.index("$('#%s')" % btn_id)
         return APP_JS[i:i + 260]
 
     def test_三个按钮都接了_refreshWithFetch(self):
-        for btn, page in (("btn-refresh-attain", "attain"),
-                          ("btn-refresh-pos", "pos"),
+        for btn, page in (("btn-refresh-pos", "pos"),
                           ("btn-refresh-reports", "pools")):
             with self.subTest(btn=btn):
                 blk = self._handler(btn)
@@ -1485,6 +2009,8 @@ class Test三个刷新按钮会去抓新数据(unittest.TestCase):
                 self.assertIn("当前这页的加载器", blk) if False else None
                 # 跑完要重读这一页
                 self.assertIn("load", blk)
+        page = ROOT / "web" / "features" / "sales" / "attain" / "page.js"
+        self.assertIn("refreshWithFetch('attain'", page.read_text(encoding="utf-8"))
 
     def test_抓的是后台任务_不是同步等(self):
         i = APP_JS.index("async function refreshWithFetch(")
@@ -1517,7 +2043,7 @@ class Test库存盘点是同文档子面板(unittest.TestCase):
     | 22 日 | **拆 iframe、并进同文档** | 「真拆掉 iframe，盘点内容并进 #subpanel-inventory」 |
 
     ⇒ 现在是 `#subpanel-inventory` 里的 `.inv-root`（markup 直接在 index.html），
-      配色吃控制台主题；脚本由 `mountInventory` **懒注入**。
+      配色吃控制台主题；库存页面模块由公共导航生命周期**懒注入**。
     """
 
     def _panel(self):
@@ -1529,9 +2055,11 @@ class Test库存盘点是同文档子面板(unittest.TestCase):
         return INDEX_HTML[i:j]
 
     def test_二级项是普通子面板_不再另开页(self):
-        """⚠ 别再有 `data-page` / `window.open` —— 那是上午那版，被用户否了。"""
+        """一级入口直达同文档盘点；设置仍是唯一菜单项，不另开页面。"""
         menu = _nav_item("inventory", nxt=None)
-        self.assertIn('data-subtab="inventory"', menu)
+        self.assertIn('data-direct-subtab="inventory"', menu)
+        self.assertIn('data-subtab="inventory-settings"', menu)
+        self.assertNotIn('data-subtab="inventory"', menu)
         self.assertNotIn("data-page", menu)
         self.assertNotIn("window.open('/inventory.html'", APP_JS)
         self.assertNotIn("btn-open-inventory", INDEX_HTML)
@@ -1558,8 +2086,8 @@ class Test库存盘点是同文档子面板(unittest.TestCase):
         self.assertIn('id="setup"', inv_only)
 
     def test_脚本懒注入且只注一次(self):
-        i = APP_JS.index("function mountInventory(")
-        blk = APP_JS[i:i + 600]
+        i = INV_PAGE_JS.index("function loadInventoryAssets(")
+        blk = INV_PAGE_JS[i:i + 700]
         self.assertIn("_invScriptsLoaded", blk, "注入只做一次，别每次切都重跑 main")
         self.assertIn("focusInvScan()", blk, "切过来要把焦点交给扫码框")
         self.assertIn("/inventory/", blk, "从 web/inventory/ 注入五个 js")
@@ -1568,18 +2096,29 @@ class Test库存盘点是同文档子面板(unittest.TestCase):
         self.assertIn("ui", blk)
 
     def test_切过去会挂载(self):
+        self.assertIn("registerPage('inventory'", INV_PAGE_JS)
+        self.assertIn('src="/features/inventory/page.js?v=', INDEX_HTML)
+        self.assertLess(INDEX_HTML.index('src="/features/inventory/page.js?v='),
+                        INDEX_HTML.index('src="/app.js?v='))
         i = APP_JS.index("const SUBTAB_LOADERS = {")
         blk = APP_JS[i:APP_JS.index("};", i)]
-        self.assertIn("inventory: () => mountInventory()", blk)
+        self.assertNotIn("inventory:", blk)
+        self.assertNotIn("function mountInventory(", APP_JS)
 
     def test_焦点丢了还能扫(self):
         """同文档后不再 postMessage；靠 focusInvScan + ui.js 自己的 keydown。"""
-        i = APP_JS.index("$('#subpanel-inventory')?.addEventListener('mousemove'")
-        self.assertIn("focusInvScan()", APP_JS[i:i + 300])
+        i = INV_PAGE_JS.index("function onInventoryMouseMove(")
+        self.assertIn("focusInvScan()", INV_PAGE_JS[i:i + 300])
         self.assertNotIn("postMessage({ ic: 'scan-key'", APP_JS, "拆 iframe 后不该再转按键")
         # ui.js 在扫码台可见时自己 focusScan（全局 keydown）
         self.assertIn("function focusScan(", INV_UI_JS)
         self.assertIn("if (e.key.length === 1) focusScan()", INV_UI_JS)
+
+    def test_离开库存会解绑控制台焦点监听(self):
+        self.assertIn("registerPage('inventory'", INV_PAGE_JS)
+        self.assertIn("unmount: unmountInventoryPage", INV_PAGE_JS)
+        self.assertIn("removeEventListener('mousemove', onInventoryMouseMove)", INV_PAGE_JS)
+        self.assertIn("removeEventListener('keydown', onInventoryKeyDown)", INV_PAGE_JS)
 
     def test_嵌进去时不重复自我介绍(self):
         """同文档靠 CSS 藏大标题；applyEmbed 不许再往 body 上加 embed。"""

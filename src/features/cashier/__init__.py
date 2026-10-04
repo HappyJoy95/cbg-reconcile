@@ -18,6 +18,22 @@ from __future__ import annotations
 from ..registry import Feature, Sub
 
 #: 收银录入 —— `data-subtab="cashier"`，落 `#subpanel-cashier`
-SUB = Sub(key="cashier", label="收银录入", order=10)
+SUB = Sub(audience=("erp", "platform", "lifehall"), data="store", ops={op: ("store",) for op in ("view", "enter", "modify", "export")},
+    key="cashier", label="收银录入", order=10)
 
-FEATURE = Feature(key="cashier", label="收银", order=60, types="", children=[SUB])
+FEATURE = Feature(audience=("erp", "platform", "lifehall"), key="cashier", label="收银", order=60, types="", children=[SUB])
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/cashier/entries', 'cashier', 'view'),
+    ('GET', '/api/cashier/lookup', 'cashier', 'view'),
+    ('GET', '/api/cashier/import-settings', 'cashier', 'view'),
+    ('PUT', '/api/cashier/import-settings', 'cashier', 'modify'),
+    ('POST', '/api/cashier/entry-save', 'cashier', 'enter'),
+    ('POST', '/api/cashier/entry-delete', 'cashier', 'modify'),
+    ('POST', '/api/cashier/policy-refresh', 'cashier', 'modify'),
+    ('POST', '/api/cashier/import', 'cashier', 'enter'),
+    ('POST', '/api/cashier/exclude', 'cashier', 'modify'),
+    ('POST', '/api/cashier/commit', 'cashier', 'enter'),
+    ('POST', '/api/cashier/export', 'cashier', 'export'),
+)

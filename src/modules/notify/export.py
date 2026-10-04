@@ -49,9 +49,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ...storage import runlog
-
-#: 导出件落哪儿（相对 `ROOT`）。**改这儿一处**，界面上的说明也跟着它走。
-EXPORT_DIR = "out/exports"
+from ...storage.export_paths import EXPORT_DIR, export_dir
 
 #: 结局 —— 和 `send()` 那两个一个风格（`state` 恒在，调用方按它分支）。
 WRITTEN = "written"
@@ -68,12 +66,6 @@ MAX_STEM = 60
 
 #: Excel 的表名上限（硬限制），超了 openpyxl 直接抛。
 MAX_SHEET = 31
-
-
-def export_dir(root=None, subdir: str = EXPORT_DIR) -> Path:
-    """导出件目录（绝对路径）。"""
-    from ...paths import ROOT
-    return Path(root or ROOT) / subdir
 
 
 def safe_stem(name: str) -> str:

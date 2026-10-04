@@ -32,7 +32,9 @@ class TestPosTabWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = (_repo_root() / "web" / "index.html").read_text(encoding="utf-8")
-        cls.js = (_repo_root() / "web" / "app.js").read_text(encoding="utf-8")
+        cls.js = "\n".join((_repo_root() / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "app.js"))
+        cls.page_js = (_repo_root() / "web" / "features" / "compliance" / "pos" / "page.js").read_text(encoding="utf-8")
 
     def test_nav_里有_pos_按钮(self):
         # ⚠ 2026-09-18 前端融合改版：POS 从**一级页签**降到
@@ -44,16 +46,29 @@ class TestPosTabWiring(unittest.TestCase):
     def test_panel_id_和_data_tab_对得上(self):
         self.assertIn('id="subpanel-pos"', self.html)
 
+    def test_pos_有自己的注册页面脚本(self):
+        self.assertRegex(self.html, r'<script src="/features/compliance/pos/page.js\?v=\d+"></script>')
+        page = _repo_root() / "web" / "features" / "compliance" / "pos" / "page.js"
+        self.assertTrue(page.is_file(), "POS 业务脚本应独立落在自己的目录")
+        code = page.read_text(encoding="utf-8")
+        self.assertIn("registerPage('pos'", code)
+        self.assertIn("function unmountPosPage()", code)
+        self.assertIn("posPageReadController.abort()", code)
+
     def test_appjs_里有分发行和两个函数(self):
-        # 分发表在 `SUBTAB_LOADERS` 里（二级标签 → 拉什么数据）
-        self.assertIn("pos: () => loadPos()", self.js)
-        self.assertIn("async function loadPos", self.js)
-        self.assertIn("function renderPos", self.js)
+        # POS 由页面注册表接入，公共 app.js 不保留业务渲染分支。
+        page = (_repo_root() / "web" / "features" / "compliance" / "pos" / "page.js")
+        code = page.read_text(encoding="utf-8")
+        self.assertNotIn("pos: () => loadPos()", self.js)
+        self.assertNotIn("async function loadPos", self.js)
+        self.assertNotIn("function renderPos", self.js)
+        self.assertIn("async function loadPos", code)
+        self.assertIn("function renderPos", code)
 
     def test_appjs_引用的_pos_id_都在_html_里(self):
         """`$('#pos-xxx')` 打错就是**静默失效**（拿不到元素，不抛错）。"""
         import re
-        ids = set(re.findall(r"\$\('#([a-z0-9-]+)'\)", self.js))
+        ids = set(re.findall(r"\$\('#([a-z0-9-]+)'\)", self.js + "\n" + self.page_js))
         have = set(re.findall(r'id="([a-z0-9-]+)"', self.html))
         missing = sorted(i for i in ids if i.startswith("pos-") and i not in have)
         self.assertEqual(missing, [], "app.js 引用了 html 里没有的 id（页面上会静默失效）")
@@ -66,7 +81,7 @@ class TestPosTabWiring(unittest.TestCase):
         ⚠ 断言只扫 **POS 那一段**：`kpi ok` 在「报告」页的卡片里本来就有，
         扫整个 app.js 会误报（第一版就是这么红的）。
         """
-        pos_js = self.js[self.js.index("POS 合规 ─"):self.js.index("总览 ─")]
+        pos_js = self.page_js
         self.assertIn("不按达标线染色", pos_js)
         for cls in ("kpi ok", "kpi warn", "kpi bad"):
             self.assertNotIn(cls, pos_js, "POS 卡片不该有达标色 —— 达标线还没定")

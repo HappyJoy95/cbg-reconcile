@@ -23,8 +23,9 @@ import datetime
 import json
 import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 #: 收信库 —— **独立一个文件**：绝不和本机自己抓的数据混在一张表里
 #: （四·八边界 5；这个项目最怕"两份数据混着还看不出来"）。
@@ -57,6 +58,10 @@ SPLIT_PROTOCOLS = (1,)
 
 #: 收信时最多往回扫几封（本地筛，见 `fetch.mail` 那段"QQ 的 SUBJECT 是假筛"）。
 SCAN = 200
+
+# 没有身份上下文的直接调用不得暗中获得平台全量权限。只有上层先验证平台
+# 身份、再显式传入 None，才表示允许全公司导入；普通范围用门店编码集合表示。
+_SCOPE_UNSET = object()
 
 #: 收信侧支持的协议版本（不认识的要说出来、跳过、记 `skips`）。
 PROTOCOLS = (1,)
@@ -329,7 +334,7 @@ def configured(cfg=None, root=None) -> tuple:
       报错的话门店天天看到一条红的，然后就不看了。
     """
     try:
-        from .. import mailer
+        from ..integrations import mailer
         from ..modules.fetch import mail as fetch_mail
         # ⚠ 用 `fetch.mail.config()`（= `mailer.imap_config`，**口径只在那一处**）——
         #   它管着"中台邮箱只有平台岗会读"这条规矩：门店/区长没配自己的账号就返回 `{}`，
@@ -341,7 +346,7 @@ def configured(cfg=None, root=None) -> tuple:
     return (not bad), "、".join(bad)
 
 
-def _unsealed(a, root, out, say):
+def _unsealed(a, root, out, say, *, reveal=True):
     """把一个附件**解密**（不是密文就原样过 —— 见 `fetch.unseal_attachment`）。
 
     返回 `None` = 解不开（缺密钥 / 密钥不对 / 被改过）。⚠ 调用方**必须**处理它：
@@ -359,21 +364,57 @@ def _unsealed(a, root, out, say):
     why = how.get("why") or "解不开"
     # ⚠ **要说出来**：这一行会进 M20「数据交换」页那块「收信的问题」，
     #   区长/平台一眼看得出"是包坏了还是这台机器缺密钥"。
-    out["problems"].append("%s：%s" % (name, why))
-    say("  ⚠ %s 收不下：%s" % (name, why))
+    if reveal:
+        out["problems"].append("%s：%s" % (name, why))
+        say("  ⚠ %s 收不下：%s" % (name, why))
     return None
 
 
+def _manifest_from_bytes(data) -> dict:
+    """从未落盘附件读取 manifest；授权范围过滤前不把原件写入 `in/`。"""
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="cbg-inbox-", suffix=".db",
+                                         delete=False) as stream:
+            path = Path(stream.name)
+            stream.write(data or b"")
+        return read_manifest(path)
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _split_store_code_from_bytes(data) -> str:
+    try:
+        raw = json.loads((data or b"").decode("utf-8-sig"))
+    except (AttributeError, UnicodeDecodeError, ValueError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("store_code") or "").strip()
+
+
 def run(root, *, cfg=None, config_path=None, limit: int = SCAN, dry_run: bool = False,
-        emit=None) -> dict:
+        allowed_store_codes=_SCOPE_UNSET, emit=None) -> dict:
     """**daily 里那一步**：把邮箱里还没落库的包收进来。
 
     ⚠ 收信**不改"已读"状态**（不动别人的邮箱）；同一封重收 = 覆盖，安全。
+    未提供 `allowed_store_codes` 或传空集合都拒绝导入；只有身份入口明确传入
+    `allowed_store_codes=None` 才表示全量授权。
     """
     from ..modules.fetch import mail as fetch_mail   # ⚠ 包 `__init__` 没 import 子模块
     from ..paths import ROOT
     say = emit or (lambda _s: None)
     root = Path(root or ROOT)
+    allowed = (frozenset() if allowed_store_codes is _SCOPE_UNSET else
+               None if allowed_store_codes is None else
+               frozenset(str(code or "").strip() for code in allowed_store_codes
+                         if str(code or "").strip()))
     out = {"ok": True, "skipped": "", "mails": 0, "ok_packages": 0, "skipped_packages": 0,
            "rows": 0, "stores": [], "problems": []}
     if cfg is None:
@@ -413,11 +454,22 @@ def run(root, *, cfg=None, config_path=None, limit: int = SCAN, dry_run: bool = 
             #   ⚠ 认的是主题前缀 —— 别的功能发来的 .json 附件（以后可能有）不碰。
             if jsons and SPLIT_PREFIX.strip("[]") in subj:
                 for a in jsons:
-                    p = keep / a["filename"]
-                    data = _unsealed(a, root, out, say)
-                    if data is None:               # 解不开：原件留着排查，不落库
+                    data = _unsealed(a, root, out, say,
+                                     reveal=allowed is None)
+                    if data is None:
+                        # 授权失败时也不在 `in/` 留下区外邮件原件。
+                        if allowed is not None:
+                            out["skipped_packages"] += 1
+                            continue
+                        p = keep / a["filename"]
                         p.write_bytes(a.get("data") or b"")
                         continue
+                    if allowed is not None:
+                        code = _split_store_code_from_bytes(data)
+                        if not code or code not in allowed:
+                            out["skipped_packages"] += 1
+                            continue
+                    p = keep / a["filename"]
                     p.write_bytes(data)
                     res = import_split(root, p, subject=subj,
                                        mail_date=it.get("date") or "", conn=conn)
@@ -437,11 +489,21 @@ def run(root, *, cfg=None, config_path=None, limit: int = SCAN, dry_run: bool = 
                 out["problems"].append("「%s」没有 .db 附件" % subj)
                 continue
             for a in atts:
-                p = keep / a["filename"]
-                data = _unsealed(a, root, out, say)
+                data = _unsealed(a, root, out, say,
+                                 reveal=allowed is None)
                 if data is None:                   # 解不开：原件留着排查，不落库
-                    p.write_bytes(a.get("data") or b"")
+                    if allowed is None:
+                        p = keep / a["filename"]
+                        p.write_bytes(a.get("data") or b"")
+                    else:
+                        out["skipped_packages"] += 1
                     continue
+                if allowed is not None:
+                    code = str(_manifest_from_bytes(data).get("store_code") or "").strip()
+                    if not code or code not in allowed:
+                        out["skipped_packages"] += 1
+                        continue
+                p = keep / a["filename"]
                 p.write_bytes(data)
                 if dry_run:
                     man = read_manifest(p)

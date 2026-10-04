@@ -26,9 +26,11 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/tools/claim/page.js", "app.js"))
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-WEB_PY = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+WEB_PY = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
 
 
 def _fn(src: str, name: str) -> str:

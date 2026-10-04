@@ -416,24 +416,31 @@ class Test接口与前端接线(unittest.TestCase):
         self.assertEqual(got["period"], "2026-W38")
         self.assertEqual(got["rows"][0]["total"], 1.2, "3/2 要封顶到 120%")
 
-    def test_路由在(self):
-        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
-        self.assertIn('path == "/api/attain"', src)
+    def test_路由归达成业务模块(self):
+        src = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        from src.features.sales.attain import http
+        self.assertIn(("GET", "/api/attain"), http.ROUTES)
+        self.assertIn(("PUT", "/api/attain/split"), http.ROUTES)
+        self.assertIn("attain_http.handle(", src)
 
     def test_前端进页面就拉(self):
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("attain: () => loadAttain(true)", js)
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
+        self.assertIn("registerPage('attain'", js)
+        self.assertIn("load: loadAttain", js)
 
     def test_占位函数已经删掉(self):
         """⚠ 留着的话，接口真坏了门店会看到一句**关于开发进度**的话
         （"还没接上 M4"），既看不懂也没法处理。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertNotIn("renderAttainPlaceholder", js)
         self.assertNotIn("还没接上数据", js)
 
     def test_读不到时说人话(self):
         """读不到 = 后端给 `error`（"还没算过"），不是"接口没上"。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         body = js.split("async function loadAttain(", 1)[1].split("\n}", 1)[0]
         self.assertIn("d.error", js, "renderAttain 要用后端给的 error")
         self.assertNotIn("M4", body)
@@ -606,7 +613,8 @@ class Test推送(unittest.TestCase):
         ⚠ 必须包 `{html: …}` —— `table()` 对字符串单元格默认转义，
           直接写 `<br>` 会在页面上原样显示（AGENTS.md 坑 3，踩过三次）。
         """
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         blk = js[js.index("function renderAttain("):js.index("$('#btn-refresh-attain')")]
         self.assertIn("{ html:", blk, "没包 {html:…}，<br> 会被转义成文字")
         # ⚠ 2026-09-19 最终形态（用户两条）：左边上下两行台量、**右边达成率**；
@@ -642,7 +650,8 @@ class Test推送(unittest.TestCase):
         表现极像"前端没更新"（缓存 / 进程 / 宽度都查过一轮），
         真正的原因就是**少一对括号**。所以这条专门钉住那个括号。
         """
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         i = js.index("const header = ['区域', '门店'")
         blk = js[i:i + 400]
         self.assertIn("=> ({", blk, "箭头函数返回对象必须加括号，否则返回 undefined")
@@ -704,7 +713,8 @@ class Test谁卖的(unittest.TestCase):
         * ⚠ 浮层必须 `position: fixed` —— 表格外面那层 `.table-scroll` 是
           `overflow-x: auto`，**溢出容器会把绝对定位的浮层裁掉**。
         """
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
         # ⚠ 小圆点**已去掉**（用户：触发器是整个格子，圆点没必要常驻）
         self.assertNotIn("attain-dot", js)
@@ -746,14 +756,16 @@ class Test悬停面板别重放(unittest.TestCase):
     """
 
     def test_同一格不重放(self):
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("attainCurKey", js, "没记住'现在是哪一格'")
         self.assertIn("if (key === attainCurKey) return;", js, "同一格要直接返回")
         self.assertIn("attainCurKey = '';", js, "离开格子要清掉，不然回到同一格不弹")
 
     def test_触发面是整个单元格(self):
         """「这个区域内的空白区域也要」——认 `td`，不认那几个数字拼出来的小盒子。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("t.closest('td')", js)
         self.assertIn("td.cellIndex - 3", js, "前三列是区域、门店和标签")
         # ⚠⚠ 2026-09-22 串页 bug：`attainPeople` 会一直留着，别的页表格一悬停
@@ -762,14 +774,16 @@ class Test悬停面板别重放(unittest.TestCase):
         self.assertNotIn("attain-cell[data-r]", js, "别再靠挂在 span 上的标记找格子")
 
     def test_同一格不重放(self):
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("attainCurKey", js, "没记住'现在是哪一格'")
         self.assertIn("if (key === attainCurKey) return;", js, "同一格要直接返回")
         self.assertIn("attainCurKey = '';", js, "离开格子要清掉，不然回到同一格不弹")
 
     def test_触发面是整个单元格(self):
         """「这个区域内的空白区域也要」——认 `td`，不认那几个数字拼出来的小盒子。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("t.closest('td')", js)
         self.assertIn("td.cellIndex - 3", js, "前三列是区域、门店和标签")
         # ⚠⚠ 2026-09-22 串页 bug：`attainPeople` 会一直留着，别的页表格一悬停
@@ -802,7 +816,8 @@ class Test悬停面板别重放(unittest.TestCase):
           * 最后一段是**纯英文短码**（`RTX5070-`）⇒ 也往前接；
           * 什么都剩不下 ⇒ **退回原名**（宁可长，不能空）。
         """
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         i = js.index("const short = (n) => {")
         blk = js[i:js.index("\n  };", i)]
         self.assertIn("lastIndexOf", js, "先按最右边的 `/` 切")
@@ -831,7 +846,8 @@ class Test达成率标色开关(unittest.TestCase):
     """
 
     def setUp(self):
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
         self.html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
@@ -1459,7 +1475,8 @@ class Test合计跟着目标拆分刷新(unittest.TestCase):
       （页面上看着一切正常，就是数不动）。
     """
 
-    JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
 
     def _edit_block(self):
         i = self.JS.index("const sp = e.target.closest && e.target.closest('.split-edit')")
@@ -1509,7 +1526,8 @@ class Test拆分那两个按钮真的接了线(unittest.TestCase):
     """
 
     def setUp(self):
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
 
     def test_两个按钮都有处理器(self):
         for attr in ("data-detail-save", "data-detail-send"):
@@ -1553,7 +1571,8 @@ class Test展开收起有上下动画(unittest.TestCase):
     """
 
     def setUp(self):
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
     def _fn(self, name):
@@ -1719,9 +1738,10 @@ class Test分区汇总(unittest.TestCase):
         """用户 2026-09-22：「周度重点产品分区错了」——
         腾讯文档 A 列是 `城阳\\n胶州`，**不能压过** stores.yaml 的西北区/市区/南区。
         （原来 `if not r.get("region")` 才补 ⇒ 文档分区非空就永远补不上。）"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("planNormRegion", js, "分组键要跟后端 region_sums 同一把尺")
-        web = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
+        self.assertIn("normalizeRegionName", js, "分组键要跟后端 region_sums 同一把尺")
+        web = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
         self.assertIn("yaml_reg", web, "接口层要拿 yaml 区域覆盖文档 A 列")
         self.assertNotIn('if not r.get("region"):\n                r["region"] = regmap.get(',
                          web, "不能再只在 region 为空时才补 —— 文档分区非空就补不上")
@@ -1731,7 +1751,8 @@ class Test分区汇总(unittest.TestCase):
     def test_前端区汇总默认不画_点区域名才收起(self):
         """用户 2026-09-22 纠正：汇总行**不要常驻** ——
         默认只列门店；点区域名把该区收成一行 `region_sums` 汇总。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("region_sums", js, "前端要读后端算好的分区汇总")
         self.assertIn("cls: 'film-sum'", js, "汇总行要挂 film-sum（红底白字）")
         self.assertIn("attainPeople.push([])", js,
@@ -1742,11 +1763,12 @@ class Test分区汇总(unittest.TestCase):
                       "只有收起的区才画汇总行，不是每区末尾常驻")
         self.assertIn("if (!gCollapsed)", js, "收起的区不画门店明细行")
         self.assertIn("cbg-attain-collapsed-regions", js, "收起态要落 localStorage")
-        self.assertIn("planNormRegion(r.region)", js,
+        self.assertIn("normalizeRegionName(r.region)", js,
                       "周度分组键也要跟后端 region_sums 同一把尺")
 
     def test_table_支持行级_class(self):
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/sales/attain/page.js", "app.js"))
         self.assertIn("'cells' in r", js, "table() 要认 {cls, cells} 行对象")
         self.assertIn("rcls", js)
 

@@ -268,12 +268,12 @@ class Test给人看的文案(unittest.TestCase):
 class Test采集点真的会记(_DbCase):
     """⚠ 判据再好，**没人写记录**也是空的 —— 这三条盯的是"埋点真的在"。
 
-    埋点在编排层（`cli.cmd_dump` / `cli.cmd_pools`），因为它们内部有六七处早期返回，
-    挨个埋必漏；而"什么时候算一次尝试"本来就是编排的事。
+    dump 的埋点在 `modules.fetch.execution.run_dump`；通用采集器也由该执行模块
+    统一记录。CLI 只提供 `_record_fetch` 服务，不在命令壳里决定尝试何时开始。
     """
 
     def test_端到端_抓失败也会留一笔(self):
-        """跑一次**真的** `cmd_dump`（把华为那边换成假货），失败要留痕。"""
+        """跑一次**真的** dump 执行入口（把华为那边换成假货），失败要留痕。"""
         from src import cli
         sess = self.root / "s.json"
         sess.write_text("{}", encoding="utf-8")

@@ -121,7 +121,7 @@ def migrate_from_legacy(cfg: dict, root=None) -> bool:
     """
     if has_file(root):
         return False
-    from . import mailer, wecom
+    from .integrations import mailer, wecom
     mc = mailer.load_mail_config(cfg, root)
     wc = wecom.load_wecom_config(cfg, root)
     mail_rows = ensure_ids([r] if (r := mail_row_from_legacy(mc)) else [])

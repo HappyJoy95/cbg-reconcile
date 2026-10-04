@@ -234,3 +234,81 @@ class Test依赖方向(unittest.TestCase):
         for pkg in ("features", "features/compliance", "features/compliance/pos", "app"):
             self.assertTrue((SRC / pkg / "__init__.py").is_file(),
                             f"src/{pkg}/__init__.py 不在")
+
+
+class Test运行支撑模块迁移兼容(unittest.TestCase):
+    """运行支撑实现搬入目录后，旧导入路径必须是新模块本身。
+
+    只转发几个公开名字会让旧测试替身、模块级补丁和共享单例悄悄分叉；
+    因此兼容入口必须与新路径解析到同一个 module object。
+    """
+
+    MOVES = (
+        ("src.erp", "src.integrations.erp"),
+        ("src.erp_stub", "src.integrations.erp_stub"),
+        ("src.cbg", "src.integrations.cbg"),
+        ("src.browser", "src.integrations.browser"),
+        ("src.cdp", "src.integrations.cdp"),
+        ("src.tdoc", "src.integrations.tdoc"),
+        ("src.pmall", "src.integrations.pmall"),
+        ("src.mailer", "src.integrations.mailer"),
+        ("src.wecom", "src.integrations.wecom"),
+        ("src.autostart", "src.desktop.autostart"),
+        ("src.elevate", "src.desktop.elevate"),
+        ("src.runtime", "src.desktop.runtime"),
+        ("src.schedule", "src.desktop.schedule"),
+        ("src.service", "src.desktop.service"),
+        ("src.winutil", "src.desktop.winutil"),
+        ("src.runner", "src.desktop.runner"),
+        ("src.web", "src.http"),
+    )
+
+    def test_所有旧路径与新路径是同一个模块对象(self):
+        import importlib
+
+        for old_name, new_name in self.MOVES:
+            with self.subTest(old=old_name, new=new_name):
+                old = importlib.import_module(old_name)
+                new = importlib.import_module(new_name)
+                self.assertIs(old, new, "%s 与 %s 不是同一个模块对象" %
+                              (old_name, new_name))
+
+    def test_旧路径上的模块级补丁能从新路径看到(self):
+        import importlib
+
+        old = importlib.import_module("src.erp")
+        new = importlib.import_module("src.integrations.erp")
+        marker = object()
+        had = hasattr(old, "_migration_patch_probe")
+        previous = getattr(old, "_migration_patch_probe", None)
+        try:
+            old._migration_patch_probe = marker
+            self.assertIs(new._migration_patch_probe, marker)
+        finally:
+            if had:
+                old._migration_patch_probe = previous
+            else:
+                del old._migration_patch_probe
+
+    def test_web兼容路径的补丁也进入HTTP实现命名空间(self):
+        import importlib
+
+        web = importlib.import_module("src.web")
+        http = importlib.import_module("src.http")
+        implementation = importlib.import_module("src.http.app")
+        original = web.role_scope
+        replacement = lambda _app: {"role": "migration-probe"}
+        try:
+            web.role_scope = replacement
+            self.assertIs(http.role_scope, replacement)
+            self.assertIs(implementation.role_scope, replacement)
+        finally:
+            web.role_scope = original
+
+    def test_HTTP路由策略集中在独立模块并由旧入口公开(self):
+        import importlib
+
+        web = importlib.import_module("src.web")
+        policy = importlib.import_module("src.http.policy")
+        self.assertIs(web._build_page_rules, policy.build_page_rules)
+        self.assertIs(web._build_perm_rules, policy.build_perm_rules)

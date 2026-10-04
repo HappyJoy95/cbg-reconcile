@@ -89,9 +89,12 @@ class Test注册表收窄(unittest.TestCase):
                          "theme", "linglong", "update"}.issubset(edition.LIFEHALL_PAGES))
         self.assertNotIn("badge", edition.LIFEHALL_PAGES)
         self.assertIn('id="lifehall-weather"', html)
-        # 三个平级直连入口（⭐ 2026-09-29 加了「收银」—— 利润核算录入端）
-        for key in ("pricetag", "claim-pending", "cashier"):
-            self.assertIn('data-direct-subtab="%s"' % key, html)
+        # ⭐ 2026-10-02（用户）：价签 / 权益**不再平铺** —— 统一走「小工具」下拉；
+        #   生活馆的平级直连只剩「收银」。
+        self.assertIn('data-direct-subtab="cashier"', html)
+        for key in ("pricetag", "claim-pending"):
+            self.assertNotIn('data-direct-subtab="%s"' % key, html,
+                             "%s 应该只在小工具下拉里" % key)
 
     def test_刷新待领走dump(self):
         import src.web as web

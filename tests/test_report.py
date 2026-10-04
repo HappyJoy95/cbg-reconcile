@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from src.reconcile import ReconcileResult
-from src.report import delete_report, list_reports, report_path, write_report
+from src.report import delete_report, list_reports, load_report, report_path, write_report
 
 CTX = {"门店": "青岛新业广场店", "华为门店编码": "SCN231409", "串号标识": "Y",
        "目标日": "2026-09-14", "销售区间": "x", "华为区间": "y",
@@ -113,6 +113,16 @@ class TestListReports(unittest.TestCase):
     def test_empty_dir(self):
         self.assertEqual(list_reports(self.out), [])
         self.assertEqual(list_reports(self.out / "不存在"), [])
+
+    def test_corrupt_sidecar_falls_back_to_workbook_summary(self):
+        path = write_report(self.out, self.res, CTX, "2026-09-14", "SCN231409")
+        path.with_suffix(".json").write_text("{broken", encoding="utf-8")
+
+        report = load_report(path)
+
+        self.assertTrue(report["summary"]["_derived"])
+        self.assertEqual(report["summary"]["missing"], 0)
+        self.assertIn("玲珑无但云商有", report["sheets"])
 
 
 class TestDeleteReport(unittest.TestCase):

@@ -494,13 +494,16 @@ class Test接口(unittest.TestCase):
         self.assertIn("xlsx", got["error"])
 
     def test_接口路由都在(self):
-        """路由是手写的 if 链 —— 少一条就是前端 404，而 Python 测试全绿。"""
-        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        """业务模块明确列全路由，公共入口只按路径委托。"""
+        src = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        from src.features.inventory import http as inventory_http
+        routes = {path for _method, path in inventory_http.ROUTES}
         for path in ("/api/inventory/ready", "/api/inventory/warehouses",
                      "/api/inventory/book", "/api/inventory/transit",
                      "/api/inventory/index", "/api/inventory/export"):
             with self.subTest(path=path):
-                self.assertIn('path == "%s"' % path, src)
+                self.assertIn(path, routes)
+        self.assertIn('path.startswith("/api/inventory/")', src)
 
 
 if __name__ == "__main__":

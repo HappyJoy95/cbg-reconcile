@@ -8,4 +8,4 @@ from __future__ import annotations
 
 from ...registry import Sub
 
-SUB = Sub(key="inventory-settings", label="设置", order=90)
+SUB = Sub(ops={"view": ("store", "manager", "platform"), "modify": ("store", "manager", "platform")}, key="inventory-settings", label="设置", order=90)

@@ -47,6 +47,32 @@ from typing import Callable, List, Optional, Tuple
 #: 「什么时候唤醒」的值对象住在**计时模块**里（那是这件事的归属），
 #: 功能模块只负责**声明**。⚠ 它是纯的（零 IO、不 import 本模块）⇒ 不成环。
 from ..modules.timer.when import When, describe as _describe_whens
+from ..modules.fetch.execution import run_dump, run_erp_dump
+
+# ──────────────── 注册协议 v2（2026-10-02 功能注册制）────────────────
+#
+# 业务在注册时**自己声明**操作与数据范围，统一机制拿这两张词表去执行：
+# 前端显隐、后端 403、数据过滤都从声明派生 —— 未声明 = 默认拒绝。
+#
+# ⚠ 词表只许在这儿定义一次（红线：两份判据走散的表现是"菜单藏了、接口还给"）。
+
+#: **操作词表**（固定四个）—— 业务声明"我这一页有哪几种操作"。
+OPS = ("view", "enter", "modify", "export")          # 查看 / 录入 / 修改 / 导出
+
+#: 操作的**给人看的名字**（403 文案、界面用；词表变了这里要跟）。
+OP_LABELS = {"view": "查看", "enter": "录入", "modify": "修改", "export": "导出"}
+
+#: 操作声明里的**身份词** = `role_scope()` 的三种角色。
+#: ⚠ 跟 `types` 的可见性词表（experience/partner/platform/multi）**是两套**：
+#:   那套回答"哪个**店**看得见这一页"，这套回答"哪个**身份**能做什么操作"。
+OP_ROLES = ("store", "manager", "platform")
+
+#: **通用数据范围**两档：只本店 / 本店+获授权门店（区长辖区、平台全部）。
+#: 缺省按最窄的 `store` 算 —— 默认值宁可小，别默认放大。
+DATA_SCOPES = ("store", "authorized")
+
+# 进入方式与操作角色、门店类型独立；None 继承，空元组明确拒绝。
+AUDIENCES = ("erp", "platform", "lifehall")
 
 
 @dataclass
@@ -85,6 +111,22 @@ class Step:
     #: ⚠ 命令行上的 `--skip-dump` / `--steps` 是**调试后门**，不受这里约束
     #:   （人在旁边看着才用，界面上没有入口）。
     required: bool = False
+    #: ⭐ **合作店（不走玲珑的店）跑不跑这一步**（注册协议 v2，2026-10-02）——
+    #:   收编 `run_daily` 里那张**写死的合作店白名单**（当年 autoupdate / report
+    #:   漏进白名单被静默早退过两次，坑记在 `run_daily` 注释里）。
+    #:
+    #: ⚠ 缺省 True = "没声明就照跑" —— 新步骤在合作店上**跑了报错**（看得见），
+    #:   比默认 False 的"静默不跑"好；依赖玲珑数据的步骤必须显式 `partner_ok=False`。
+    partner_ok: bool = True
+    #: ⭐ **这一步失败要不要中止后面的**（注册协议 v2）——
+    #:   收编 `run_daily._ABORT_AFTER`（dump/erp-dump 失败后，后面的步骤读的就是
+    #:   它们没写进去的库，继续跑只会拿旧数据出一份"看着正常"的报告）。
+    fatal: bool = False
+    #: ⭐ **跑完要不要记进汇总**（注册协议 v2）—— 缺省 True。
+    #:   `False` = 引擎不把它放进 `done`（退出码与汇总行都不算它）：
+    #:   autoupdate 用它 —— "刚换完代码的进程"不该决定这一趟的退出码
+    #:   （历史规矩，见 `run_daily` 里那段注释）。
+    record: bool = True
 
 
 @dataclass
@@ -96,6 +138,13 @@ class Sub:
     order: int = 50
     types: str = ""               # 比父更窄的可见性（空 = 继承父）
     step: Optional[Step] = None   # 有步骤 ⇒ 会被 daily 唤醒；没有就是纯页面（如「设置」）
+    #: ⭐ 操作声明（注册协议 v2）：`{op: (允许的身份, ...)}`，见文件头 `OPS`/`OP_ROLES`。
+    #:   `None`/空 = 继承父 Feature；两头都没声明 = 这一页**没人能做任何操作**
+    #:   （后端 `web.require()` 会拒 —— 默认拒绝，不是默认放行）。
+    ops: Optional[dict] = None
+    #: ⭐ 数据范围声明：`""` = 继承父（Feature 缺省 `store`），见 `DATA_SCOPES`。
+    data: str = ""
+    audience: Optional[Tuple[str, ...]] = None
 
 
 @dataclass
@@ -108,6 +157,16 @@ class Feature:
     types: str = ""               # "" = 三类门店都看；否则是 `experience platform` 这种
     children: List[Sub] = field(default_factory=list)
     home: str = ""                # 点一级标签落在哪个子面板（默认第一个子）
+    #: ⭐ 操作 / 数据范围的**父级默认**（子不写就继承这两样），语义同 `Sub`。
+    ops: Optional[dict] = None
+    data: str = ""
+
+    audience: Optional[Tuple[str, ...]] = None
+    # 精确 method/path/page/op；业务自己维护，HTTP 层只执行。
+    routes: Tuple[tuple, ...] = ()
+    # 单路由范围覆盖；普通范围必须与页面一致（业务 handler 按页面范围执行），
+    # all 仅用于已确认且在 handler 中显式处理的库存表外码索引。
+    route_data: dict = field(default_factory=dict)
 
     def steps(self) -> List[Step]:
         return [s.step for s in self.children if s.step]
@@ -128,11 +187,69 @@ DEFAULT_WHENS: Tuple[When, ...] = (When(kind="daily", time="21:00"),)
 #:   界面上根本看不出来，也就没法"只重抓云商"。
 #:   ⚠ 顺序仍是**先玲珑后云商**（10 / 20）：同一个时间点跑的时候，
 #:     后面的分析（pos 30 / pools 40 / attain 45）读的就是这两步刚写进去的数。
+def _run_report(ctx) -> bool:
+    """`report` 的执行入口（协议 v2，2026-10-02）—— 原 `run_daily._step_report`。
+
+    `app.report` **调用时**才 import（lifehall 包里它被 PRUNE 裁掉，
+    但 lifehall 的步骤表里也没有 report —— 走不到这行）。
+    """
+    import sys as _sys
+    from ..app.report import run as _r
+    print("\n[7/9] 上报数据（当天新增/变化的行 → SQLite 附件 → 邮件给区长）")
+    res = _r(root=ctx.root, config_path=ctx.config,
+             no_push=getattr(ctx.args, "no_push", False), emit=ctx.emit)
+    ok = bool(res.get("ok") or res.get("skipped"))
+    if not ok:
+        print("\n⚠ 第 6 步（上报数据）没发出去：%s" % res.get("why"), file=_sys.stderr)
+        print("   ⚠ 包已经留在 out/report/pending/ —— **下次跑会自动补发**，"
+              "不用人工干预", file=_sys.stderr)
+    return ok
+
+
+def _run_report_inbox(ctx) -> bool:
+    """`report-inbox` 的执行入口（协议 v2）—— 原 `run_daily._step_report_inbox`。"""
+    import sys as _sys
+    from ..app.report_inbox import run as _r
+    from ..modules.auth import inbox_scope
+    print("\n[8/9] 收取门店上报（读邮箱 → 落 in/report.db）")
+    allowed = inbox_scope.local_store_codes(ctx.root, config_path=ctx.config)
+    res = _r(root=ctx.root, config_path=ctx.config,
+             allowed_store_codes=allowed, emit=ctx.emit)
+    ok = bool(res.get("ok"))
+    if not ok:
+        print("\n⚠ 第 7 步（收取门店上报）没成功：%s"
+              % ("；".join(res.get("problems") or []) or "？"), file=_sys.stderr)
+    return ok
+
+
+def _run_autoupdate(ctx) -> bool:
+    """`autoupdate` 的执行入口（协议 v2）—— 原 `run_daily._step_autoupdate`。
+
+    ⚠ `record=False`（声明在下面）：**成功/失败都不进汇总** —— 更新成功那一刻
+      进程马上要退出，不该由它决定这一趟的退出码（历史规矩）。
+    """
+    import sys as _sys
+    from .. import version as _version
+    from ..modules import health
+    from ..paths import ROOT as _ROOT
+    print("\n[9/9] 自动更新（先问策略：健康 + 今天那趟跑完了才动手）")
+    res = health.auto_update(_ROOT, _version.VERSION, emit=ctx.emit)
+    if not res.get("ok", True):
+        print("\n⚠ 自动更新没跑成：%s" % (res.get("why") or ""), file=_sys.stderr)
+        return False
+    return True
+
+
 BUILTIN_STEPS: Tuple[Step, ...] = (
     Step(cmd="dump", label="抓取玲珑数据", order=10, default=True, flag="--skip-dump",
-         required=True, whens=DEFAULT_WHENS),
+         required=True, whens=DEFAULT_WHENS,
+         # 玲珑数据：合作店不跑（`run_daily` 的玲珑三步跳过由这个声明派生）；
+         # 失败中止：后面 POS/对比读的就是它写的库。
+         partner_ok=False, fatal=True, run=run_dump),
     Step(cmd="erp-dump", label="抓取云商数据", order=20, default=True,
-         required=True, flag="--skip-erp-dump", whens=DEFAULT_WHENS),
+         required=True, flag="--skip-erp-dump", whens=DEFAULT_WHENS,
+         # 云商数据合作店**也要抓**（达成/无忧读它）；失败同样中止后面。
+         fatal=True, run=run_erp_dump),
     # ⚠ **系统健康模块**的自动更新（用户 2026-09-20：「健康模块默认注册一个自动更新，
     #   **固定一个小时执行一次**」）。
     #   * `hourly` 频率：查一次"有没有新版本"很便宜（一个 GitHub API 请求），
@@ -143,7 +260,8 @@ BUILTIN_STEPS: Tuple[Step, ...] = (
     #     半夜对账跑到一半被换代码，是最不该发生的事。
     Step(cmd="autoupdate", label="自动更新", order=60, default=False, required=True,
          flag="--skip-autoupdate",
-         whens=(When(kind="hourly", minute=17),)),
+         whens=(When(kind="hourly", minute=17),),
+         run=_run_autoupdate, record=False),
     # ⭐ **数据上报**（M18，2026-09-21）：门店把当天新增/变化的行打成 SQLite 附件，
     #   邮件发给本店区长（抄送中台）。
     #   ⚠ `whens=()` = **定时器不管它**，只跟着 `daily` 那趟末尾跑 ——
@@ -157,7 +275,7 @@ BUILTIN_STEPS: Tuple[Step, ...] = (
     #     ② **必须早于 21:30**（区长/平台那台机器 21:30 收信，晚了就变"明天才看到"）。
     #   ⚠ `default=False`：**不进整批**（否则 21:00 整批跑一遍、21:15 又叫醒一次 = 一天两遍）。
     Step(cmd="report", label="上报数据", order=90, default=False, flag="--skip-report",
-         whens=(When(kind="daily", time="21:15"),)),
+         whens=(When(kind="daily", time="21:15"),), run=_run_report),
     # ⭐ **收取门店上报**（M19）：区长 / 平台那台机器收信落库。
     #   ⚠ 时间**21:30 而不是 21:00**：门店那趟 21:00 跑完才发信（21:00~21:10 到），
     #     同一时刻收信只会收个空 —— 那"区长今晚就看到"就变成"明天才看到"。
@@ -167,7 +285,7 @@ BUILTIN_STEPS: Tuple[Step, ...] = (
     #   ⚠ 门店机器上 IMAP 没配 ⇒ 这一步**安静跳过**（不是失败），所以放哪儿都安全。
     Step(cmd="report-inbox", label="收取门店上报", order=95, default=False,
          flag="--skip-report-inbox",
-         whens=(When(kind="daily", time="21:30"),)),
+         whens=(When(kind="daily", time="21:30"),), run=_run_report_inbox),
 )
 
 
@@ -288,6 +406,69 @@ def menus() -> list:
     return out
 
 
+def _check_decl(node, where: str) -> list:
+    """校验一块操作/数据范围声明（注册协议 v2）—— 词表错一个就启动报。"""
+    bad = []
+    audience = getattr(node, "audience", None)
+    if audience is not None:
+        if not isinstance(audience, tuple) or any(a not in AUDIENCES for a in audience):
+            bad.append("%s 的 audience 不在进入方式词表" % where)
+    ops = getattr(node, "ops", None)
+    if ops:
+        if not isinstance(ops, dict):
+            bad.append("%s 的 ops= 不是 dict" % where)
+            return bad
+        for op, roles in ops.items():
+            if op not in OPS:
+                bad.append("%s 声明了不存在的操作「%s」（词表：%s）"
+                           % (where, op, "/".join(OPS)))
+            if isinstance(roles, str) or not roles:
+                bad.append("%s 的 ops[%s] 要给非空的身份元组（如 (\"store\",)）"
+                           % (where, op))
+            else:
+                for r in roles:
+                    if r not in OP_ROLES:
+                        bad.append("%s 的 ops[%s] 里有不认识的身份「%s」"
+                                   % (where, op, r))
+    data = getattr(node, "data", "") or ""
+    if data and data not in DATA_SCOPES:
+        bad.append("%s 的 data=「%s」不在词表（%s）" % (where, data, "/".join(DATA_SCOPES)))
+    return bad
+
+
+def page_perms() -> dict:
+    """页面 → 操作/数据范围的**生效值**（子继承/覆盖父，注册协议 v2 的派生单源）。
+
+    返回 `{sub_key: {"ops": {op: frozenset(身份)}, "data": "store"|"authorized"}}`。
+
+    * `ops`：子声明了就**整块覆盖**父（跟 `types` 一样"子比父窄"的思路），
+      两头都没声明 ⇒ `{}` —— 后端 `require()` 见到空声明就按**默认拒绝**办。
+    * `data`：子空继承父，父也空按最窄的 `store`（`DATA_SCOPES[0]`）。
+
+    ⚠ 只管功能模块的子页面；左下角 `FOOT_PAGES` 那批**不是功能模块**，
+      它们的可见性仍归 `web.FOOT_PAGES`，操作声明不在本协议里（没业务动作）。
+    """
+    out = {}
+    for f in all_features():
+        f_ops = f.ops or {}
+        f_data = f.data or DATA_SCOPES[0]
+        # 功能级**自己声明了 ops** 才出条目（整组接口共用一个判据时用它，
+        # 比如分销四张看板的 `require(scope, "distribution", …)`）。
+        if True:
+            out[f.key] = {"ops": {op: frozenset(roles) for op, roles in f_ops.items()},
+                          "data": f_data, "audience": frozenset(f.audience or ()),
+                          "types": f.types or ""}
+        for s in f.children:
+            ops = s.ops if s.ops is not None else f_ops
+            out[s.key] = {
+                "ops": {op: frozenset(roles) for op, roles in ops.items()},
+                "data": s.data or f_data,
+                "audience": frozenset(s.audience if s.audience is not None else (f.audience or ())),
+                "types": s.types or f.types or "",
+            }
+    return out
+
+
 def validate() -> list:
     """注册表自检 —— 返回**问题清单**（空 = 没问题）。
 
@@ -303,6 +484,9 @@ def validate() -> list:
         seen_feature[f.key] = f
         if not f.label:
             bad.append("功能 %s 没有中文名" % f.key)
+        if f.audience is None:
+            bad.append("功能 %s 没有声明 audience" % f.key)
+        bad += _check_decl(f, "功能 %s" % f.key)
         for s in f.children:
             if s.key in seen_sub:
                 bad.append("子模块 key 重复：%s（%s 与 %s）"
@@ -310,6 +494,46 @@ def validate() -> list:
             seen_sub[s.key] = f.key
             if not s.label:
                 bad.append("子模块 %s 没有中文名" % s.key)
+            bad += _check_decl(s, "子模块 %s" % s.key)
+    perms = page_perms()
+    seen_routes = set()
+    for f in all_features():
+        if f.data == "all" or any(s.data == "all" for s in f.children):
+            bad.append("all 只允许已确认的单路由例外，不能作为页面范围")
+        for key, data in f.route_data.items():
+            if key not in {(r[0], r[1]) for r in f.routes if isinstance(r, tuple) and len(r) == 4}:
+                bad.append("路由范围覆盖未登记：%r" % (key,))
+            all_index = (f.key == "inventory" and key == ("POST", "/api/inventory/index")
+                         and data == "all")
+            if data not in DATA_SCOPES and not all_index:
+                bad.append("路由范围未知：%r" % (data,))
+            if data == "all" and not all_index:
+                bad.append("all 仅允许库存表外码索引")
+        for route in f.routes:
+            if not isinstance(route, tuple) or len(route) != 4:
+                bad.append("功能 %s 的路由声明无效" % f.key)
+                continue
+            method, path, page, op = route
+            owned_pages = {f.key} | {s.key for s in f.children}
+            if page not in owned_pages:
+                bad.append("路由 %s 使用了功能 %s 之外的权限页 %s"
+                           % (path, f.key, page))
+            if (method, path) in seen_routes:
+                bad.append("业务路由重复：%s %s" % (method, path))
+            seen_routes.add((method, path))
+            if method not in ("GET", "POST", "PUT", "DELETE") or not path.startswith("/api/"):
+                bad.append("功能 %s 的路由 method/path 无效" % f.key)
+            if page not in perms or op not in perms[page]["ops"]:
+                bad.append("路由 %s 的 page/op 未声明" % path)
+            route_scope = f.route_data.get((method, path),
+                                           (perms.get(page) or {}).get("data"))
+            page_scope = (perms.get(page) or {}).get("data")
+            if (route_scope == "authorized" and page_scope == "store"):
+                bad.append("路由 %s 的数据范围不能扩大页面范围（store → authorized）" % path)
+            if (route_scope == "store" and page_scope == "authorized"):
+                bad.append("路由 %s 的范围收窄尚未执行：handler 当前按页面范围处理" % path)
+            if route_scope == "all" and (page != "inventory" or op != "view"):
+                bad.append("all 索引例外必须属于 inventory:view")
     for s in all_steps():
         if s.cmd in seen_cmd:
             bad.append("定时步骤重复：%s —— 两个功能抢同一个步骤名" % s.cmd)
@@ -329,3 +553,24 @@ def validate() -> list:
     # ⚠ `run` 允许为空：空 = "按 cmd 走 CLI 子命令"（今天的路子）。
     #   等各功能的编排搬进 `app/` 之后再逐个填上 —— 那是"只做接入"的下一步，不是现在。
     return bad
+
+
+def route_perms() -> dict:
+    """精确 (method, path) → (page, op)，供 HTTP 门禁和后续迁移复用。"""
+    out = {}
+    for f in all_features():
+        for method, path, page, op in f.routes:
+            if (method, path) in out:
+                raise ValueError("业务路由重复：%s %s" % (method, path))
+            out[(method, path)] = (page, op)
+    return out
+
+
+def route_data() -> dict:
+    """精确路由数据范围：缺失/未知仍留给执行方拒绝。"""
+    pages = page_perms()
+    out = {}
+    for f in all_features():
+        for method, path, page, op in f.routes:
+            out[(method, path)] = f.route_data.get((method, path), (pages.get(page) or {}).get("data"))
+    return out

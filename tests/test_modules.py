@@ -548,7 +548,7 @@ class Test计时模块(unittest.TestCase):
         with mock.patch.object(schedule, "status", lambda root: {"installed": False}), \
                 mock.patch.object(autostart, "status", lambda root: {"registered": False}):
             st = timer.status(Path("/tmp/假装"))
-        self.assertFalse(timer.installed(Path("/tmp/假装")))
+            self.assertFalse(timer.installed(Path("/tmp/假装")))
         self.assertIn("还没注册定时任务 —— 每天不会自己跑", st["problems"])
         self.assertIn("没设开机自启 —— 重启后要手动启动服务", st["problems"])
 
@@ -850,13 +850,14 @@ class Test启动流程接上了(unittest.TestCase):
 
     def test_起服务时跑一次自检并记一笔(self):
         """用户：「**健康模块负责……记录日志**」—— 启动自检这条也要留痕。"""
-        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
         self.assertIn("boot_state(force=True)", src)
         self.assertIn('runlog.record("boot"', src)
 
     def test_前端横幅接上了(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         self.assertIn('id="boot-broken"', html)
         self.assertIn("function renderBoot(", js)
         self.assertIn("renderBoot(o.boot)", js, "渲染函数写了但没被调 = 永远不显示")
@@ -865,7 +866,8 @@ class Test启动流程接上了(unittest.TestCase):
     def test_只有硬门槛才挂红横幅(self):
         """⚠ 警告（没配邮箱）和待办（没登录）都是**常态** —— 一起挂上来，
         门店两天就对这个横幅免疫了，真出事时反而不看。"""
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         body = js.split("function renderBoot(", 1)[1].split("\n}", 1)[0]
         self.assertIn("blocking", body)
         self.assertNotIn("warnings", body)

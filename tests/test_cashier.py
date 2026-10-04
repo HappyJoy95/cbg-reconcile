@@ -9,7 +9,7 @@
 * 编码反查认 `基准提货价*` **带星表头**（xlsx 原样，别"顺手"洗掉）；
 * 接口门禁：**区长/平台 403**（收银是门店本机操作）、块内未知子路径 **404**；
 * 政策刷新的类锁：失败后必须**释放**（否则一次失败永久卡死）；
-* 页面三件套（HTML 面板 / SUBTABS / loader）少一边就点不开。
+* 页面三件套（HTML 面板 / SUBTABS / 生命周期注册）少一边就点不开。
 """
 
 from __future__ import annotations
@@ -36,12 +36,16 @@ from src.features.cashier import store                               # noqa: E40
 from src.features.cashier import exporter                            # noqa: E402
 
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/cashier/page.js", "app.js"))
 
 
 def _scope(role):
-    return {"role": role, "label": "测试·%s" % role, "stores": set(),
-            "can": web._can_for(role), "pages": [], "who": "张三",
+    return {"role": role, "label": "测试·%s" % role,
+            "stores": None if role == "platform" else {"测试店"},
+            "can": web._can_for(role), "pages": ["cashier"], "who": "张三",
+            "entry_kind": "platform" if role == "platform" else "erp",
             "account": "acc", "kind": "", "needs_linglong": False}
 
 
@@ -50,6 +54,9 @@ class _RootCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        (self.root / "config").mkdir()
+        (self.root / "config" / "store-X.yaml").write_text(
+            "store_code: SCN-TEST\n", encoding="utf-8")
 
 
 # ───────────────────────────────────────────────── 存储层
@@ -243,7 +250,8 @@ class TestApp组合(_RootCase):
 
     def test_entries一次带回三样(self):
         store.save_entry(self.root, {"sold_at": "2026-09-29 10:00",
-                                     "amount": 10, "seller": "小张"})
+                                     "amount": 10, "seller": "小张"},
+                         store_code=self.app._cashier_code())
         d = self.app.cashier_entries("2026-09-29")
         self.assertTrue(d["ok"])
         self.assertEqual(len(d["rows"]), 1)
@@ -263,6 +271,37 @@ class TestApp组合(_RootCase):
         d = self.app.cashier_lookup("空政策也200")
         self.assertEqual((d["ok"], d["found"]), (True, False),
                          "政策没刷新是常态，不是接口错误")
+
+    def test_完整版本切换门店后不能读取旧收银流水(self):
+        """同一台机器重新登录到另一门店，旧收银库必须继续归原门店。"""
+        self.app.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.app.config_path.write_text("store_code: SCN-A\n", encoding="utf-8")
+        saved = self.app.cashier_entry_save({
+            "sold_at": "2026-10-03 10:00", "amount": 88,
+            "seller": "甲店员工", "note": "甲店私有流水",
+        })
+        self.assertTrue(saved["ok"], saved)
+
+        self.app.config_path.write_text("store_code: SCN-B\n", encoding="utf-8")
+        result = self.app.cashier_entries("2026-10-03")
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("归属", result["why"])
+
+    def test_完整版本遇到未绑定的旧流水必须拒绝读取(self):
+        """升级前留下的无归属流水不能被第一个登录的门店自动认领。"""
+        self.app.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.app.config_path.write_text("store_code: SCN-B\n", encoding="utf-8")
+        saved = store.save_entry(self.root, {
+            "sold_at": "2026-10-03 10:00", "amount": 88,
+            "seller": "未知门店员工", "note": "无可信归属",
+        })
+        self.assertTrue(saved["ok"], saved)
+
+        result = self.app.cashier_entries("2026-10-03")
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("归属", result["why"])
 
 
 class Test政策刷新锁与链路(_RootCase):
@@ -364,6 +403,21 @@ class Test接口(_RootCase):
     def setUp(self):
         super().setUp()
         self.srv = _Server(self.root)
+
+    def test_切换门店读取旧收银流水返回403(self):
+        code = self.srv.app._cashier_code()
+        saved = store.save_entry(self.root, {
+            "sold_at": "2026-10-03 10:00", "amount": 88,
+            "seller": "甲店员工", "note": "甲店私有流水",
+        }, store_code=code)
+        self.assertTrue(saved["ok"], saved)
+        web.config_io.update(self.srv.app.config_path, {"store_code": "SCN-OTHER"})
+
+        status, body = self.srv.request("GET", "/api/cashier/entries?day=2026-10-03")
+
+        self.assertEqual(status, 403, body)
+        self.assertTrue(body.get("forbidden"), body)
+        self.assertIn("归属", body.get("error", ""))
         self.addCleanup(self.srv.close)
         p = mock.patch.object(web, "setup_state",
                               lambda app: {"ready": True, "need": "", "why": ""})
@@ -484,11 +538,11 @@ class Test页面接线(unittest.TestCase):
         self.assertIn("position: sticky",
                       css[css.index(".cashier-top"):css.index(".cashier-top") + 400])
 
-    def test_SUBTABS和loader接上了(self):
+    def test_SUBTABS和页面生命周期接上了(self):
         blk = APP_JS[APP_JS.index("const SUBTABS = {"):]
         blk = blk[:blk.index("\n};")]
         self.assertIn("cashier: ['cashier']", blk)
-        self.assertIn("cashier: () => loadCashier()", APP_JS)
+        self.assertIn("registerPage('cashier'", APP_JS)
         for fn in ("loadCashier", "cashierLookup", "cashierSave",
                    "cashierRemove", "cashierRefreshPolicy", "bindCashierEvents"):
             with self.subTest(fn=fn):
@@ -665,9 +719,12 @@ class Test页面接线(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("本机没有 node")
-        r = subprocess.run([node, "--check", str(ROOT / "web" / "app.js")],
-                           capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        for path in (ROOT / "web" / "app.js",
+                     ROOT / "web" / "features" / "cashier" / "page.js"):
+            with self.subTest(path=path.name):
+                r = subprocess.run([node, "--check", str(path)],
+                                   capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_注册表两版都有cashier(self):
         """roles 的双向对照按 **full 版**跑 —— full 注册表少了 cashier 就红。"""
@@ -1042,8 +1099,8 @@ class Test导入接口(_RootCase):
         try:
             st, d = self.srv.request("POST", "/api/cashier/import",
                                      {"day": "2026-09-30"})
-            self.assertEqual(st, 400)
-            self.assertIn("正在导入", d.get("error", ""))
+            self.assertEqual(st, 409)
+            self.assertIn("任务", d.get("error", ""))
         finally:
             lock.release()
         # 上一次（含失败路径）跑完后锁要能再进 —— 坏日期走完整条真路径后释放
@@ -1062,7 +1119,8 @@ class Test导入接口(_RootCase):
 
     def test_排除接口_软排除走通(self):
         store.save_entry(self.root, {"sold_at": "2026-09-30 10:00",
-                                     "amount": 1, "source": "linglong"})
+                                     "amount": 1, "source": "linglong"},
+                         store_code=self.srv.app._cashier_code())
         _, rows = self.srv.request("GET", "/api/cashier/entries?day=2026-09-30")
         eid = rows["rows"][0]["id"]
         st, d = self.srv.request("POST", "/api/cashier/exclude", {"id": eid})
@@ -1186,7 +1244,8 @@ class Test入库与导出接口(_RootCase):
 
     def test_commit接口转正当天暂存(self):
         store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 1,
-                                     "status": "staged"})
+                                     "status": "staged"},
+                         store_code=self.srv.app._cashier_code())
         st, d = self.srv.request("POST", "/api/cashier/commit",
                                  {"day": "2026-09-30"})
         self.assertEqual((st, d.get("saved")), (200, 1), d)
@@ -1198,7 +1257,8 @@ class Test入库与导出接口(_RootCase):
 
     def test_导出接口回file_文件真是xlsx_白名单认得(self):
         store.save_entry(self.root, {"sold_at": "2026-09-30 10:00", "amount": 100,
-                                     "goods_name": "MatePad", "category": "平板"})
+                                     "goods_name": "MatePad", "category": "平板"},
+                         store_code=self.srv.app._cashier_code())
         st, d = self.srv.request("POST", "/api/cashier/export",
                                  {"month": "2026-09"})
         self.assertEqual(st, 200, d)

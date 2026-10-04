@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT))
 from src import pools_history as H                         # noqa: E402
 
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/compliance/comparison/page.js", "app.js"))
 
 
 class TestSaveDay(unittest.TestCase):
@@ -90,11 +92,13 @@ class TestFrontendWiring(unittest.TestCase):
     def test_renders_pools_history(self):
         self.assertIn("renderPoolsHistory", APP_JS)
         self.assertIn("/api/pools/history", APP_JS)
+        self.assertNotIn("async function renderPoolsHistory", (ROOT / "web" / "app.js").read_text(
+            encoding="utf-8"), "报量查询逻辑仍留在公共 app.js")
         self.assertNotIn("renderReports(o.reports", APP_JS,
                          "又在渲染旧的报量排查清单了")
 
     def test_api_exists(self):
-        web = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        web = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
         self.assertIn('"/api/pools/history"', web)
 
 

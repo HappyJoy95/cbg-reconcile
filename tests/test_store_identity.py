@@ -509,16 +509,16 @@ class Test三个保存点接线(unittest.TestCase):
         return src[i:j]
 
     def setUp(self):
-        self.web = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        self.web = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
         self.cli = (ROOT / "src" / "cli.py").read_text(encoding="utf-8")
 
     def test_抓取的verify走认店(self):
         self.assertIn("verify_with_identity",
-                      self._func(self.web, "_capture_worker"))
+                      self._func(self.web, "_capture_worker_locked"))
 
     def test_抓取保存后调identify(self):
         self.assertIn("store_identity.identify",
-                      self._func(self.web, "_capture_worker"))
+                      self._func(self.web, "_capture_worker_locked"))
 
     def test_curl导入把认店结果并进result(self):
         self.assertIn('result["identify"]', self.web)
@@ -537,7 +537,8 @@ class Test三个保存点接线(unittest.TestCase):
         self.assertIn("check_after_save", self._func(self.cli, "cmd_auth"))
 
     def test_web保存点走check_after_save(self):
-        self.assertIn("check_after_save", self._func(self.web, "_capture_worker"))
+        self.assertIn("check_after_save",
+                      self._func(self.web, "_capture_worker_locked"))
 
 
 if __name__ == "__main__":

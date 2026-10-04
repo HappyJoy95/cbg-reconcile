@@ -167,7 +167,7 @@ def check_timer(root=None) -> list:
       到点它就会跑。原来那句「没有定时任务 —— 每天那趟不会自动跑」
       现在**是错的**，会把门店吓一跳（而且它会去建一条根本不需要的任务）。
     """
-    from ... import schedule
+    from ...desktop import schedule
     from .. import timer
     try:
         st = schedule.status(root or ROOT)
@@ -206,7 +206,7 @@ def check_timer(root=None) -> list:
         names = "、".join((t.get("name") or "?") for t in tasks) or "（读不到详情）"
         out.append(_item("timer", "todo",
                          "这台机器上还留着旧的系统计划任务（%s）—— 现在不需要了"
-                         "（到点由内置定时器跑）；建议在「设置 › 定时器设置」里删掉"
+                         "（到点由内置定时器跑）；建议在「设置 > 定时器设置」里删掉"
                          % names, detail=st))
     return out
 
@@ -307,8 +307,10 @@ def snapshot(root=None, *, config_path=None, need=None) -> dict:
     for fn in (check_code, check_schema, check_registry):
         items += _safe(fn, root)
     items += _safe(check_data, root, need=need)
-    items += _safe(check_timer, root)
-    items += _safe(check_notify, root, config_path=config_path)
+    from ..auth import runtime
+    if not runtime.is_lifehall(root):
+        items += _safe(check_timer, root)
+        items += _safe(check_notify, root, config_path=config_path)
     items += _safe(check_theme, root)
     items += _safe(check_auth, root, config_path=config_path)
     items += _safe(check_runs, root)

@@ -174,3 +174,53 @@ def pytest_sessionfinish(session, exitstatus):
                 print("    " + n)
         print("  查法：`ls -l` 看 mtime 落在哪个测试；那个测试的 root= 要传 tmp。")
         print("!" * 70)
+
+# 编排旧测试使用项目根只读配置，但新运行锁也是本机状态，不能写真实 .secrets。
+# 仅把这些测试的锁文件放临时根；显式临时安装/跨进程锁测试使用真实实现。
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repository_runtime_lock(tmp_path, monkeypatch):
+    from src.modules.auth import runtime_guard
+    from src.paths import ROOT
+    original = runtime_guard.guard
+
+    def isolated(root=None):
+        from pathlib import Path
+        actual = Path(root or ROOT).resolve()
+        return original(tmp_path / 'runtime-lock-only' if actual == ROOT.resolve() else actual)
+
+    monkeypatch.setattr(runtime_guard, 'guard', isolated)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repository_runtime_context(tmp_path, monkeypatch):
+    """测试默认使用隔离的 full 运行上下文，不读开发机 `.secrets/entry.json`。
+
+    `CBG_EDITION=full` 只固定安装版；运行入口仍会从项目根的 entry.json 读取。
+    测试传入项目根或省略 root 时，将该根映射到临时空目录；显式临时根照常测试。
+    """
+    from pathlib import Path
+    from src import web
+    from src.modules.auth import runtime
+    from src.paths import ROOT
+
+    original = runtime.is_lifehall
+    original_entry_file = web.entry_file
+    isolated_root = tmp_path / 'repository-runtime-context'
+
+    def isolated(root=None):
+        actual = Path(root or ROOT).resolve()
+        if actual == ROOT.resolve():
+            return original(isolated_root)
+        return original(root)
+
+    def isolated_entry_file(app):
+        actual = Path(getattr(app, 'root', None) or ROOT).resolve()
+        if actual == ROOT.resolve():
+            return isolated_root / '.secrets' / 'entry.json'
+        return original_entry_file(app)
+
+    monkeypatch.setattr(runtime, 'is_lifehall', isolated)
+    monkeypatch.setattr(web, 'entry_file', isolated_entry_file)

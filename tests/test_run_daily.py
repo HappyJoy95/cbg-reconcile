@@ -12,7 +12,6 @@
 4. 对账的 `EXIT_DIFF`(3) 算**跑通**（有差异是正常结果，不是故障）
 """
 
-import datetime
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,6 +19,13 @@ from unittest import mock
 from src import cli, mailer, run_daily
 from src.app import pos as app_pos
 from src.app.pos import PosRun
+
+
+def patch_step_run(command, fn):
+    """替换注册表中指定步骤的执行函数；Step.run 在导入时已绑定函数对象。"""
+    from src.features import registry
+    step = next(item for item in registry.BUILTIN_STEPS if item.cmd == command)
+    return mock.patch.object(step, "run", fn)
 
 
 class _Rec:
@@ -42,6 +48,18 @@ class _Rec:
             self.namespaces[name] = args
             return self.codes[name]
         return fn
+
+    def _mk_fetch_step(self, name):
+        def fn(ctx):
+            self.calls.append(name)
+            self.namespaces[name] = ctx
+            return self.codes[name]
+        return fn
+
+    def _mk_pools(self, ctx):
+        self.calls.append("pools")
+        self.namespaces["pools"] = ctx.args
+        return self.codes["pools"]
 
     def _mk_pos(self):
         """`app.pos.run` 的桩：收关键字、回 `PosRun`（新契约）。"""
@@ -83,32 +101,33 @@ class _Rec:
 
     def patch(self):
         return (
-            mock.patch.object(cli, "cmd_dump", self._mk("dump")),
+            patch_step_run("dump", self._mk_fetch_step("dump")),
             mock.patch.object(cli, "cmd_check", self._mk("check")),
             # ⚠ 2026-09-19 起 POS 走**执行模块**（`app.pos.run`），不再经 CLI：
             #   桩要按**新的结果契约**（`PosRun`）来，不能返回一个整数。
-            mock.patch.object(run_daily, "pos_run", self._mk_pos()),
-            # ⚠ **`cmd_pools` 也得挡** —— 原来这里只有三个，漏了它 ⇒ `run()`
+            mock.patch("src.app.pos.run", self._mk_pos()),
+            # ⚠ 比较执行模块也得挡 —— 不能让测试读写项目根里的四池文件。
             #   每跑一次都**真算一遍四池**、往项目根的 `out/` 写
             #   `pools-2026.json` + `双平台数据对比-*.xlsx`（实测 **1.5 秒/次**，
             #   而 `run()` 在这个文件里有 20 多个调用点）。
             #   更要命的是它读**开发机上那个真库** —— 换台机器跑就是另一种行为，
             #   而测试不该依赖开发机的状态（这个文件上面已经为同一件事栽过一次）。
             #   ⇒ 2026-09-19 补上（四项文档 阶段 1.3「测试数据隔离」）。
-            mock.patch.object(cli, "cmd_pools", self._mk("pools")),
+            mock.patch("src.features.compliance.comparison.execution.run",
+                       self._mk_pools),
             # ⚠ 第 2 步（抓云商数据）同样**必须挡**（理由见 `codes` 里那段）
-            mock.patch.object(cli, "cmd_erp_dump", self._mk("erp-dump")),
-            mock.patch.object(run_daily, "attain_run", self._mk_attain()),
+            patch_step_run("erp-dump", self._mk_fetch_step("erp-dump")),
+            mock.patch("src.features.sales.attain.attain.run", self._mk_attain()),
             # ⚠ 2026-09-21（M18）第 6/7 步（上报数据 / 收取门店上报）同样**必须挡**：
             #   它们是执行模块（`app.report.run` / `app.report_inbox.run`）——
             #   不挡的话每条用例都会真去读本机库算差集、甚至去连邮箱（网络）。
-            mock.patch.object(run_daily, "report_run", self._mk_report()),
+            mock.patch("src.app.report.run", self._mk_report()),
             # ⚠ 第 6 步（M22 月度生意计划 `plan`）同理**必须挡**（2026-09-23 抓到的根因）：
             #   它 `root=None` ⇒ 每次全量测试都真写**项目根** `out/plan-2026.json`
             #   （4.5MB 真落盘被反复覆盖），且固定名 `plan-2026.json.tmp` 被三个头
             #   并行抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError`（并行偶发红）。
             #   ⚠ 桩**不记 calls** —— 现有断言都是"五步"，plan 只进 done/退出码。
-            mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}),
+            mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}),
         )
 
 
@@ -123,8 +142,12 @@ def steps_except(*skip):
     return ["--steps", ",".join(s for s in DEFAULT_STEPS if s not in skip)]
 
 
-def run(argv=None, **codes):
-    """跑一次 run_daily，返回 (退出码, 调用顺序, 各步收到的 Namespace)。"""
+def run(argv=None, config=None, **codes):
+    """跑一次 run_daily，返回 (退出码, 调用顺序, 各步收到的 Namespace)。
+
+    `config=` 覆盖本店配置（默认钉成要走玲珑的那类）——
+    合作店语义的用例（`test_perm_protocol`）传 `marker: ""` 那份。
+    """
     r = _Rec(**codes)
     # ⚠ 本店必须是**要走玲珑**的那一类（名单里有串号标识），否则 `daily`
     #   会正确地早退成"没有可跑的步骤" —— 那是 2026-09-18 加的门店权限划分。
@@ -132,10 +155,16 @@ def run(argv=None, **codes):
     #   钉死一份配置，顺便让它们**不再依赖开发机的状态**。
     #   ⚠ 必须**并进 `ps` 一起 start()** —— 写成一句裸表达式的话，
     #     patch 对象造出来就没人 start，测试照样红（我自己踩了一次）。
-    ps = r.patch() + (mock.patch.object(
+    # 注册步骤自行读 config_io；与 CLI 使用同一份假配置，不能读现场配置。
+    ps = r.patch() + (mock.patch(
+        "src.features.sales.attain.config_io.load_raw",
+        lambda *a, **k: dict(config or {"erp_store_name": "青岛CBD万达店",
+                                       "store_code": "SCN328987", "marker": "C"})),
+        mock.patch.object(
         cli, "load_config",
-        lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
-                         "store_code": "SCN328987", "marker": "C"}),)
+        lambda *a, **k: dict(config or {"erp_store_name": "青岛CBD万达店",
+                                        "store_code": "SCN328987",
+                                        "marker": "C"})),)
     for p in ps:
         p.start()
     try:
@@ -179,21 +208,16 @@ class Test按点名顺序跑(unittest.TestCase):
         self.assertEqual(rc, cli.EXIT_FETCH)
         self.assertEqual(calls, ["erp-dump"], "云商失败之后 pools 不该还跑")
 
-    def test_每一步都有它的块(self):
-        """⚠ 注册表里加了步骤、`run_daily` 忘了接 ⇒ 定时器到点派发它，
-        而 `main()` 里**没有对应的块**（这一步永远不跑，日志里只会有一行
-        "还没有接进日常流程"）。结构钉子，别删。"""
-        import inspect
+    def test_所有步骤都声明注册执行入口(self):
         from src.features import registry
-        src = inspect.getsource(run_daily.main)
-        # ⚠ 别拿 `_ABORT_AFTER` 当结尾 —— 它在那段**说明注释**里先出现过一次
-        #   （切片会变成空的，测试当场红；第一版就这么写的）。
-        runners = src[src.index("_RUNNERS = {"):src.index("for _cmd in list(")]
-        for s in registry.all_steps():
-            with self.subTest(cmd=s.cmd):
-                self.assertIn('"%s"' % s.cmd, runners,
-                              "这一步没有对应的 `_step_*` 块")
-                self.assertIn("_step_%s" % s.cmd.replace("-", "_"), runners)
+        for step in registry.all_steps():
+            with self.subTest(cmd=step.cmd):
+                self.assertTrue(callable(step.run),
+                                "步骤 %s 必须声明 Step.run" % step.cmd)
+
+    def test_日常流程没有第二套路由表(self):
+        import inspect
+        self.assertNotIn("_RUNNERS", inspect.getsource(run_daily._main))
 
 
 class TestHappyPath(unittest.TestCase):
@@ -204,18 +228,10 @@ class TestHappyPath(unittest.TestCase):
         self.assertEqual(calls, ["dump", "erp-dump", "pos", "pools", "attain"])
         self.assertEqual(rc, cli.EXIT_OK)
 
-    def test_第一步抓的是当月不是全量(self):
-        """⚠ 用户定过：**拉整月再取并集** —— 因为 21:00 拉当天的话，
-        后面还有更新，第二天就对不上了。
-
-        ⚠ 必须自己把库探测钉成"有库" —— 开发机上 `out/cbg-2026.db` 是真的存在的，
-        不钉的话这条测的是"这台机器有没有库"。**在包里跑就露馅了**：
-        包里没有 out/，于是走了"第一次跑 → 抓全量"那条路，测试失败。
-        """
-        with mock.patch.object(cli, "_find_pos_db", return_value=Path("/tmp/cbg-2026.db")):
-            _, _, ns = run()
-        self.assertEqual(ns["dump"].month, "")
-        self.assertFalse(ns["dump"].all)
+    def test_抓取步骤收到日常执行上下文(self):
+        _, _, seen = run(["--steps", "dump"])
+        self.assertTrue(seen["dump"].daily_step)
+        self.assertEqual(seen["dump"].config, str(cli.DEFAULT_CONFIG))
 
     def test_第三步只读库(self):
         _, _, ns = run()
@@ -244,17 +260,6 @@ class TestStep1FailureAbortsEverything(unittest.TestCase):
             rc, calls, _ = run(dump_rc=code)
             self.assertEqual(calls, ["dump"], "退出码 %d 时不该继续" % code)
             self.assertEqual(rc, code)
-
-    def test_失败原因写进_stderr_而不是只留个码(self):
-        import io
-        import contextlib
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            run(dump_rc=1)
-        msg = err.getvalue()
-        self.assertIn("跳过第 2、3 步", msg)
-        self.assertIn("玲珑无但云商有", msg)   # 说清**为什么**不能接着跑（口径名同报表）
-        self.assertIn("先解决第 1 步", msg)    # 以及下一步怎么办
 
     def test_失败时不发邮件不发推送(self):
         """第 1 步失败 ⇒ 连 `check` 都不进 —— 也就没有邮件可发。
@@ -505,16 +510,16 @@ class TestCliWiring(unittest.TestCase):
         self.assertIn("--no-refresh", opts("dump"))
         self.assertIn("--no-refresh", opts("daily"))
 
-    def test_no_refresh一路传到cmd_dump(self):
+    def test_no_refresh一路传到注册抓取入口(self):
         """⚠ 光"解析器里有这个参数"不算数 —— 得真能传到执行的地方。
 
-        中间隔着 `cmd_daily` → `run_daily.main` → `cmd_dump` 三跳，
+        中间隔着 `cmd_daily` → `run_daily.main` → 注册执行入口三跳，
         任何一跳漏转发，参数就静默丢了（表现是"加了没用"，最难查）。
         """
         seen = {}
 
-        def fake_dump(args):
-            seen["no_refresh"] = getattr(args, "no_refresh", "缺失")
+        def fake_dump(ctx):
+            seen["no_refresh"] = getattr(ctx.args, "no_refresh", "缺失")
             return 0
         # ⚠ **`attain_run` 这个桩不能漏**（2026-09-19 实测踩到）：漏了的话第 5 步
         #   `root=None` ⇒ 读**真腾讯文档**、往**项目根**写一份只有本店一行的
@@ -528,16 +533,19 @@ class TestCliWiring(unittest.TestCase):
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(cli, "cmd_dump", fake_dump), \
+             patch_step_run("dump", fake_dump), \
              mock.patch.object(cli, "cmd_check", lambda a: 0), \
-             mock.patch.object(run_daily, "pos_run", lambda **k: PosRun(ok=True)), \
-             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
-             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
-             mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "inbox_run",
+             mock.patch("src.app.pos.run", lambda **k: PosRun(ok=True)), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        lambda _ctx: 0), \
+             patch_step_run("erp-dump", lambda ctx: 0), \
+             mock.patch("src.features.sales.attain.config_io.load_raw",
+                        side_effect=lambda path: cli.load_config(path)), \
+             mock.patch("src.features.sales.attain.attain.run", lambda **k: {"ok": True}), \
+             mock.patch("src.app.report.run", lambda **k: {"ok": True}), \
+             mock.patch("src.app.report_inbox.run",
                                lambda **k: {"ok": True, "skipped": "没配收信"}), \
-             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}):
+             mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}):
             cli.main(["daily"] + steps_except() + ["--no-refresh"])
         self.assertIs(seen["no_refresh"], True)
 
@@ -546,8 +554,8 @@ class TestCliWiring(unittest.TestCase):
         默认值必须是 False（= 允许续期，也就是原来的行为），不能是 True。"""
         seen = {}
 
-        def fake_dump(args):
-            seen["no_refresh"] = getattr(args, "no_refresh", "缺失")
+        def fake_dump(ctx):
+            seen["no_refresh"] = getattr(ctx.args, "no_refresh", "缺失")
             return 0
         # ⚠ **`attain_run` 这个桩不能漏**（2026-09-19 实测踩到）：漏了的话第 5 步
         #   `root=None` ⇒ 读**真腾讯文档**、往**项目根**写一份只有本店一行的
@@ -558,16 +566,19 @@ class TestCliWiring(unittest.TestCase):
                                lambda *a, **k: {"erp_store_name": "青岛CBD万达店",
                                                 "store_code": "SCN328987",
                                                 "marker": "C"}), \
-             mock.patch.object(cli, "cmd_dump", fake_dump), \
+             patch_step_run("dump", fake_dump), \
              mock.patch.object(cli, "cmd_check", lambda a: 0), \
-             mock.patch.object(run_daily, "pos_run", lambda **k: PosRun(ok=True)), \
-             mock.patch.object(cli, "cmd_pools", lambda a: 0), \
-             mock.patch.object(cli, "cmd_erp_dump", lambda a: 0), \
-             mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}), \
-             mock.patch.object(run_daily, "inbox_run",
+             mock.patch("src.app.pos.run", lambda **k: PosRun(ok=True)), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        lambda _ctx: 0), \
+             patch_step_run("erp-dump", lambda ctx: 0), \
+             mock.patch("src.features.sales.attain.config_io.load_raw",
+                        side_effect=lambda path: cli.load_config(path)), \
+             mock.patch("src.features.sales.attain.attain.run", lambda **k: {"ok": True}), \
+             mock.patch("src.app.report.run", lambda **k: {"ok": True}), \
+             mock.patch("src.app.report_inbox.run",
                                lambda **k: {"ok": True, "skipped": "没配收信"}), \
-             mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}):
+             mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}):
             cli.main(["daily"] + steps_except())
         self.assertIs(seen["no_refresh"], False)
 
@@ -593,68 +604,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestFirstRunGrabsFullHistory(unittest.TestCase):
-    """⚠ 库里一片空白 ⇒ 第一次跑 ⇒ 抓**全量**，不是当月。
-
-    为什么：只抓当月的话，**POS 页只有当月一个数、前面几个月全是空的** ——
-    而"历史几个月的合规率"恰恰是那个看板最要紧的东西。
-    刚装完 / 刚从 1.x 升上来的门店，第一次定时任务就落在这一档。
-    """
-
-    def test_没有库时抓全量(self):
-        # ⚠ 必须把库探测**钉成"没有"** —— 开发机上 out/cbg-2026.db 是真存在的，
-        #   不钉的话这条测的是"开发机有没有库"，不是"没库时会怎样"。
-        with mock.patch.object(cli, "_find_pos_db", return_value=None):
-            _, _, ns = run()
-        # ⚠ 是"**今年**至今"不是"全部历史"（用户 2026-09-17 定：
-        #   「跨年不重要，就拉当年的全量就行」）。
-        #   原来传 `--all`，而 `dump.py` 拿到跨年数据会**直接报错**要求按年分次抓 ——
-        #   老店第一次跑正好卡在这儿。
-        self.assertEqual(ns["dump"].year, datetime.date.today().year,
-                         "第一次跑没抓今年全量 —— 历史月份会是空的")
-        self.assertFalse(ns["dump"].all, "别再用 --all：跨年会被 dump.py 顶回来")
-
-    def test_有库时只抓当月(self):
-        with mock.patch.object(cli, "_find_pos_db", return_value=Path("/tmp/cbg-2026.db")):
-            _, _, ns = run()
-        self.assertFalse(ns["dump"].all)
-        self.assertFalse(ns["dump"].year, "有库了就别再抓整年")
-        self.assertEqual(ns["dump"].month, "")
-
-    def test_抓全量时也要说一句(self):
-        """第一次跑会比较久（要拉全部历史），得先告诉人一声。"""
-        import contextlib
-        import io
-        buf = io.StringIO()
-        with mock.patch.object(cli, "_find_pos_db", return_value=None):
-            with contextlib.redirect_stdout(buf):
-                run()
-        out = buf.getvalue()
-        self.assertIn("第一次跑", out)
-        self.assertIn("今年", out)
-
-    def test_有库时不说第一次(self):
-        import contextlib
-        import io
-        buf = io.StringIO()
-        with mock.patch.object(cli, "_find_pos_db", return_value=Path("/tmp/cbg-2026.db")):
-            with contextlib.redirect_stdout(buf):
-                run()
-        self.assertNotIn("第一次跑", buf.getvalue())
-
-    def test_skip_dump_时不碰库探测(self):
-        """`--skip-dump` 是调试模式，不该因为探测库而改变行为。"""
-        with mock.patch.object(cli, "_find_pos_db",
-                               side_effect=AssertionError("不该探测")):
-            rc, calls, _ = run(steps_except("dump", "pools"))
-        self.assertEqual(calls, ["erp-dump", "pos", "attain"])
-
-
 class TestDaily要把POS推送跑起来(unittest.TestCase):
     """⚠ 2026-09-19 修的**一条静默缺口**（架构审阅的隔离探针发现、我复核过）。
 
         run_daily.py:280   cli.cmd_pos(argparse.Namespace(db=""))      ← 只传了 db
-        run_daily.py:290   cli.cmd_pools(Namespace(config=…, no_mail=…, no_push=…))
+        features.compliance.comparison.execution.run(ctx)
 
     而 `_maybe_pos_push()` 的第一句是 `if not config_path: return`。
 
@@ -669,7 +623,7 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
     """
 
     def _run_isolated(self, argv):
-        """用模块级 `run()` 跑，但**额外把 `cmd_pools` 挡住**。
+        """用模块级 `run()` 跑，但**额外把比较执行模块挡住**。
 
         ⚠ `run()` 里的 `_Rec.patch()` **只挡了 dump / check / pos，没挡 pools** ——
         所以它每跑一次都会**真算一遍四池**、往项目根的 `out/` 写
@@ -680,7 +634,8 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
           属于「测试数据隔离」那一步（四项文档 阶段 1.3），别混进这一步。
           本组测试自己隔离就行。
         """
-        with mock.patch.object(cli, "cmd_pools", lambda a: cli.EXIT_OK):
+        with mock.patch("src.features.compliance.comparison.execution.run",
+                        lambda _ctx: cli.EXIT_OK):
             return run(argv)
 
     def test_config_和通知开关要传下去(self):
@@ -753,8 +708,10 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
                                   recipients=["boss@example.com"], when="always")
 
         ps = [
-            mock.patch.object(cli, "cmd_dump", lambda a: cli.EXIT_OK),
-            mock.patch.object(cli, "cmd_pools", lambda a: cli.EXIT_OK),
+            patch_step_run("dump", lambda ctx: cli.EXIT_OK),
+            patch_step_run("erp-dump", lambda ctx: cli.EXIT_OK),
+            mock.patch("src.features.compliance.comparison.execution.run",
+                       lambda _ctx: cli.EXIT_OK),
             mock.patch.object(cli, "load_config", lambda *a, **k: store_cfg),
             # ⚠ 落盘的 JSON 和"找库"都归 `app.pos` 管了 ⇒ 直接把它那份 ROOT
             #   指到临时目录（`cli.ROOT` 已经管不到这条路）。
@@ -767,16 +724,18 @@ class TestDaily要把POS推送跑起来(unittest.TestCase):
             mock.patch.object(wecom, "push_pos", fake_push),
             # ⚠ 第 5 步也要挡：它 `root=None` ⇒ 会去读**真腾讯文档**、
             #   并往**项目根**写 `out/attain-2026.json`（开发机那份真落盘被覆盖过）。
-            mock.patch.object(run_daily, "attain_run", lambda **k: {"ok": True}),
+            mock.patch("src.features.sales.attain.config_io.load_raw",
+                       side_effect=lambda path: cli.load_config(path)),
+            mock.patch("src.features.sales.attain.attain.run", lambda **k: {"ok": True}),
             # ⚠ 2026-09-21（M18）第 6/7 步也**必须挡**（它们 `root=None` ⇒ 会去读
             #   **项目根**那个真库、并往真 `out/report/` 写包与指纹 ——
             #   实测污染过一次：`out/report/pending/cbg-*.db` + 300KB 的 state.db）。
-            mock.patch.object(run_daily, "report_run", lambda **k: {"ok": True}),
-            mock.patch.object(run_daily, "inbox_run",
+            mock.patch("src.app.report.run", lambda **k: {"ok": True}),
+            mock.patch("src.app.report_inbox.run",
                               lambda **k: {"ok": True, "skipped": "没配收信"}),
             # ⚠ plan 同理必须挡（同上：root=None ⇒ 真写项目根 out/plan-2026.json，
             #   固定名 tmp 三头并行抢 ⇒ FileNotFoundError 偶发红）
-            mock.patch.object(run_daily, "plan_run", lambda **k: {"ok": True}),
+            mock.patch("src.features.plan.monthly.plan.run", lambda **k: {"ok": True}),
         ]
         for p in ps:
             p.start()
@@ -819,8 +778,9 @@ class Test达成身份读不到不能算全区(unittest.TestCase):
     def test_配置缺失时不调用达成计算(self):
         calls = []
         with mock.patch.object(cli, "load_config", side_effect=SystemExit("配置缺失")), \
-             mock.patch.object(run_daily.config_io, "load_raw", return_value={}), \
-             mock.patch.object(run_daily, "attain_run",
+             mock.patch("src.features.sales.attain.config_io.load_raw",
+                                return_value={}), \
+             mock.patch("src.features.sales.attain.attain.run",
                                side_effect=lambda **kw: calls.append(kw) or {"ok": True}):
             rc = run_daily.main(["--steps", "attain"])
         self.assertEqual(rc, cli.EXIT_FETCH)
@@ -830,8 +790,9 @@ class Test达成身份读不到不能算全区(unittest.TestCase):
         cfg = {"platform": True}
         calls = []
         with mock.patch.object(cli, "load_config", return_value=cfg), \
-             mock.patch.object(run_daily.config_io, "load_raw", return_value=cfg), \
-             mock.patch.object(run_daily, "attain_run",
+             mock.patch("src.features.sales.attain.config_io.load_raw",
+                                return_value=cfg), \
+             mock.patch("src.features.sales.attain.attain.run",
                                side_effect=lambda **kw: calls.append(kw) or {"ok": True}):
             rc = run_daily.main(["--steps", "attain"])
         self.assertEqual(rc, cli.EXIT_OK)

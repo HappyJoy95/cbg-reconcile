@@ -18,24 +18,45 @@ from __future__ import annotations
 
 from ...modules.timer import When          # noqa: F401  （声明唤醒时刻用的）
 from ..registry import DEFAULT_WHENS, Feature, Step, Sub
+from .pos import step_run as pos_step_run
+
+
+def _pools_step_run(ctx):
+    """报量查询的定时入口归比较业务，不经 CLI 子命令派发。"""
+    from .comparison.execution import run
+    return run(ctx)
 
 #: 一级功能模块的声明（顺序 20：排在「销售数据」后面）
 FEATURE = Feature(
+    audience=("erp", "platform"), data="authorized", ops={"view": ("store", "manager", "platform")},
     key="compliance", label="五项合规", order=20, types="experience platform",
     children=[
         # ⭐ 「什么时候唤醒、醒来做什么」由**这两个关键字**说了算（用户 2026-09-20 的接口）：
         #   `cmd` = 做什么，`whens` = 什么时候。默认 21:00（跟以前那条计划任务同点）。
         Sub(key="pos", label="POS 合规", order=10,
             step=Step(cmd="pos", label="POS 合规", order=30,
-                      flag="--skip-pos", whens=DEFAULT_WHENS)),
+                      flag="--skip-pos", whens=DEFAULT_WHENS,
+                      partner_ok=False,          # 读玲珑数据：合作店不跑（协议 v2）
+                      run=pos_step_run)),        # 执行入口（协议 v2，收编 _step_pos）
         # ⚠ `key` 用的是**页面键**（`data-subtab="pools"`），不是文件夹名 ——
         #   文件夹叫 `comparison/`（双平台数据对比，域名更准），
         #   而页面/加载器/步骤名/跳过开关一路都是 `pools`。
         #   注册表的 key 必须跟**页面**对齐，否则"菜单漂移"那条测试就没意义了。
-        Sub(key="pools", label="报量查询", order=20,
+        Sub(ops={op: ("store", "manager", "platform") for op in ("view", "modify", "export")}, key="pools", label="报量查询", order=20,
             step=Step(cmd="pools", label="双平台数据对比", order=40,
-                      flag="--skip-pools", whens=DEFAULT_WHENS)),
+                      flag="--skip-pools", whens=DEFAULT_WHENS,
+                      partner_ok=False, run=_pools_step_run)),   # 读玲珑数据：合作店不跑（协议 v2）
         # ⚠ key 用 `compliance-settings`：二级 key 全表唯一（两个一级各有自己的「设置」）
-        Sub(key="compliance-settings", label="设置", order=90),
+        Sub(ops={"view": ("store", "manager", "platform"), "modify": ("store", "manager", "platform")}, key="compliance-settings", label="设置", order=90),
     ],
+)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/pos', 'pos', 'view'),
+    ('GET', '/api/pools/history', 'pools', 'view'),
+    ('GET', '/api/report', 'pools', 'view'),
+    ('DELETE', '/api/report', 'pools', 'modify'),
+    ('GET', '/api/report/download', 'pools', 'export'),
+    ('POST', '/api/pools-notify/clear', 'compliance-settings', 'modify'),
 )

@@ -265,7 +265,10 @@ class TestAutostart(unittest.TestCase):
             written["name"], written["value"], written["type"] = name, value, typ
 
         fake = _fake_winreg(CreateKeyEx=lambda *a, **k: FakeKey(), SetValueEx=fake_set)
+        from src import schedule
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.dict(sys.modules, {"winreg": fake}), \
                 mock.patch.object(autostart, "status", lambda root: {"installed": True}):
             res = autostart.install(self.root)
@@ -281,7 +284,10 @@ class TestAutostart(unittest.TestCase):
             raise OSError("拒绝访问")
 
         fake = _fake_winreg(CreateKeyEx=boom)
+        from src import schedule
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.dict(sys.modules, {"winreg": fake}):
             res = autostart.install(self.root)
         self.assertFalse(res["ok"])
@@ -309,7 +315,7 @@ class TestAutostart(unittest.TestCase):
         """项目挪过位置 → 注册的还是老路径，必须提示。"""
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
                 mock.patch.object(autostart, "_win_status",
-                                  lambda: {"installed": True, "registered": '"C:\\old\\boot.py"'}):
+                                  lambda root=None: {"installed": True, "registered": '"C:\\old\\boot.py"'}):
             st = autostart.status(self.root)
         self.assertTrue(st["installed"])
         self.assertTrue(st.get("stale"))
@@ -318,8 +324,8 @@ class TestAutostart(unittest.TestCase):
     def test_status_not_stale_when_same(self):
         with mock.patch.object(autostart.platform, "system", lambda: "Windows"), \
                 mock.patch.object(autostart, "_win_status",
-                                  lambda: {"installed": True,
-                                           "registered": autostart.command(self.root)}):
+                                  lambda root=None: {"installed": True,
+                                                     "registered": autostart.command(self.root)}):
             st = autostart.status(self.root)
         self.assertFalse(st.get("stale"))
 

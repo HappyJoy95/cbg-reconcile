@@ -180,6 +180,24 @@ class TestBundleContents(unittest.TestCase):
             with self.subTest(want=want):
                 self.assertIn(want, names)
 
+    def test_默认诊断包仍包含单店日志和报告摘要(self):
+        marker = "STORE-ONLY-SYNTHETIC-SERIAL"
+        tmp, root = _store(**{
+            "out/run.log": "本店日志 %s\n" % marker,
+            "out/run.log.1": "本店上一份日志\n",
+            "out/attain-2026.json": json.dumps({"serial": marker}),
+            "config/store-X.yaml": "store_code: SCN1\n",
+        })
+        self.addCleanup(tmp.cleanup)
+        z = bugreport.build_zip(root, "config/store-X.yaml")
+        with zipfile.ZipFile(z) as bundle:
+            names = bundle.namelist()
+            contents = "\n".join(
+                bundle.read(name).decode("utf-8", "replace") for name in names)
+        self.assertIn("执行日志.上一份.txt", names)
+        self.assertIn("报告摘要.txt", names)
+        self.assertIn(marker, contents)
+
     def test_说明里写清了有什么没什么(self):
         tmp, root = _store()
         self.addCleanup(tmp.cleanup)

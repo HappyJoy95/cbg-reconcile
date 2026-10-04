@@ -134,7 +134,7 @@ def plan(root=None) -> dict:
 
 def status(root=None) -> dict:
     """定时任务 + 开机自启 + **上次跑成没成**，一处看全。"""
-    from ... import autostart, schedule
+    from ...desktop import autostart, schedule
     from ...paths import ROOT
     from ...storage import runlog
     root = Path(root) if root else ROOT
@@ -195,25 +195,25 @@ def installed(root=None) -> bool:
 
 def install(root, time_str: str, **kw) -> dict:
     """注册每天那趟（转发 `schedule.install`，**参数校验也归它**）。"""
-    from ... import schedule
+    from ...desktop import schedule
     return schedule.install(Path(root), time_str, **kw)
 
 
 def remove(root=None, name: str = "") -> dict:
     """删一条（不传名字就删我们的全部）—— 卸载 / 换时间用。"""
-    from ... import schedule
+    from ...desktop import schedule
     return schedule.remove(name, root=root) if name else schedule.remove_all(root)
 
 
 def boot_install(root, elevated=None) -> dict:
     """设开机自启 —— `elevated=None` = **普通权限**（用户 2026-09-16 定的默认）。"""
-    from ... import autostart
+    from ...desktop import autostart
     return autostart.install(root, elevated=elevated)
 
 
-def boot_remove() -> dict:
-    from ... import autostart
-    return autostart.remove()
+def boot_remove(root=None) -> dict:
+    from ...desktop import autostart
+    return autostart.remove(root)
 
 
 # ═══════════════════════════════════════════════════════ 唤醒：谁、什么时候、做什么
@@ -293,7 +293,10 @@ def tasks(root=None) -> list:
     #     所以用 `enumerate` 的下标当第二关键字，别拿 cmd 字符串排（那样 `attain`
     #     会跑到 `dump` 前面，看着像随机的）。
     rows = []
+    from ..auth import runtime
     for _i, s in enumerate(steps()):
+        if not runtime.step_available(s.cmd, root, recurring=True):
+            continue
         entry = over.get(s.cmd) or {}
         mine = list(entry.get("whens") or s.whens)
         # 这一步**下一次**什么时候跑（界面「下次」那一列）。
@@ -1018,8 +1021,12 @@ def tick(root=None, *, spawn: Callable[[list], object] = None, config: str = "",
     #     登记一定还在**（旁边那趟跑完，下一跳照样会派发它）。
     once_problem = ""
     try:
-        once_mod.take_due(root, now=now, selected=())  # 每一跳照常清掉过期登记
+        from ..auth import runtime
+        if not runtime.is_lifehall(root):
+            once_mod.take_due(root, now=now, selected=())  # full 模式照常清掉过期登记
         for row in once_mod.peek_due(root, now=now):
+            if not runtime.step_available(row["cmd"], root, recurring=True):
+                continue
             when = once_mod._parse(row.get("at") or "") or now
             hits.append({"cmd": row["cmd"], "label": _label_of(row["cmd"]),
                          "order": _order_of(row["cmd"]), "slot": when,
@@ -1029,6 +1036,9 @@ def tick(root=None, *, spawn: Callable[[list], object] = None, config: str = "",
                          "once_at": row.get("at", "")})
     except Exception as e:                                     # noqa: BLE001
         once_problem = "算一次性任务时出错：%s: %s" % (type(e).__name__, e)
+    if not hits:
+        return {"ran": [], "why": once_problem}
+    hits = [h for h in hits if runtime.step_available(h["cmd"], root, recurring=True)]
     if not hits:
         return {"ran": [], "why": once_problem}
     hits.sort(key=lambda x: (x["slot"], x["order"]))

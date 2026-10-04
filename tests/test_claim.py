@@ -578,7 +578,7 @@ class Test玲珑数据源(unittest.TestCase):
                                    "note": ""}]) as ld, \
              mock.patch("src.features.tools.claim.activities."
                         "catalog.load_activities", return_value=[]):
-            d = compute.load(root=Path(self._tmp.name))
+            d = compute.load(root=Path(self._tmp.name), store_code="SCN1")
         ld.assert_called_once()
         self.assertTrue(d["ok"])
         self.assertEqual(d["src"], "orders")

@@ -19,10 +19,21 @@ from ..registry import Feature
 
 #: `order=35` 排在「库存盘点」(30) 之后。
 FEATURE = Feature(
+    audience=("erp", "platform"), data="authorized", ops={"view": ("store", "manager", "platform")},
     key="valueadd", label="增值", order=35, types="",
     children=[
         film.SUB,
         benefit.SUB,
         settings.SUB,
     ],
+)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/film', 'film', 'view'),
+    ('GET', '/api/film/drill', 'film', 'view'),
+    ('POST', '/api/film/export', 'film', 'export'),
+    ('GET', '/api/benefit', 'benefit', 'view'),
+    ('GET', '/api/benefit/drill', 'benefit', 'view'),
+    ('POST', '/api/benefit/export', 'benefit', 'export'),
 )

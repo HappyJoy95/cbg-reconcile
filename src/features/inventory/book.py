@@ -35,7 +35,7 @@ def _s(v) -> str:
 
 def client(verbose: bool = False):
     """建一个云商客户端（凭据走 `.secrets/erp.env` 那条链）。"""
-    from ...erp import ErpClient
+    from ...integrations.erp import ErpClient
     return ErpClient(verbose=verbose)
 
 

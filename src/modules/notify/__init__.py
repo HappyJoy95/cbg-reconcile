@@ -146,7 +146,7 @@ def _seal_all(attachments, root):
 
 
 def _send_mail(content: dict, cfg: dict, root=None) -> str:
-    from ... import mailer
+    from ...integrations import mailer
     paths = mailer.load_mail_paths(cfg, root)
     if not paths:
         # 中台回落已在 load_mail_paths / load_mail_config 里做过；
@@ -209,7 +209,7 @@ def _send_wecom(content: dict, cfg: dict, root=None) -> str:
     ⚠ 这里只做**分发 + 按路径扇出**：内容怎么拼、要不要推，都是业务的事。
     2026-09-22：有几条 webhook 路径就往几个群各推一遍。
     """
-    from ... import wecom
+    from ...integrations import wecom
     tpl = content.get("template") or ""
     if tpl not in WECom_TEMPLATES:
         raise ValueError("没说清用哪套模板（template=%s；可选：%s）"
@@ -286,6 +286,9 @@ def send(code: str, content: dict, *, cfg: dict, root=None, feature: str = "") -
 
     ⚠ 平台（邮件/企微）走全局通道配置，**不在这拦**。
     """
+    from ..auth import runtime
+    if runtime.is_lifehall(root):
+        return {"ok": False, "state": "disabled", "why": "生活馆入口没有业务推送"}
     from . import prefs as P
     if feature:
         why = P.why_off(feature, root)

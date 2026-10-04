@@ -123,6 +123,17 @@ class Test校验能拦住撞车(unittest.TestCase):
                                                        step=Step(cmd="dup", label="步骤"))])
         self.assertTrue(any("定时步骤重复" in m for m in self._bad([a, b])))
 
+    def test_路由只能使用本功能或本功能子页的权限(self):
+        a = Feature(key="a", label="甲", audience=("erp",),
+                    children=[Sub(key="a-view", label="甲页",
+                                  ops={"view": ("store",)})],
+                    routes=(("GET", "/api/a", "b-view", "view"),))
+        b = Feature(key="b", label="乙", audience=("erp",),
+                    children=[Sub(key="b-view", label="乙页",
+                                  ops={"view": ("store",)})])
+        self.assertTrue(any("路由 /api/a 使用了功能 a 之外的权限页 b-view" in m
+                            for m in self._bad([a, b])))
+
     def test_没中文名也报(self):
         self.assertTrue(any("没有中文名" in m
                             for m in self._bad([Feature(key="a", label="")])))
@@ -146,8 +157,11 @@ class Test注册表与控制台菜单不漂移(unittest.TestCase):
     def test_每个子模块在_HTML_里都有(self):
         for m in registry.menus():
             for c in m["children"]:
-                self.assertIn('data-subtab="%s"' % c["key"], INDEX,
-                              "注册表里有子模块 %s，页面上没有" % c["key"])
+                # 分销四种视角由工作区内的 data-tab 控件切换，不再占四条导航菜单。
+                internal = ('class="dist-view-tab' in INDEX and
+                            'data-tab="%s"' % c["key"] in INDEX)
+                self.assertTrue('data-subtab="%s"' % c["key"] in INDEX or internal,
+                                "注册表里有子模块 %s，页面上没有" % c["key"])
 
     def test_页面上的一级标签也都注册了(self):
         """反向：页面上有的，注册表里也得有（否则就是漏登记）。"""

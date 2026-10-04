@@ -161,7 +161,7 @@ def schedule_text(root: Path) -> str:
     勾选项，没有任何凭据。而它是"界面读不到 Windows 任务详情"时唯一的线索，
     排查定时任务问题非它不可。
     """
-    from . import schedule as sch
+    from .desktop import schedule as sch
     lines = []
     try:
         lines.append("任务脚本：%s" % sch.script_path(root))
@@ -208,14 +208,22 @@ def config_text(root: Path, config_path) -> str:
     return head + body
 
 
-def readme_text(root: Path, config_path) -> str:
+def readme_text(root: Path, config_path, include_business_details=True) -> str:
+    if include_business_details:
+        log_item = "  执行日志.txt    ← **先看这个**。就是 out/run.log 的尾部，出错的现场在这"
+        data_note = ("⚠ 但**有业务数据**：日志里会出现门店名、串号、金额。\n"
+                    "   发之前确认一下收件人是自己人。")
+    else:
+        log_item = "  执行日志.txt    ← 区长身份下已省略业务日志，文件里只有范围说明"
+        data_note = ("区长身份的支持包会省略业务运行日志、历史日志和报告摘要，"
+                    "避免带出授权范围外的门店数据。")
     return """这个包里是什么
 ================================================================
 
 给修的人：门店那边点了「上报 bug」，这是自动收集的现场。
 解压后按下面的顺序看就行。
 
-  执行日志.txt    ← **先看这个**。就是 out/run.log 的尾部，出错的现场在这
+%s
   定时任务.txt    ← 定时任务的注册情况、run.bat 内容、界面读到的参数
   配置.yaml       ← 门店配置（只有路径，没有账号密码）
   环境.txt        ← 版本 / Python / 系统 / 依赖 / 关键文件在不在
@@ -229,16 +237,15 @@ def readme_text(root: Path, config_path) -> str:
 
 也就是说：这个包里**没有能拿去登录的凭据**，可以放心发。
 
-⚠ 但**有业务数据**：日志里会出现门店名、串号、金额。
-   发之前确认一下收件人是自己人。
+%s
 
 生成时间：%s
 工作目录：%s
 配置：%s
-""" % (_now().strftime("%Y-%m-%d %H:%M:%S"), root, config_path)
+""" % (log_item, data_note, _now().strftime("%Y-%m-%d %H:%M:%S"), root, config_path)
 
 
-def collect(root, config_path) -> "list[tuple[str, bytes]]":
+def collect(root, config_path, include_business_details=True) -> "list[tuple[str, bytes]]":
     """收集要进包的东西。返回 `[(包内文件名, 内容字节)]`。
 
     ⚠ **先把内容收齐，再写 zip** —— 收集中途出错的话不会留下半个包。
@@ -246,28 +253,32 @@ def collect(root, config_path) -> "list[tuple[str, bytes]]":
     root = Path(root)
     out_dir = root / "out"
 
-    log_text, log_note = tail_log(out_dir / "run.log")
-    if log_note:
-        log_text = log_note
+    if include_business_details:
+        log_text, log_note = tail_log(out_dir / "run.log")
+        if log_note:
+            log_text = log_note
+    else:
+        # 区长日志没有逐行门店归属证明；过滤文本不可靠，所以不收集任何业务日志。
+        log_text = "业务运行日志、历史日志和报告摘要已按区长权限范围省略。"
     items = [
-        ("说明.txt", readme_text(root, config_path)),
+        ("说明.txt", readme_text(root, config_path, include_business_details)),
         ("执行日志.txt", log_text),
         ("定时任务.txt", schedule_text(root)),
         ("配置.yaml", config_text(root, config_path)),
         ("环境.txt", environment_text(root)),
     ]
-    # 差异报告的摘要（旁车 json）—— 小、能看出对账到底跑没跑、结果如何。
-    # ⚠ 不含 xlsx（那里面是完整串号清单，且体积大）。
-    for name in ("run.log.1",):
-        p = out_dir / name
-        if p.is_file():
-            items.append(("执行日志.上一份.txt", tail_log(p, 512 * 1024)[0]))
-    reports = sorted(out_dir.glob("*.json"))[-6:]
-    if reports:
-        blob = []
-        for p in reports:
-            blob.append("── %s ──\n%s" % (p.name, _read_text(p, 32 * 1024)))
-        items.append(("报告摘要.txt", "\n\n".join(blob)))
+    if include_business_details:
+        # 只有明确单店/全量身份能拿这些文件：这些 JSON 没有逐行门店归属信息。
+        for name in ("run.log.1",):
+            p = out_dir / name
+            if p.is_file():
+                items.append(("执行日志.上一份.txt", tail_log(p, 512 * 1024)[0]))
+        reports = sorted(out_dir.glob("*.json"))[-6:]
+        if reports:
+            blob = []
+            for p in reports:
+                blob.append("── %s ──\n%s" % (p.name, _read_text(p, 32 * 1024)))
+            items.append(("报告摘要.txt", "\n\n".join(blob)))
 
     encoded = []
     for name, text in items:
@@ -300,14 +311,15 @@ def assert_no_secrets(items) -> None:
                 raise ValueError("⛔ %s 里出现了 %s —— 不该进包" % (name, why))
 
 
-def build_zip(root, config_path, out_dir=None) -> Path:
+def build_zip(root, config_path, out_dir=None, include_business_details=True) -> Path:
     """收集 → 打包。**返回包的路径，这一步不碰网络。**"""
     root = Path(root)
     out_dir = Path(out_dir) if out_dir else (root / "out")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = _now().strftime("%Y%m%d-%H%M%S")
     path = out_dir / ("report-bug-%s.zip" % stamp)
-    items = collect(root, config_path)
+    items = collect(root, config_path,
+                    include_business_details=include_business_details)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, blob in items:

@@ -232,7 +232,8 @@ class Test接口和前端接线(_Base):
 
     def test_前端只画行不自己判断(self):
         """⚠ 抽屉里那句话**必须**来自后端。前端自己拼 = pytest 测不到。"""
-        raw = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        raw = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         self.assertIn("'/api/status'", raw)
         self.assertIn("function renderStatus(", raw)
         # ⚠ **必须剥注释再查**：这个项目的注释是"记录踩过的坑"风格，会**原样提到**
@@ -244,10 +245,8 @@ class Test接口和前端接线(_Base):
         #   全局查会连它们一起判红，然后你就会想去改本来没错的代码。
         # ⚠ 结束锚点用**函数名**，不用文案 —— 文案会被改（「销售达成」这天就
         #   改成了「周度目标达成情况」），拿它当锚点等于给测试埋一颗定时炸弹。
-        # ⚠ 锚点要写**带 `async function` 的完整形态**：光是 `loadAttain` 的话
-        #   第一次出现在上面的 `SUBTABS` 表里（在 STATUS_KIND **之前**），
-        #   切片会反过来、切出空串 —— 下面那句 assertTrue 就是拦这个的。
-        block = js[js.index("const STATUS_KIND"):js.index("async function loadAttain")]
+        #   周度达成已迁到业务页脚本，状态区用自己的 loader 作结束锚点。
+        block = js[js.index("const STATUS_KIND"):js.index("async function loadStatus")]
         self.assertTrue(block.strip(), "没切到状态那段 —— 锚点漂了")
         for word in ("内置账号", "自检失败", "都没开", "未导入", "已配置", "没配置"):
             with self.subTest(word=word):
@@ -273,7 +272,8 @@ class Test悬浮窗(_Base):
 
     def setUp(self):
         super().setUp()
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         self.css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
         # ⚠ 令牌（`--fab-*` 那些）2026-09-18 搬去 `theme.css` 了 ——
         #   只读 style.css 的话，下面那些"几何对得上吗"的断言会全部找不到锚点。

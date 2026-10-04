@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src import web                                              # noqa: E402
+from src.features.compliance.comparison import http as comparison_http  # noqa: E402
 
 
 class _Server:
@@ -174,18 +175,18 @@ class Test范围判断(unittest.TestCase):
     """`scope_store_ok()` —— 写操作和"按店读"都要先问它。"""
 
     def test_平台全放(self):
-        self.assertTrue(web.scope_store_ok({"stores": None}, "随便哪家店"))
+        self.assertTrue(web.scope_store_ok({"role": "platform", "stores": None}, "随便哪家店"))
 
     def test_门店只放本店(self):
-        sc = {"stores": {"青岛城阳万达店", "城阳万达"}}
+        sc = {"role": "store", "stores": {"青岛城阳万达店", "城阳万达"}}
         self.assertTrue(web.scope_store_ok(sc, "青岛城阳万达店"))
         self.assertTrue(web.scope_store_ok(sc, "城阳万达"), "别名也算本店")
         self.assertFalse(web.scope_store_ok(sc, "青岛城阳万象汇店"))
 
     def test_空名字一律不放(self):
         """⚠「没指定门店」不等于「随便哪家」—— 这种默认值最贵。"""
-        self.assertFalse(web.scope_store_ok({"stores": None}, ""))
-        self.assertFalse(web.scope_store_ok({"stores": {"甲店"}}, "  "))
+        self.assertFalse(web.scope_store_ok({"role": "platform", "stores": None}, ""))
+        self.assertFalse(web.scope_store_ok({"role": "store", "stores": {"甲店"}}, "  "))
 
 
 class Test写操作真的被拦(_Base):
@@ -289,7 +290,7 @@ class Test身份下发给前端(_Base):
         self.assertIn("stores", d["role"])
 
     def test_overview_带_pages(self):
-        """⚠ 前端 `applyProfile` 就是读它渲染的 —— 少了这个键，页面**一页都不藏**。"""
+        """前端 `applyProfile` 依赖服务端 pages；缺失时会 fail-closed 隐藏菜单。"""
         _code, d = self.srv.request("GET", "/api/overview")
         pages = d["role"].get("pages")
         self.assertIsInstance(pages, list)
@@ -461,16 +462,20 @@ class Test谁能看见哪些页(unittest.TestCase):
                                "stores": {"青岛城阳万达店"}}, self.root)
         self.assertNotIn("stores", store, "门店不该看见「数据交换」那一行")
 
-    def test_平台岗全开(self):
+    def test_平台岗只看有查看权限的页面(self):
         pages = web.pages_for({"role": web.ROLE_PLATFORM, "stores": None}, self.root)
-        self.assertEqual(pages, sorted(web.PAGE_RULES))
+        # 收银页允许平台入口进入，但其 `view` 权限只给门店身份。
+        # 门店类型可见性不能盖过业务身份权限。
+        self.assertNotIn("cashier", pages)
+        self.assertIn("distribution", pages)
+        self.assertEqual(pages, sorted(k for k in web.PAGE_RULES if k != "cashier"))
 
     def test_认不出来的身份退到最窄(self):
         """⚠ 空 scope（画像还没读出来）**不能**给全 —— 那是"谁都看不见"。
-        `pages_for` 只在 `role` 认不出来时按"没有玲珑"处理。"""
+        未知身份没有有效入口 audience，因此业务页默认隐藏。"""
         pages = web.pages_for({}, self.root)
         self.assertNotIn("pos", pages)
-        self.assertIn("sales", pages)
+        self.assertNotIn("sales", pages)
 
     def test_名字两种写法都算(self):
         """区长名单里写的是腾讯文档那种叫法（「城阳万达」），名单里是「青岛城阳万达店」。
@@ -594,13 +599,18 @@ class Test四池明细按范围筛(_Base):
 
     def test_区长只留所辖(self):
         scope = {"role": "manager", "stores": {"青岛城阳万达店"}}
-        got = web._scope_pools(scope, self.ROWS)
+        got = comparison_http.scope_detail(
+            scope, self.ROWS, scope_store_ok=web.scope_store_ok,
+            has_data_grant=web._scope_has_data_grant)
         self.assertEqual([r["sn"] for r in got["AD"]], ["A1"])
         self.assertEqual(got["BC"], [])
         self.assertEqual(got["counts"]["AD"], 1)
 
     def test_平台不过滤(self):
-        got = web._scope_pools({"role": "platform", "stores": None}, self.ROWS)
+        got = comparison_http.scope_detail(
+            {"role": "platform", "stores": None}, self.ROWS,
+            scope_store_ok=web.scope_store_ok,
+            has_data_grant=web._scope_has_data_grant)
         self.assertEqual(len(got["AD"]), 2)
         self.assertEqual(len(got["BC"]), 1)
         self.assertNotIn("scoped", got)
@@ -615,15 +625,28 @@ class Test四池明细按范围筛(_Base):
         stores = web._store_aliases(["青岛城阳万达店"], self.root)
         self.assertIn("城阳万达", stores, "别名没展开？")
         rows = {"AD": [{"sn": "A1", "玲珑门店": "城阳万达"}], "counts": {"AD": 1}}
-        got = web._scope_pools({"role": "manager", "stores": stores}, rows)
+        got = comparison_http.scope_detail(
+            {"role": "manager", "stores": stores}, rows,
+            scope_store_ok=web.scope_store_ok,
+            has_data_grant=web._scope_has_data_grant)
         self.assertEqual(len(got["AD"]), 1, "短名对不上 ⇒ 区长看不到自己店的差异")
 
-    def test_两边都没写店名的行留着(self):
-        """宁多勿少：看不出来源的行删掉，用户会以为数据丢了。"""
+    def test_缺失店名和越权scope不放行(self):
+        """来源不明的差异行不能进入门店/区长的数据范围。"""
         rows = {"AD": [{"sn": "A1"}, {"sn": "A2", "云商门店": "别家店"}],
                 "counts": {"AD": 2}}
-        got = web._scope_pools({"role": "manager", "stores": {"青岛城阳万达店"}}, rows)
-        self.assertEqual([r["sn"] for r in got["AD"]], ["A1"])
+        got = comparison_http.scope_detail(
+            {"role": "manager", "stores": {"青岛城阳万达店"}}, rows,
+            scope_store_ok=web.scope_store_ok,
+            has_data_grant=web._scope_has_data_grant)
+        self.assertEqual(got["AD"], [])
+        self.assertEqual(got["counts"]["AD"], 0)
+        self.assertIsNone(got["counts"]["AC"])
+        invalid = comparison_http.scope_detail(
+            {"role": "manager", "stores": None}, rows,
+            scope_store_ok=web.scope_store_ok,
+            has_data_grant=web._scope_has_data_grant)
+        self.assertEqual(invalid["AD"], [])
 
 
 def _make_pkg(root, *, code="SCN231409", date="2026-09-21"):

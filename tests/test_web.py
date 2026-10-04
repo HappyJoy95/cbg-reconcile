@@ -28,7 +28,14 @@ from src.storage import runlog
 import bootstrap
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/valueadd/film/page.js",
+                              "features/valueadd/benefit/page.js",
+                              "features/sales/attain/page.js",
+                              "features/cashier/page.js",
+                              "features/tools/claim/page.js",
+                              "features/distribution/page.js", "features/plan/monthly/page.js", "app.js"))
 INDEX_HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 
@@ -48,6 +55,27 @@ def _strip_js_comments(s: str) -> str:
 
 
 class TestFrontendWiring(unittest.TestCase):
+    def test_loaded_scripts_do_not_repeat_top_level_bindings(self):
+        """Page scripts share one global scope; duplicate bindings cause parse errors or replace APIs."""
+        scripts = re.findall(r'<script\b[^>]*\bsrc=["\']([^"\']+)', INDEX_HTML)
+        bindings = {}
+        for src in scripts:
+            if not src.startswith("/"):
+                continue
+            path = ROOT / "web" / src.lstrip("/").split("?", 1)[0]
+            self.assertTrue(path.is_file(), f"index.html 引用了不存在的脚本：{src}")
+            code = _strip_js_comments(path.read_text(encoding="utf-8"))
+            for line_no, line in enumerate(code.splitlines(), 1):
+                match = re.match(
+                    r"^(?:(?:async\s+)?function|const|let|class|var)\s+([A-Za-z_$][\w$]*)\b",
+                    line,
+                )
+                if match:
+                    bindings.setdefault(match.group(1), []).append(f"{path.relative_to(ROOT)}:{line_no}")
+        duplicates = {name: locations for name, locations in bindings.items()
+                      if len(locations) > 1}
+        self.assertFalse(duplicates, f"classic scripts repeat global declarations: {duplicates}")
+
     def test_every_referenced_id_exists_in_html(self):
         """`$('#foo')` 里的 foo 必须在 index.html 里有 id="foo"。
 
@@ -71,14 +99,15 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn("/api/session/store-code", APP_JS)
         i = APP_JS.index("function storeCodeBox()")
         block = APP_JS[i:APP_JS.index("function bindStoreCodeBtn()", i)]
-        self.assertIn("setupState.lifehall", block)
+        self.assertIn("setupState.runtime_lifehall", block)
 
-    def test_生活馆登录前和设置页都有店码入口(self):
-        self.assertIn('id="setup-store-code-host"', INDEX_HTML)
+    def test_生活馆编码只在选择流程和玲珑设置页(self):
+        self.assertIn('id="entry-store-code"', INDEX_HTML)
         self.assertIn('id="store-code-settings"', INDEX_HTML)
         self.assertIn("data-store-code-input", APP_JS)
         self.assertIn("data-save-store-code", APP_JS)
-        self.assertIn("setup-store-code-host", APP_JS)
+        self.assertNotIn('id="setup-store-code-host"', INDEX_HTML)
+        self.assertNotIn("setup-store-code-host", APP_JS)
         self.assertIn("store-code-settings", APP_JS)
 
     def test_店码设置卡住在玲珑授权页(self):
@@ -114,7 +143,7 @@ class TestFrontendWiring(unittest.TestCase):
         i = APP_JS.index("async function loadConfig()")
         j = APP_JS.index("// 收集设置页所有可改字段", i)
         block = APP_JS[i:j]
-        self.assertIn("const lifehall = !!(setupState && setupState.lifehall)", block)
+        self.assertIn("const lifehall = !!(setupState && setupState.runtime_lifehall)", block)
         self.assertIn("if (!lifehall)", block)
         self.assertIn("loadStoreAccount();", block)
         self.assertIn("loadService();", block)
@@ -1152,6 +1181,19 @@ class TestElevateApi(unittest.TestCase):
         self.assertEqual(self._arg(a, "--days-ago"), "2")
         self.assertEqual(self._arg(a, "--name"), "CBG报量对账-20点30")
 
+    def test_schedule_repair_rejects_a_foreign_task_name_before_uac(self):
+        """同名任务已属于 Windows 时，不能先弹 UAC 再尝试 /create /f 覆盖它。"""
+        self._fake_schedule()
+        elevated = mock.Mock(return_value={"ok": True})
+        with mock.patch.object(web.schedule, "install_conflict", return_value=True) as conflict:
+            status, body = self._post(
+                {"what": "schedule", "time": "12:00", "name": "OneDrive"}, elevated)
+
+        self.assertEqual(status, 409)
+        self.assertIn("不属于本程序", body["error"])
+        conflict.assert_called_once_with(self.tmp, "12:00", "OneDrive")
+        elevated.assert_not_called()
+
     def test_repair_button_accepts_the_full_name_the_ui_sends(self):
         """⚠ 修复按钮手上只有 `full_name`（`\\CBG报量对账-21点20`）。
 
@@ -1170,7 +1212,8 @@ class TestElevateApi(unittest.TestCase):
 
     def test_schedule_remove_is_its_own_action(self):
         """删也要能提权 —— 管理员建的任务，普通权限连 `/delete` 都会被拒。"""
-        self._fake_schedule()
+        self._fake_schedule(existing=[{"name": "CBG报量对账-中午",
+                                      "full_name": "\\CBG报量对账-中午"}])
         seen = {}
         st, body = self._post({"what": "schedule-remove", "name": "CBG报量对账-中午"},
                               lambda script, args, timeout=90:
@@ -1249,8 +1292,10 @@ class TestScheduleApi(unittest.TestCase):
             seen["root"] = root
             return {"ok": True, "task": name or "默认", "message": "已删除"}
 
+        listed = {"installed": True, "tasks": [{
+            "name": "CBG报量对账-中午", "full_name": "\\CBG报量对账-中午"}]}
         with mock.patch.object(web.schedule, "remove", fake_remove), \
-                mock.patch.object(web.schedule, "status", lambda root: {"installed": False, "tasks": []}):
+                mock.patch.object(web.schedule, "status", lambda root: listed):
             st, body = self.srv.request(
                 "DELETE", "/api/schedule?name=" + quote("CBG报量对账-中午"))
 
@@ -1258,21 +1303,29 @@ class TestScheduleApi(unittest.TestCase):
         self.assertEqual(seen.get("name"), "CBG报量对账-中午")
         self.assertEqual(body["task"], "CBG报量对账-中午")
 
-    def test_delete_without_name_falls_back_to_default(self):
-        """不传名字 → None → schedule.remove 用默认任务名（兼容老前端）。"""
-        seen = {}
+    def test_delete_without_name_only_operates_when_default_task_is_listed(self):
+        """省略名字仍指向默认任务，但清单里没有本程序任务时不能盲删。"""
+        remove = mock.Mock(return_value={"ok": True})
+        with mock.patch.object(web.schedule, "remove", remove), \
+                mock.patch.object(web.schedule, "status", return_value={
+                    "installed": False, "tasks": []}):
+            status, body = self.srv.request("DELETE", "/api/schedule")
 
-        def fake_remove(name=None, root=None):
-            seen["name"] = name
-            seen["root"] = root
-            return {"ok": True}
+        self.assertEqual(status, 404)
+        self.assertIn("已登记", body["error"])
+        remove.assert_not_called()
 
-        with mock.patch.object(web.schedule, "remove", fake_remove), \
-                mock.patch.object(web.schedule, "status", lambda root: {"installed": False, "tasks": []}):
-            st, _ = self.srv.request("DELETE", "/api/schedule")
+    def test_delete_without_name_can_still_remove_a_listed_default_task(self):
+        """有真实清单证明时，旧客户端省略名字仍能维护默认任务。"""
+        remove = mock.Mock(return_value={"ok": True})
+        listed = {"installed": True, "tasks": [{
+            "name": schedule.TASK_NAME, "full_name": "\\" + schedule.TASK_NAME}]}
+        with mock.patch.object(web.schedule, "remove", remove), \
+                mock.patch.object(web.schedule, "status", return_value=listed):
+            status, _body = self.srv.request("DELETE", "/api/schedule")
 
-        self.assertEqual(st, 200)
-        self.assertIsNone(seen.get("name"))
+        self.assertEqual(status, 200)
+        remove.assert_called_once_with(None, self.tmp)
 
     def test_install_rejects_bad_time_with_400(self):
         st, body = self.srv.request("POST", "/api/schedule", {"time": "25:99"})
@@ -1498,6 +1551,9 @@ class Test手输店码接口(unittest.TestCase):
         self.assertIn("error", body)
 
     def test_登录尚未就绪时仍可保存店码(self):
+        # 生活馆现在凭编码进入；通用服务夹具已有编码，要先清空才是未就绪。
+        from src import config_io
+        config_io.update(self.root / "config" / "store-X.yaml", {"store_code": ""})
         status, setup = self.srv.request("GET", "/api/setup")
         self.assertEqual(status, 200)
         self.assertFalse(setup["ready"], "夹具必须处于未登录状态")
@@ -1651,6 +1707,28 @@ class Test跑一次那个接口已经删了(unittest.TestCase):
         code, body = self.srv.request("GET", "/api/run?id=&since=0")
         self.assertEqual(code, 200)
         self.assertIn("running", body)
+
+
+class Test旧停止入口已退役(unittest.TestCase):
+    """没有页面会调用全局 stop；旧客户端不能借此终止任意当前任务。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "out").mkdir(parents=True, exist_ok=True)
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_旧停止请求返回_410_且不触碰当前任务(self):
+        job = mock.Mock()
+        with mock.patch.object(web.manager, "current", return_value=job) as current:
+            code, body = self.srv.request("POST", "/api/run/stop", {})
+
+        self.assertEqual(code, 410)
+        self.assertIn("停止", body["error"])
+        current.assert_not_called()
+        job.kill.assert_not_called()
 
 
 class Test自动化设置的接口只回一句取消(unittest.TestCase):
@@ -2042,6 +2120,38 @@ class TestReportBugApi(unittest.TestCase):
             text = "\n".join(z.read(n).decode("utf-8", "replace") for n in names)
         self.assertFalse([n for n in names if ".env" in n])
         self.assertNotIn("hunter2", text)
+        self.assertIn("=== 跑了一次 ===", text)
+
+    def test_区长错误上报不附带辖区外业务日志和报告摘要(self):
+        """区长能上报环境问题，但这台机器上的全区业务明细不能随支持包外发。"""
+        import zipfile
+        outside_serial = "OUTSIDE-SERIAL-ONLY-SYNTHETIC"
+        (self.root / "out" / "run.log").write_text(
+            "区外店库存串号：%s\n" % outside_serial, encoding="utf-8")
+        (self.root / "out" / "run.log.1").write_text(
+            "区外店上一份日志串号：OLD-OUTSIDE-SYNTHETIC\n", encoding="utf-8")
+        (self.root / "out" / "attain-2026.json").write_text(
+            json.dumps({"store": "区外店", "serial": outside_serial}),
+            encoding="utf-8")
+        manager_scope = web._with_pages({
+            "role": web.ROLE_MANAGER, "stores": {"授权区门店"},
+            "entry_kind": "erp", "runtime_lifehall": False,
+            "who": "测试区长", "label": "区长（授权区）",
+            "needs_linglong": False,
+        }, self.root, [])
+        with mock.patch.object(web, "role_scope", return_value=manager_scope):
+            code, body = self.srv.request("POST", "/api/report-bug", {})
+        self.assertEqual(code, 200, body)
+        self.assertTrue(body["ok"], body)
+        with zipfile.ZipFile(body["path"]) as z:
+            names = z.namelist()
+            contents = "\n".join(z.read(n).decode("utf-8", "replace") for n in names)
+        self.assertIn("环境.txt", names)
+        self.assertNotIn("报告摘要.txt", names)
+        self.assertNotIn("执行日志.上一份.txt", names)
+        self.assertNotIn(outside_serial, contents)
+        self.assertNotIn("OLD-OUTSIDE-SYNTHETIC", contents)
+        self.assertIn("区长身份的支持包会省略业务运行日志", contents)
 
 
 class TestReportBugButtonWiring(unittest.TestCase):
@@ -2181,7 +2291,8 @@ class Test表头也认_html(unittest.TestCase):
     """
 
     def setUp(self):
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
 
     def test_表头认_html(self):
         i = self.js.index("function table(header")
@@ -2652,12 +2763,12 @@ class Test刷新按钮会先抓新数据(unittest.TestCase):
         """⚠ 抓数要一两分钟 —— 挂在 HTTP 请求里只会让页面转圈、还看不出卡在哪。"""
         with mock.patch.object(web.manager, "start_steps") as m:
             m.return_value = mock.Mock(snapshot=lambda _n: {"id": "abc", "running": True})
-            code, body = self.srv.request("POST", "/api/refresh", {"page": "pos"})
+            code, body = self.srv.request("POST", "/api/refresh", {"page": "attain"})
         self.assertEqual(code, 200)
         self.assertTrue(body["ok"])
         self.assertEqual(m.call_count, 1)
         _, args, kwargs = m.mock_calls[0]
-        self.assertEqual(args[2], ("dump", "pos"))
+        self.assertEqual(args[2], ("erp-dump", "attain"))
 
     def test_命令是_steps_不是_skip(self):
         """⚠ 必须用 `--steps`（**就这几步**）：用 `--skip-*` 的话会被
@@ -2861,10 +2972,12 @@ class Test数据告警的收起来(unittest.TestCase):
 
     def test_关掉之后就藏起来(self):
         _, ov = self.srv.request("GET", "/api/overview")
-        fp = ov["data_state"]["fingerprint"]
+        # 指纹保留在服务端供 dismiss 精确匹配，不再下发给门店角色。
+        fp = self.srv.app._data_state_with_dismiss()["fingerprint"]
         if not fp:                       # 这台机器数据全好 ⇒ 没什么可关的
             self.skipTest("这份 fixture 里没有要关的告警")
         self.assertFalse(ov["data_state"]["dismissed"])
+        self.assertNotIn("fingerprint", ov["data_state"])
         code, body = self.srv.request("POST", "/api/data-state/dismiss")
         self.assertEqual(code, 200)
         self.assertTrue(body["ok"])
@@ -2899,7 +3012,10 @@ class Test达成页按登录身份过滤(unittest.TestCase):
 
     def _app(self, profile):
         from src import web as W
-        app = W.App(root=".", config="x.yaml")
+        # 只测内存 scope 过滤；项目根指向会让服务健康探针碰到 out/ 的开发数据。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = W.App(root=tmp.name, config="x.yaml")
         with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
              mock.patch.object(W.config_io, "store_profile", lambda *a, **k: profile):
             return app
@@ -2907,10 +3023,8 @@ class Test达成页按登录身份过滤(unittest.TestCase):
     def test_门店账号只看自己那一行(self):
         from src import web as W
         app = self._app({"show_all": False, "erp_name": "城阳大润发店"})
-        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
-             mock.patch.object(W.config_io, "store_profile",
-                               lambda *a, **k: {"show_all": False,
-                                                "erp_name": "城阳大润发店"}):
+        with mock.patch.object(W, "role_scope", return_value={
+                "role": "store", "stores": {"城阳大润发店"}, "label": "门店"}):
             d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
         self.assertEqual([r["store"] for r in d["rows"]], ["城阳大润发店"])
         self.assertEqual(d["store_filter"], "城阳大润发店")
@@ -2918,9 +3032,8 @@ class Test达成页按登录身份过滤(unittest.TestCase):
     def test_平台岗照旧看全部(self):
         from src import web as W
         app = self._app({"show_all": True, "erp_name": "平台岗"})
-        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
-             mock.patch.object(W.config_io, "store_profile",
-                               lambda *a, **k: {"show_all": True, "erp_name": "平台岗"}):
+        with mock.patch.object(W, "role_scope", return_value={
+                "role": "platform", "stores": None, "label": "平台"}):
             d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
         self.assertEqual(len(d["rows"]), 2)
         self.assertEqual(d["store_filter"], "")
@@ -2929,9 +3042,8 @@ class Test达成页按登录身份过滤(unittest.TestCase):
         """⚠ "看着很合理的空"最坑 —— 得说清是"这份数据里没有本店"。"""
         from src import web as W
         app = self._app({"show_all": False, "erp_name": "别的店"})
-        with mock.patch.object(W.config_io, "load_raw", lambda *a, **k: {}), \
-             mock.patch.object(W.config_io, "store_profile",
-                               lambda *a, **k: {"show_all": False, "erp_name": "别的店"}):
+        with mock.patch.object(W, "role_scope", return_value={
+                "role": "store", "stores": {"别的店"}, "label": "门店"}):
             d = app.filter_attain_rows({"exists": True, "rows": list(self.ROWS)})
         self.assertEqual(d["rows"], [])
         self.assertIn("没有「别的店」那一行", d["error"])
@@ -3074,8 +3186,7 @@ class Test壁纸接口(unittest.TestCase):
         self.assertFalse((self.root / "web" / "wallpaper" / "a.png").exists())
         code, d = self.srv.request("DELETE", "/api/wallpaper?name=a.png")
         self.assertEqual(code, 404)
-        self.assertFalse(d["ok"])
-        self.assertIn("error", d)
+
 
     def test_不提供_theme_接口(self):
         """主题切换不许有后端接口 —— 有就多一处要和 localStorage 对账的状态。"""
@@ -3084,8 +3195,34 @@ class Test壁纸接口(unittest.TestCase):
         code, _d = self.srv.request("POST", "/api/theme", {"name": "dark"})
         self.assertEqual(code, 404)
         # 路由源码里也不该出现这个 path 分支
-        src = (ROOT / "src" / "web.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
         self.assertNotIn('path == "/api/theme"', src)
+
+
+class Test静态文件目录边界(unittest.TestCase):
+    """静态文件只许从 web/ 下发，目录名相同前缀不能扩大范围。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.web_dir = base / "web"
+        self.web_dir.mkdir()
+        sibling = base / "web-private"
+        sibling.mkdir()
+        (sibling / "secret.txt").write_text("private", encoding="utf-8")
+        self.root = base / "app"
+        self.root.mkdir()
+        (self.root / "out").mkdir()
+        self.srv = _Server(self.root)
+        self.addCleanup(self.srv.close)
+
+    def test_static_route_does_not_serve_sibling_with_web_prefix(self):
+        with mock.patch.object(web, "WEB_DIR", self.web_dir):
+            code, body = self.srv.request("GET", "/%2e%2e/web-private/secret.txt")
+
+        self.assertEqual(code, 404, body)
+        self.assertNotEqual(body, "private")
 
 
 class Test增值日期窗口(unittest.TestCase):

@@ -96,8 +96,8 @@ class Test各业务模块都接上了(unittest.TestCase):
         self.assertFalse(tdoc._SESS.trust_env, "腾讯文档默认 Session 同上")
 
     def test_裸调那几处都带了NO_PROXY(self):
-        for rel, needle in (("src/wecom.py", "proxies=httputil.NO_PROXY"),
-                            ("src/browser.py", "proxies=httputil.NO_PROXY"),
+        for rel, needle in (("src/integrations/wecom.py", "proxies=httputil.NO_PROXY"),
+                            ("src/integrations/browser.py", "proxies=httputil.NO_PROXY"),
                             ("src/dump.py", "proxies=httputil.NO_PROXY")):
             s = (Path(ROOT) / rel).read_text(encoding="utf-8")
             with self.subTest(f=rel):

@@ -32,7 +32,8 @@ def _js_code() -> str:
     —— 真踩了，而且报错信息是把整个文件打出来，很难看出问题在哪。
     """
     import re
-    js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
     js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)          # /* ... */
     return "\n".join(ln.split("//", 1)[0] for ln in js.splitlines())
 
@@ -1004,7 +1005,8 @@ class TestServicePanelHasNoPrivilegeChoice(unittest.TestCase):
         真踩过：界面上写着"不受影响"，用户就照着这句话排除了权限这条线，
         去试 profile、试沙箱，白折腾一轮。实际是**必坏**。
         """
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         # ⚠ 先把 `//` 行注释剥掉再查 —— 不然**解释这条规则的注释本身**会被判违规
         #   （真踩了：这条测试第一次跑就红在"别再说 X"那行注释上）。
         code = "\n".join(ln.split("//", 1)[0] for ln in js.splitlines())
@@ -1014,7 +1016,8 @@ class TestServicePanelHasNoPrivilegeChoice(unittest.TestCase):
     def test_repair_button_still_exists_for_legacy_machines(self):
         """老机器上可能还留着提权任务 —— 那个「以管理员身份修复」按钮要留着。"""
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
         self.assertIn('id="btn-svc-repair"', html)
         self.assertIn("/api/elevate", js)
 

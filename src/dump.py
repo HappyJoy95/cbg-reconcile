@@ -68,8 +68,8 @@ from . import httputil   # 业务接口不吃代理（2026-09-29 死代理那个
 from .paths import ROOT
 
 import requests                                                        
-from .cbg import DETAIL_PATH, CbgClient, CbgError                   
-from .session import CBG_BASE, CbgAuthError, CbgSession             
+from .integrations.cbg import DETAIL_PATH, CbgClient, CbgError
+from .session import CBG_BASE, CbgAuthError, CbgSession
 
 CST = datetime.timezone(datetime.timedelta(hours=8))
 LIST_PATH = "/isrp/srs/sale-order/paged-list"

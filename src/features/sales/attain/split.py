@@ -141,7 +141,7 @@ def managers_of(store: str, root) -> list:
                 aliases |= {x for x in names if x}
     except Exception:                                          # noqa: BLE001
         pass
-    from .... import mailer
+    from ....integrations import mailer
     out = []
     rows = []
     try:

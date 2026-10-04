@@ -519,6 +519,8 @@ class TestWindows(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.object(winutil.shutil, "which", lambda x: "schtasks"), \
                 mock.patch.object(winutil.subprocess, "run", fake_run):
             r = schedule.install(Path(d), "09:00", days_ago=1, config="config/store-X.yaml")
@@ -605,7 +607,7 @@ class TestWindows(unittest.TestCase):
         with mock.patch.object(schedule, "kind", lambda: "windows"), \
                 mock.patch.object(winutil.shutil, "which", lambda x: "schtasks"), \
                 mock.patch.object(winutil.subprocess, "run", fake_run):
-            st = schedule.status(Path("."))
+            st = schedule.status(Path("D:/cbg"))
 
         self.assertTrue(st["installed"])
         names = [x["name"] for x in st["tasks"]]
@@ -616,6 +618,138 @@ class TestWindows(unittest.TestCase):
         self.assertEqual(st["tasks"][1]["time"], "12:00")
         self.assertEqual(st["tasks"][2]["enabled"], False)
         self.assertEqual(st["time"], "21:00", "顶部显示第一个任务的时间")
+
+    def test_name_match_without_our_runner_action_is_not_listed_as_ours(self):
+        """任务名里带 CBG 不是归属证明；别把同名的系统任务交给删除/运行按钮。"""
+        root = Path("D:/cbg")
+        foreign = {"name": "我的CBG报量对账清理任务",
+                   "full_name": r"\我的CBG报量对账清理任务",
+                   "command": r"C:\Windows\System32\cleanmgr.exe",
+                   "command_path": r"C:\Windows\System32\cleanmgr.exe",
+                   "detail_source": "xml", "unreadable": False}
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([foreign["full_name"]], True)), \
+                mock.patch.object(schedule, "_win_task_info", return_value=foreign), \
+                mock.patch.object(schedule, "_recall", return_value={}):
+            schedule.invalidate_cache()
+            tasks = schedule._win_list(force=True, root=root)
+
+        self.assertEqual(tasks, [])
+
+    def test_unreadable_unregistered_legacy_task_is_marked_non_actionable(self):
+        """保留旧名任务的可见性，但详情读不到时不把名称冒充归属证明。"""
+        root = Path("D:/cbg")
+        unreadable = {"name": "CBG报量对账", "full_name": r"\CBG报量对账",
+                      "command": "", "command_path": "", "unreadable": True}
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_list_names",
+                                  return_value=[unreadable["full_name"]]), \
+                mock.patch.object(schedule, "_win_task_info", return_value=unreadable), \
+                mock.patch.object(schedule, "_recall", return_value={}):
+            schedule.invalidate_cache()
+            tasks = schedule._win_list(force=True, root=root)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0].get("ownership_unverified"))
+
+    def test_install_refuses_to_overwrite_an_unrelated_root_task(self):
+        """schtasks /create /f 不能靠客户端给的名字覆盖 OneDrive 等已有系统任务。"""
+        root = Path("D:/cbg")
+        calls = []
+        foreign = {"name": "OneDrive", "full_name": r"\OneDrive",
+                   "command": r"C:\Program Files\Microsoft OneDrive\OneDrive.exe",
+                   "command_path": r"C:\Program Files\Microsoft OneDrive\OneDrive.exe",
+                   "detail_source": "xml", "unreadable": False}
+
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([r"\OneDrive"], True)), \
+                mock.patch.object(schedule, "_win_task_info", return_value=foreign), \
+                mock.patch.object(schedule, "_schtasks",
+                                  side_effect=lambda args, **kw: calls.append(list(args))):
+            result = schedule.install(root, "12:00", name="OneDrive")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("invalid"))
+        self.assertIn("不属于本程序", result["message"])
+        self.assertEqual(calls, [], "拒绝时不能执行 schtasks /create /f")
+
+    def test_install_refuses_to_overwrite_a_task_whose_action_cannot_be_read(self):
+        """既没有动作证据也没有本机登记时，不能把同名任务猜成本程序的。"""
+        root = Path("D:/cbg")
+        unreadable = {"name": "OneDrive", "full_name": r"\OneDrive",
+                      "command": "", "command_path": "", "unreadable": True}
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([r"\OneDrive"], True)), \
+                mock.patch.object(schedule, "_win_task_info", return_value=unreadable), \
+                mock.patch.object(schedule, "_recall", return_value={}):
+            result = schedule.install(root, "12:00", name="OneDrive")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("invalid"))
+        self.assertIn("无法确认归属", result["message"])
+
+    def test_malformed_local_record_does_not_prove_task_ownership(self):
+        """损坏的登记值不能因非空就被当作历史注册证据。"""
+        root = Path("D:/cbg")
+        unreadable = {"name": "OneDrive", "full_name": r"\OneDrive",
+                      "command": "", "command_path": "", "unreadable": True}
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([r"\OneDrive"], True)), \
+                mock.patch.object(schedule, "_win_task_info", return_value=unreadable), \
+                mock.patch.object(schedule, "_recall",
+                                  return_value={"OneDrive": "not-a-record"}):
+            result = schedule.install(root, "12:00", name="OneDrive")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("invalid"))
+        self.assertIn("无法确认归属", result["message"])
+
+    def test_install_refuses_when_the_windows_task_list_cannot_be_read(self):
+        """枚举失败不等于任务不存在；不确定时不能让 /create /f 继续。"""
+        root = Path("D:/cbg")
+        calls = []
+
+        def fake_schtasks(args, **_kwargs):
+            calls.append(list(args))
+            if args[:4] == ["/query", "/fo", "CSV", "/nh"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="拒绝访问")
+            return types.SimpleNamespace(returncode=0, stdout="成功", stderr="")
+
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_schtasks", fake_schtasks), \
+                mock.patch.object(schedule, "write_runner_script",
+                                  return_value=root / "run.bat"):
+            result = schedule.install(root, "12:00", name="OneDrive")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("invalid"))
+        self.assertIn("无法读取 Windows 任务列表", result["message"])
+        self.assertFalse(any("/create" in args for args in calls))
+
+    def test_install_allows_overwrite_when_existing_action_is_our_runner(self):
+        """原有自家任务仍能改时间；判据是任务动作，不只看名字。"""
+        root = Path("D:/cbg")
+        calls = []
+        owned = {"name": "打烊那次", "full_name": r"\打烊那次",
+                 "command": r"D:\cbg\run.bat", "command_path": r"D:\cbg\run.bat",
+                 "detail_source": "xml", "unreadable": False}
+
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([r"\打烊那次"], True)), \
+                mock.patch.object(schedule, "_win_task_info", return_value=owned), \
+                mock.patch.object(schedule, "_schtasks", side_effect=lambda args, **kw: (
+                    calls.append(list(args)) or types.SimpleNamespace(
+                        returncode=0, stdout="成功", stderr=""))), \
+                mock.patch.object(schedule, "write_runner_script", return_value=root / "run.bat"):
+            result = schedule.install(root, "12:00", name="打烊那次")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("/create" in args for args in calls))
 
     def test_xml_failure_falls_back_to_list_output(self):
         """老机器/权限问题导致 /xml 拿不到时，退回解析 `下次运行时间`（中英文都试）。"""
@@ -683,7 +817,8 @@ class TestWindows(unittest.TestCase):
         seen = []
 
         def fake_run(args, **kw):
-            seen.append(args[args.index("/tn") + 1] if "/tn" in args else "")
+            if "/create" in args:
+                seen.append(args[args.index("/tn") + 1] if "/tn" in args else "")
             return types.SimpleNamespace(returncode=0, stdout="成功", stderr="")
 
         with tempfile.TemporaryDirectory() as d, \
@@ -712,11 +847,14 @@ class TestWindows(unittest.TestCase):
         seen = []
 
         def fake_run(args, **kw):
-            seen.append(args[args.index("/tn") + 1])
+            if "/create" in args:
+                seen.append(args[args.index("/tn") + 1])
             return types.SimpleNamespace(returncode=0, stdout="成功", stderr="")
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.object(winutil.shutil, "which", lambda x: "schtasks"), \
                 mock.patch.object(winutil.subprocess, "run", fake_run):
             schedule.install(Path(d), "21:00")
@@ -962,6 +1100,8 @@ class TestScheduleFailureAdvice(unittest.TestCase):
         from src import schedule
         r = types.SimpleNamespace(returncode=1, stdout=b"", stderr="错误: 拒绝访问。")
         with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.object(schedule, "write_runner_script",
                                   lambda *a, **k: pathlib.Path("D:/x/run.bat")), \
                 mock.patch.object(schedule, "_schtasks", lambda *a, **k: r):
@@ -1080,6 +1220,8 @@ class TestScheduleRecord(unittest.TestCase):
     def test_successful_install_remembers_the_parameters(self):
         """⚠ 注册成功就**立刻**记 —— 这是记录机制唯一的写入点。"""
         with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], True)), \
                 mock.patch.object(schedule, "_win_install",
                                   return_value={"ok": True, "task": "T"}):
             r = schedule.install(self.root, "20:30", days_ago=2,
@@ -1201,8 +1343,8 @@ class TestScheduleRecord(unittest.TestCase):
         #   这条测试就"因为没有任务可删"而**假绿**
         schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
         with mock.patch.object(schedule, "kind", lambda: "windows"), \
-                mock.patch.object(schedule, "_win_list_names",
-                                  lambda: ["\\CBG报量对账-21点00"]), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=(["\\CBG报量对账-21点00"], True)), \
                 mock.patch.object(schedule, "_schtasks",
                                   lambda *a, **k: types.SimpleNamespace(
                                       returncode=0, stdout=b"", stderr=b"")):
@@ -1218,14 +1360,75 @@ class TestScheduleRecord(unittest.TestCase):
         """
         schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
         with mock.patch.object(schedule, "kind", lambda: "windows"), \
-                mock.patch.object(schedule, "_win_list_names",
-                                  lambda: ["\\CBG报量对账-21点00"]), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=(["\\CBG报量对账-21点00"], True)), \
                 mock.patch.object(schedule, "_schtasks",
                                   lambda *a, **k: types.SimpleNamespace(
                                       returncode=1, stdout=b"", stderr=b"denied")):
             r = schedule.remove_all(self.root)
         self.assertFalse(r["ok"])
         self.assertIn("CBG报量对账-21点00", self._record())
+
+    def test_remove_all_keeps_the_record_when_task_enumeration_fails(self):
+        """列表读取失败不是“没有任务”；保留唯一能显示提权任务的登记记录。"""
+        schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=([], False)):
+            result = schedule.remove_all(self.root)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("无法读取", result["message"])
+        self.assertIn("CBG报量对账-21点00", self._record())
+
+    def test_remove_all_does_not_delete_foreign_same_name_autostart(self):
+        from src import autostart
+        schedule._remember(self.root, "CBG报量对账-21点00", time_str="21:00")
+        foreign = autostart.task_xml(self.root).replace(
+            str(self.root / "boot.py"), r"C:\\other-app\\boot.py")
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=(["\\" + autostart.AUTOSTART_TASK], True)), \
+                mock.patch.object(schedule, "_win_list", return_value=[]), \
+                mock.patch.object(schedule, "_schtasks",
+                                  return_value=types.SimpleNamespace(
+                                      returncode=0, stdout=b"", stderr=b"")) as remove, \
+                mock.patch.object(autostart, "schtasks",
+                                  return_value=types.SimpleNamespace(
+                                      returncode=0, stdout=foreign, stderr="")):
+            result = schedule.remove_all(self.root)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("开机自启" in name for name in result["failed"]))
+        self.assertFalse(any("/delete" in call.args[0] for call in remove.call_args_list))
+        self.assertIn("CBG报量对账-21点00", self._record())
+
+    def test_remove_all_deletes_only_a_verified_autostart_task(self):
+        from src import autostart
+        with mock.patch.object(autostart, "_pythonw",
+                               lambda: r"C:\\Python\\pythonw.exe"):
+            xml = autostart.task_xml(self.root)
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append(args)
+            if "/xml" in args:
+                return types.SimpleNamespace(returncode=0, stdout=xml, stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(schedule, "kind", lambda: "windows"), \
+                mock.patch.object(schedule, "_win_task_names_query",
+                                  return_value=(["\\" + autostart.AUTOSTART_TASK], True)), \
+                mock.patch.object(schedule, "_win_list", return_value=[]), \
+                mock.patch.object(schedule, "_schtasks",
+                                  return_value=types.SimpleNamespace(
+                                      returncode=0, stdout=b"", stderr=b"")), \
+                mock.patch.object(autostart, "schtasks", fake):
+            result = schedule.remove_all(self.root)
+
+        self.assertTrue(result["ok"])
+        self.assertIn(autostart.AUTOSTART_TASK, result["removed"])
+        self.assertTrue(any("/delete" in args for args in calls))
 
     def test_two_tasks_do_not_overwrite_each_other(self):
         """中午 + 打烊两条要各记各的 —— 后来的不能把先前的盖掉。"""

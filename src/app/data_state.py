@@ -287,14 +287,14 @@ SOURCES = (
 )
 
 
-def probes() -> list:
+def probes(root=None) -> list:
     """当前版的数据五态探针 —— 生活馆没有云商池，画出来永远"没抓过"，纯吓人。
 
     ⚠ 判据只按 key 前缀（`erp-sales` / `erp-stock`）—— 生活馆包里
       `erp.py`/`pools.py` 物理不存在，这两条探针的库永远不会被写。
     """
-    from .. import edition as _edition
-    if _edition.is_lifehall():
+    from ..modules.auth import runtime
+    if runtime.is_lifehall(root):
         return [p for p in SOURCES if not p["key"].startswith("erp")]
     return list(SOURCES)
 
@@ -354,7 +354,7 @@ def data_state(root=None, db="", *, need=None) -> dict:
     out = {"db": str(path) if path else "", "need": _fmt(_need_dt(need)) if need is not None else "",
            "sources": [], "ok": False, "worst": ""}
     if not path or not path.is_file():
-        for s in probes():
+        for s in probes(root):
             st = SourceState(key=s["key"], label=s["label"], state=MISSING)
             st.why = "没有找到订单库（out/cbg-<年>.db）"
             out["sources"].append(st.as_dict())
@@ -364,7 +364,7 @@ def data_state(root=None, db="", *, need=None) -> dict:
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
     except sqlite3.Error as e:
-        for s in probes():
+        for s in probes(root):
             st = SourceState(key=s["key"], label=s["label"], state=MISSING)
             st.why = "库打不开：%s" % e
             out["sources"].append(st.as_dict())
@@ -372,7 +372,7 @@ def data_state(root=None, db="", *, need=None) -> dict:
         return out
 
     try:
-        for s in probes():
+        for s in probes(root):
             try:
                 if s["key"] == "lg-stock" or s["key"] == "erp-stock":
                     as_of, rows, _ev = s["probe"](conn, s["table"])

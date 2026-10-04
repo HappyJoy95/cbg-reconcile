@@ -28,34 +28,16 @@ POS 只读库，跟云商没关系，照算。）
 from __future__ import annotations
 
 import argparse
-import datetime
 import sys
 import time
 from pathlib import Path
 
-from . import cli, config_io, version
-from .paths import ROOT
-from . import edition as _edition
-if _edition.is_lifehall():
-    # 生活馆包里这些执行件被裁（edition.PRUNE）；对应步骤也不在注册表里，
-    # 下面 _RUNNERS 永远不会派发到它们。⚠ 属性必须存在 ——
-    # full 模式的测试靠 mock.patch.object(run_daily, "attain_run") 打桩
-    # （打桩打的是**这个名字**，名字不在当场 AttributeError，测试直接红）。
-    pos_run = report_run = inbox_run = attain_run = plan_run = None
-else:
-    # ⚠ POS 走**执行模块**（不再经过 CLI）—— 见下面第 3 步那段注释
-    from .app.pos import run as pos_run
-    from .app.report import run as report_run
-    from .app.report_inbox import run as inbox_run
-    # ⚠ 模块级 import（**不是**函数里）—— 测试要能 `mock.patch.object(run_daily, "attain_run")`，
-    #   藏在函数里的话打不着桩，测试就会**真去读腾讯文档**（实测：全量测试从 59 秒涨到 165 秒）。
-    from .features.sales.attain.attain import run as attain_run
-    # ⚠ 月度计划走**同一个模式**（2026-09-23 搬过来的）：它原来是 `_step_plan` 函数体里
-    #   `from ... import plan` 再调 —— 测试**打不着桩** ⇒ 每次全量测试都真写**项目根**
-    #   `out/plan-2026.json`（4.5MB 真落盘每次被覆盖），且固定名 `plan-2026.json.tmp`
-    #   被三个头的 pytest 同时抢 ⇒ 后到的那个 `replace()` 报 `FileNotFoundError` ——
-    #   就是 2026-09-23 抓到的那个并行偶发红。别改回函数内 import。
-    from .features.plan.monthly.plan import run as plan_run
+from . import cli
+# ⭐ 2026-10-02（协议 v2）：报告/收取/自动更新也收编进 `Step(run=...)` ——
+#   本文件**不再按名字 import 任何执行件**；测试桩打**实现模块**
+#   （`src.app.report.run` / `src.app.report_inbox.run` /
+#   `src.modules.health.auto_update`）—— 桩打错地方 = 真去连邮箱/写真库
+#   （2026-09-19 / 2026-09-23 各踩过一次）。
 
 #: 一次日常流程有哪些步骤 —— ⚠ **从功能注册表派生**（用户 2026-09-19 的"安装注册机制"）。
 #:
@@ -69,6 +51,7 @@ else:
 #: 现在：**步骤在哪由功能自己声明**（`features/<一级>/__init__.py` 里的 `Step(...)`），
 #: 能力层自带的（抓数）在 `registry.BUILTIN_STEPS`。
 #: ⚠ 派生出来的值与手写时**逐字段一致**（`tests/test_registry.py` 钉着）。
+from .features import registry as _registry
 from .features.registry import (default_steps as _reg_default,
                                 step_flags as _reg_flags,
                                 step_labels as _reg_labels,
@@ -145,7 +128,56 @@ def steps_label(steps) -> str:
     return " + ".join(STEP_LABELS[s] for s in _check_steps(steps))
 
 
+def step_decl(cmd: str):
+    """注册表里这一步的声明（`Step`）—— 没有就 `None`。
+
+    合作店早退、失败中止、注册表执行入口三处都问它（协议 v2 的判据入口）。
+    """
+    return next((s for s in _registry.all_steps() if s.cmd == cmd), None)
+
+
+def _make_registry_runner(step, done, config, args=None):
+    """把注册表声明的 `Step.run`（协议 v2）包成当前日常流程的一步。
+
+    * `ctx`：`root`（None = 项目根）/ `config` / `emit` /
+      `args`（`daily` 的解析参数 —— `no_push` / `no_mail` 这类开关从这拿）；
+      抓取系统步骤还会收到 CLI 适配的认证与采集器服务；
+    * 返回值翻译：`True`/`None` → `EXIT_OK`，`False` → `EXIT_FETCH`，`int` 原样 ——
+      功能模块**不许 import `cli`**（features 红线），退出码语义集中在这儿；
+    * `run` 自己打自己的步骤头（跟手写块同一个约定），这里不代打；
+    * 成功/失败都记进 `done`（汇总行与退出码跟手写块同口径）——
+      除非声明 `Step(record=False)`（autoupdate：不进汇总）。
+    """
+    def _run() -> int:
+        ctx = argparse.Namespace(
+            root=None, config=config, emit=print,
+            args=argparse.Namespace(**vars(args)) if args else None,
+            daily_step=getattr(step, "cmd", "") in ("dump", "erp-dump"),
+            services=(cli.fetch_execution_services()
+                      if getattr(step, "cmd", "") in ("dump", "erp-dump") else None))
+        out = step.run(ctx)
+        if isinstance(out, bool):
+            rc = cli.EXIT_OK if out else cli.EXIT_FETCH
+        elif out is None:
+            rc = cli.EXIT_OK
+        else:
+            rc = int(out)
+        if step.record:                 # `record=False` 不进汇总（autoupdate 的规矩）
+            done.append((step.label, rc))
+        return rc
+    return _run
+
+
 def main(argv=None) -> int:
+    from .modules.auth import runtime_guard
+    with runtime_guard.guard(cli.ROOT) as acquired:
+        if not acquired:
+            print("有任务或入口设置正在使用本机运行身份，请等待结束后重试", file=sys.stderr)
+            return cli.EXIT_USAGE
+        return _main(argv)
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="日常流程：抓华为当月 → 对账 → 算 POS")
     ap.add_argument("-c", "--config", default=str(cli.DEFAULT_CONFIG))
     # ⚠ 下面这四条**现在都不生效了**（2026-09-17 报量排查整步拿掉，
@@ -203,6 +235,12 @@ def main(argv=None) -> int:
         print("   到点跑哪几步不再需要人来定 —— 内置定时器按**每一步自己的时刻**派发"
               "（控制台「定时器设置」页里能看到每一步的时间）。", file=sys.stderr)
         return cli.EXIT_USAGE
+    from .modules.auth import runtime
+    denied = [cmd for cmd in only if not runtime.step_available(
+        cmd, cli.ROOT, recurring=bool(args.wake_slot))]
+    if denied:
+        print("生活馆入口不支持执行：%s" % "、".join(denied), file=sys.stderr)
+        return cli.EXIT_USAGE
     # ⚠ **老脚本带来的 `--skip-*`**：先看一眼（下面那圈会把它们全覆写掉）。
     _legacy = sorted(f for c, f in STEP_FLAGS.items()
                      if getattr(args, "skip_" + c.replace("-", "_"), False))
@@ -249,12 +287,20 @@ def main(argv=None) -> int:
         _cfg = cli.load_config(args.config)
     except SystemExit:
         _cfg = None
-    profile = cli.store_profile_of(_cfg) if _cfg else {"needs_linglong": True}
+    profile = ({"needs_linglong": True} if runtime.is_lifehall(cli.ROOT)
+               else cli.store_profile_of(_cfg) if _cfg else {"needs_linglong": True})
     if not profile["needs_linglong"]:
+        # ⭐ 合作店跳过哪几步 = **注册表声明**（`Step.partner_ok=False`，协议 v2 单源）。
+        #   原来是两张写死的名单：下面这个跳过集合 + "能跑的剩余步骤"白名单 ——
+        #   白名单漏过两次（autoupdate / report 都被静默早退过，历史注释还在下面），
+        #   现在新步骤**默认照跑**（`partner_ok` 缺省 True），不再需要"记得补名单"。
+        # ⚠ 今天声明 False 的恰好是玲珑三步，有测试钉着这个集合 ——
+        #   将来多出一个的话，下面那句解释文案要一起改。
+        _nop = [s.cmd for s in _registry.all_steps() if not s.partner_ok]
         # ⚠ 点名模式下（比如"刷新销售达成"）**别报这一段** ——
         #   这段是解释"为什么玲珑那三步不跑"，而那时候它们本来就没被点名，
         #   说一遍只会让人以为"刷达成动了玲珑"（用户 2026-09-21 这么误解过）。
-        _ling = [c for c in ("dump", "pos", "pools")
+        _ling = [c for c in _nop
                  if not getattr(args, "only_steps", None) or c in args.only_steps]
         if _ling:
             print("这家店不走玲珑（`config/stores.yaml` 里它没有串号标识）——")
@@ -265,21 +311,18 @@ def main(argv=None) -> int:
         #   合作店的达成**永远不会自动算**，日志里却写着"日常流程结束 exit=0"。
         #   ⇒ 改成"把玲珑那三步按掉，剩下的照常走"；真要一步都不剩（比如
         #     `--steps dump,pos`）再早退，而且**说清楚**为什么。
-        for _c in ("dump", "pos", "pools"):
+        for _c in _nop:
             set_skip(args, _c, True)
         # ⚠ 云商那一步**不按掉**：合作店的销售达成读的就是云商销售明细
         #   （`erp_sales`）—— 恰恰是最需要它的那一步。
         # ⚠⚠ 判据是"**还有没有这家店能跑的步骤**"，不是"达成跳过没" ——
         #   2026-09-20 加了自动更新之后，`daily --steps autoupdate` 会被老判据
         #   误判成"没活干"直接早退 ⇒ **那一趟的自动更新永远不会发生**。
-        #   合作店能跑的：抓云商（达成/无忧要靠它）、销售达成、无忧会员权益、自动更新。
-        #   ⚠ 2026-09-21（M18）补了 `report` —— 跟 autoupdate 当年一模一样的坑：
-        #     合作店**也能上报**（它上报的是云商侧那几张表 + 玲珑在库快照），
-        #     漏在这张表里的表现是"点名跑上报"被这句早退掉，日志里还写着正常结束。
-        #   ⚠ 2026-09-22 补 `benefit` / `film` —— 同理：只读云商，合作店也该能算。
-        _left = [_s for _s in ("erp-dump", "attain", "plan", "autoupdate",
-                               "report", "report-inbox", "film", "benefit")
-                 if not skip_of(args, _s)]
+        #   （历史：这张白名单 2026-09-21 补 `report`、2026-09-22 补
+        #    `benefit`/`film`，漏一个就是"点名跑了却静默早退" ——
+        #    协议 v2 后判据从声明派生：`partner_ok=True` 且没被跳过。）
+        _left = [_s for _s in STEPS
+                 if step_decl(_s).partner_ok and not skip_of(args, _s)]
         if not _left:
             print("  这趟里没有这家店能跑的步骤（剩下的都被跳过了）。")
             return cli.EXIT_OK  # ⚠ 常量在 `cli` 里（本模块别自己再定义一份）
@@ -311,255 +354,43 @@ def main(argv=None) -> int:
     #   ⚠ 「抓数失败就中止后面」那条规矩原来是**隐式**的（写在前面的块直接 return）——
     #     改成按顺序跑之后必须**显式**写出来（`_ABORT_AFTER`），否则一次抓数失败会接着
     #     拿旧库去算、发一份看着很合理的错清单（那正是当年要防的事）。
-    #   ⚠ 加新步骤：在这儿加一个 `_step_xxx`，并确认它在 `_RUNNERS` 里
-    #     （有测试钉着"注册表里的每一步都有块"）。
-
-    def _step_dump():
-        # ⚠ **库里一片空白 ⇒ 这是第一次跑**（刚装、或者刚从 1.x 升上来）⇒ 抓**今年至今**。
-        #   只抓当月的话，POS 页**只有当月一个数、前面几个月全是空的** ——
-        #   而"历史几个月的合规率"恰恰是这个看板最要紧的东西。
-        #   补这一次之后，以后每天都是当月增量（取并集，不会重复）。
-        #
-        #   ⚠ **是"今年"不是"全部历史"**（用户 2026-09-17 定：「跨年不重要，
-        #   就拉当年的全量就行」）。原来传 `--all`，而 `dump.py` 拿到跨年数据会
-        #   **直接报错**要求按年分次抓 —— 老店第一次跑正好卡在这儿。
-        #   要不要更多历史：`python -m src.cli dump --year 2025` 手动补，一年一个库。
-        first_time = not cli._find_pos_db()
-        this_year = datetime.date.today().year
-        if first_time:
-            print("\n[1/9] 抓取玲珑数据：**本地还没有订单库** —— 这是第一次跑，"
-                  "抓**今年（%d）至今**的全量补上（只补这一次，以后每天抓当月增量）"
-                  % this_year)
-        else:
-            print("\n[1/9] 抓取玲珑数据：华为当月 → 补进订单库（取并集，不删旧行）")
-        rc = cli.cmd_dump(argparse.Namespace(config=args.config, month="",
-                                             all=False,
-                                             year=(this_year if first_time else 0),
-                                             no_refresh=args.no_refresh,
-                                             verbose=args.verbose))
-        if rc != 0:
-            print("\n" + "=" * 64, file=sys.stderr)
-            print(f"❌ 第 1 步失败（退出码 {rc}）—— **跳过第 2、3 步，什么都不发**。",
-                  file=sys.stderr)
-            print("   为什么不接着跑：库覆盖不了今天的窗口，差集会把当天**所有**销售",
-                  file=sys.stderr)
-            print("   算成「玲珑无但云商有」—— 一份完全错误的清单，而且看着很合理，",
-                  file=sys.stderr)
-            print("   门店会照着去补报一批假的。**宁可今天没有报告。**", file=sys.stderr)
-            print("   先解决第 1 步（多半是华为会话过期）：", file=sys.stderr)
-            print(f"     python -m src.cli -c {args.config} dump", file=sys.stderr)
-            print("=" * 64, file=sys.stderr)
-            return rc
-
-# ---------------------------------------------------------------- 2
-# ⚠ 2026-09-20 新增（用户：「数据抓取再加个**云商数据定时抓取**吧」）——
-#   云商那两个池子（池C 销售 / 池D 在库）原来混在第 1 步里"顺手"拉，
-#   现在**单独一步**：能单独设时间、单独开关、单独跑一次。
-# ⚠ 失败也**中止后面**：POS 读玲珑、双平台两边都要、销售达成读云商销售明细 ——
-#   少了云商那半边，"双平台"就成了一边有一边没有，那种报告看着很合理但全错。
-    def _step_erp_dump():
-        print("\n[2/9] 抓取云商数据：云商在库 + 云商销售明细 → 补进订单库")
-        rc_erp = cli.cmd_erp_dump(argparse.Namespace(config=args.config,
-                                                     verbose=getattr(args, "verbose", False)))
-        if rc_erp != 0:
-            print("\n" + "=" * 64, file=sys.stderr)
-            print(f"❌ 第 2 步（抓云商数据）失败（退出码 {rc_erp}）—— "
-                  "**跳过后面的分析，什么都不发**。", file=sys.stderr)
-            print("   云商那半边没进来，双平台对比会变成「一边有一边没有」，"
-                  "而那种报告看着很合理。", file=sys.stderr)
-            print(f"   先单独试一次：python -m src.cli -c {args.config} erp-dump",
-                  file=sys.stderr)
-            print("=" * 64, file=sys.stderr)
-            return rc_erp
-
-# ---------------------------------------------------------------- 3
-    def _step_pos():
-        print("\n[3/9] POS 合规率 → out/pos-<年>.json")
-        # ⚠ 2026-09-19 起**直接调执行模块**（`app.pos.run`），不再手工拼 `Namespace`：
-        #   原来那行是 `cli.cmd_pos(argparse.Namespace(db=""))` —— 只传了 `db`，
-        #   而推送那条路第一句就是 `if not config_path: return`
-        #   ⇒ **daily 每天算了 POS，却从来没推过 POS**（门店只有手动跑才收得到）。
-        #   现在参数是**关键字、有名字**，漏一个在测试里就看得出来；
-        #   这条链也不再经过 CLI（daily 只管顺序与失败依赖）。
-        #   ⚠ 当时 1410 条测试一条都没抓到 —— 因为那些测试把 `cmd_pos` 整个 mock 掉了。
-        #     `TestDaily要把POS推送跑起来` 现在**不 mock 执行模块**，只换外部发送端。
-        res = pos_run(db="", config_path=args.config, no_push=args.no_push,
-                      no_mail=args.no_mail, emit=print)
-        rc3 = cli.EXIT_OK if res.ok else cli.EXIT_FETCH
-        done.append(("POS 合规", rc3))
-        if rc3 != cli.EXIT_OK:
-            print(f"\n⚠ 第 3 步（POS）没跑通：{res.why}", file=sys.stderr)
-
-# ---------------------------------------------------------------- 4
-    def _step_pools():
-        print("\n[4/9] 双平台数据对比（AD=玲珑报了云商没报 / BC=云商报了玲珑没报）")
-        rc4 = cli.cmd_pools(argparse.Namespace(
-            config=args.config, fetch=[], start="", end="", date="",
-            days_ago=0, no_refresh=True, verbose=getattr(args, "verbose", False),
-            no_mail=args.no_mail, no_push=args.no_push))
-        done.append(("双平台数据对比", rc4))
-        if rc4 != cli.EXIT_OK:
-            print(f"\n⚠ 第 4 步（双平台数据对比）没跑通：退出码 {rc4}", file=sys.stderr)
-
-# ---------------------------------------------------------------- 5
-    def _step_attain():
-        print("\n[5/9] 销售达成（本周目标 vs 云商实际）")
-        # ⚠ 直接调执行模块（照 POS 那一处的做法），**不手工拼 Namespace** ——
-        #   2026-09-19 的教训：POS 那次只传了 `db`，推送那一句 `if not config_path: return`
-        #   就静默跳过了，**daily 每天算了 POS 却从来没推过**。
-        #   这里参数是关键字、有名字，漏一个在调用点就看得出来。
-        # ⚠ 门店端只看自己那一行；办公室 / 平台岗看全区（`store_filter`）。
-        # ⚠ 用 `config_io.load_raw`（读不到给 `{}`），**不要** `cli.load_config` ——
-        #   后者找不到文件时抛的是 `SystemExit`，而它是 `BaseException`，
-        #   会把整条 daily 带崩（AGENTS.md 坑 11）。
-        store = ""
-        try:
-            _cfg = config_io.load_raw(Path(args.config)) or {}
-            if not _cfg:
-                raise ValueError("门店配置为空或读不到")
-            # ⚠⚠ **平台岗 / 办公室不能当成"某家店"** —— 它们的 `erp_store_name`
-            #   是「平台岗」（虚拟门店），拿它当过滤条件 ⇒ 一行都匹配不上 ⇒
-            #   报「这家店不在目标表里（门店名对不上？）：平台岗」（实测踩过）。
-            #   判据用**画像**（`show_all`），别自己去猜名字。
-            _prof = cli.store_profile_of(_cfg)
-            # ⚠ `erp_name` 拿不到就**回落到配置里的店名**，**不许悄悄变成"看全区"** ——
-            #   那正是用户 2026-09-21 报的那个 bug（门店账号看到全区）。
-            store = "" if _prof.get("show_all") else (
-                _prof.get("erp_name") or _cfg.get("erp_store_name") or "")
-            if not _prof.get("show_all") and not store:
-                raise ValueError("没有可确认的本店名称")
-        except Exception as e:                                    # noqa: BLE001
-            print(f"  ❌ 读不出本店名（{type(e).__name__}: {e}）—— 销售达成本次不算，"
-                  "避免把全区当本店", file=sys.stderr)
-            done.append(("销售达成", cli.EXIT_FETCH))
-            return
-        res = attain_run(config_path=args.config, root=None, store_filter=store,
-                             no_push=args.no_push, no_mail=args.no_mail, emit=print)
-        rc5 = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
-        done.append(("销售达成", rc5))
-        if rc5 != cli.EXIT_OK:
-            print(f"\n⚠ 第 5 步（销售达成）没跑通：{res.get('why')}", file=sys.stderr)
-            print("   （这一步失败**不影响**前面几步的结果，那些已经落盘了）",
-                  file=sys.stderr)
-
-# ---------------------------------------------------------------- 6
-# **月度生意计划**（M22，2026-09-21）：七个大块（折叠机/FD/ND/穿戴/音频/平板/电脑）
-# 的**当月至今 vs 上月同期**，销量 / 销售额 / 利润 + 环比；块下面还能展开到系列、机型。
-# ⚠ 读的是**云商销售明细**（`erp_sales`，第 2 步刚写完的那张）⇒ 排在 `attain` 后面。
-# ⚠ 失败**不中止后面**（跟 attain 一样）：它只落自己那份 JSON，别的步骤不读它。
-# ⚠ 合作店**也跑这一步**（它读云商、不读玲珑）—— 见下面 `_left` 那张表的注释。
-    def _step_plan():
-        print("\n[6/9] 月度生意计划（七块 × 本月至今 vs 上月同期）")
-        # ⚠ 走**模块级别名** `plan_run`（测试在这儿下桩）—— 别改回函数内 import，
-        #   那样打不着桩，测试会真写项目根 out/（2026-09-23 并行偶发红的根因）。
-        res = plan_run(root=None, emit=print)
-        rc_plan = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
-        done.append(("月度生意计划", rc_plan))
-        if rc_plan != cli.EXIT_OK:
-            print(f"\n⚠ 第 6 步（月度生意计划）没跑通：{res.get('why')}", file=sys.stderr)
-            print("   （这一步失败**不影响**前面几步的结果，那些已经落盘了）",
-                  file=sys.stderr)
+    #   ⭐ 所有步骤统一声明 `Step(run=...)`（协议 v2）；流程编排不再保留
+    #     按命令名手写的第二套路由表。
 
 # ---------------------------------------------------------------- 6b
-# **防护膜达成**（2026-09-22）：扫销售导出 → 落 `out/film.json` 快照。
-# ⚠ 页面是**现算**的；这一步只是留痕 + 给 timer 一个可注册的钩子。
+# **防护膜达成** —— 2026-10-02 起走**注册表执行入口**（协议 v2 试点）：
+# 声明在 `features/valueadd/film/__init__.py` 的 `Step(run=step_run)`，
+# 由 `_make_registry_runner` 统一派发。
+# ⚠ 历史注释保留：页面是**现算**的；这一步只是留痕 + 给 timer 一个可注册的钩子。
 # ⚠ `default=False`：不进每天双击那趟 —— 要跑就在「增值 › 设置」里定时刻。
-    def _step_film():
-        print("\n[6b] 防护膜达成（落快照 out/film.json）")
-        from .features.valueadd.film import compute as film_compute
-        res = film_compute.run(root=None, emit=print)
-        rc_film = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
-        done.append(("防护膜达成（落快照）", rc_film))
-        if rc_film != cli.EXIT_OK:
-            print(f"\n⚠ 防护膜达成没算成：{res.get('why')}", file=sys.stderr)
 
-# ---------------------------------------------------------------- 6c
-# **无忧会员权益**（2026-09-22）：erp_sales → 落 `out/benefit.json` 快照。
-# ⚠ 同 film：页面现算；这一步只留痕。`default=False` 不进每天双击那趟。
-    def _step_benefit():
-        print("\n[6c] 无忧会员权益（落快照 out/benefit.json）")
-        from .features.valueadd.benefit import compute as benefit_compute
-        res = benefit_compute.run(root=None, emit=print)
-        rc_b = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
-        done.append(("无忧会员权益（落快照）", rc_b))
-        if rc_b != cli.EXIT_OK:
-            print(f"\n⚠ 无忧会员权益没算成：{res.get('why')}", file=sys.stderr)
+# ---------------------------------------------------------------- 7/8/9
+# **上报 / 收取 / 自动更新** —— 2026-10-02 起走**注册表执行入口**（协议 v2）：
+# 声明在 `registry.BUILTIN_STEPS` 的 `Step(run=_run_report / _run_report_inbox /
+# _run_autoupdate)`；autoupdate 另有 `record=False`（不进汇总，历史规矩）。
 
-# ---------------------------------------------------------------- 7
-# **数据上报**（M18，2026-09-21）：把当天新增/变化的行打成 SQLite 附件，
-# 邮件发给本店区长（抄送中台）。
-# ⚠ 它**有自己的时刻（21:15）**，所以**不在每天那趟整批里**（`default=False`）——
-#   用户 2026-09-21 晚：「**上报数据还是有自己的吧**」。走整批时把它按掉，
-#   跟 `report-inbox` / `autoupdate` 一个道理（不然一天跑两遍）。
-# ⚠ 时间卡在两个约束之间（见注册表那条注释）：晚于 21:00 那趟（要发刚抓完的数）、
-#   早于 21:30（区长/平台那台机器 21:30 收信，晚了就变"明天才看到"）。
-    def _step_report():
-        print("\n[7/9] 上报数据（当天新增/变化的行 → SQLite 附件 → 邮件给区长）")
-        res = report_run(root=None, config_path=args.config,
-                         no_push=args.no_push, emit=print)
-        rc6 = cli.EXIT_OK if (res.get("ok") or res.get("skipped")) else cli.EXIT_FETCH
-        done.append(("数据上报", rc6))
-        if rc6 != cli.EXIT_OK:
-            print(f"\n⚠ 第 6 步（上报数据）没发出去：{res.get('why')}", file=sys.stderr)
-            print("   ⚠ 包已经留在 out/report/pending/ —— **下次跑会自动补发**，"
-                  "不用人工干预", file=sys.stderr)
-
-# ---------------------------------------------------------------- 8
-# **收取门店上报**（M19）：区长 / 平台那台机器收信落库。
-# ⚠ 不在整批里（`default=False`）：它 21:30 自己跑一趟（门店 21:00 才发信）。
-#   走整批时把它按掉 —— 跟 `autoupdate` 一个道理（那条规矩在上面）。
-    def _step_report_inbox():
-        print("\n[8/9] 收取门店上报（读邮箱 → 落 in/report.db）")
-        res = inbox_run(root=None, config_path=args.config, emit=print)
-        rc7 = cli.EXIT_OK if res.get("ok") else cli.EXIT_FETCH
-        done.append(("收取上报", rc7))
-        if rc7 != cli.EXIT_OK:
-            print("\n⚠ 第 7 步（收取门店上报）没成功：%s"
-                  % "；".join(res.get("problems") or []) or "？", file=sys.stderr)
-
-# ---------------------------------------------------------------- 9
-# ⚠ **健康模块**的自动更新（用户 2026-09-20：「健康模块默认注册一个自动更新，
-#   **固定一个小时执行一次**」）。
-#   ⚠ 它**不在"每天那趟整批"里**（`default=False`）—— 定时器按小时单独叫醒它
-#     （`daily --steps autoupdate`）。走整批时上面那段会把它按掉。
-    def _step_autoupdate():
-        from .modules import health
-        print("\n[9/9] 自动更新（先问策略：健康 + 今天那趟跑完了才动手）")
-        res = health.auto_update(ROOT, version.VERSION, emit=print)
-        rc6 = cli.EXIT_OK if res.get("ok", True) else cli.EXIT_FETCH
-        # ⚠ 更新成功**不进 done** —— 那会把这一趟的退出码变成一个"刚换完代码"的
-        #   进程说了算的东西，而它下一秒就要退出了。跑没跑成看日志和界面。
-        if rc6 != cli.EXIT_OK:
-            print("\n⚠ 自动更新没跑成：%s" % (res.get("why") or ""), file=sys.stderr)
-
-    #: 点名的步骤 → 跑它的那个小函数（键就是注册表里的 `cmd`）
-    _RUNNERS = {
-        "dump":        _step_dump,
-        "erp-dump":    _step_erp_dump,
-        "pos":         _step_pos,
-        "pools":       _step_pools,
-        "attain":      _step_attain,
-        "plan":        _step_plan,
-        "film":        _step_film,
-        "benefit":     _step_benefit,
-        "report":      _step_report,
-        "report-inbox": _step_report_inbox,
-        "autoupdate":  _step_autoupdate,
-    }
-
-    #: 这几步失败 ⇒ **中止后面**（后面的步骤读的就是它们写进去的库）
-    _ABORT_AFTER = {"dump", "erp-dump"}
+    #: 点名的步骤 → 跑它的那个小函数（键就是注册表里的 `cmd`）。
+    #: 所有步骤都由注册表执行入口（`Step.run`，协议 v2）派发；
+    #:   没有声明执行入口才报"还没接进日常流程"。
+    #: 这几步失败 ⇒ **中止后面**（后面的步骤读的就是它们写进去的库）——
+    #: ⭐ 判据来自注册表声明（`Step.fatal`，协议 v2），原来这张写死的集合删了。
+    _fatal = {s.cmd for s in _registry.all_steps() if s.fatal}
 
     for _cmd in list(args.only_steps):
+        if not runtime.step_available(_cmd, cli.ROOT, recurring=bool(args.wake_slot)):
+            print("运行入口已改变，停止后续步骤：%s" % _cmd, file=sys.stderr)
+            return cli.EXIT_USAGE
         if skip_of(args, _cmd):
             continue            # 合作店那三步会被按掉（见上面那段）
-        _fn = _RUNNERS.get(_cmd)
+        _decl = step_decl(_cmd)
+        _fn = (_make_registry_runner(_decl, done, args.config, args)
+               if _decl is not None and _decl.run is not None else None)
         if _fn is None:
             print("⚠ 「%s」还没有接进日常流程 —— 这趟不跑它"
                   % STEP_LABELS.get(_cmd, _cmd), file=sys.stderr)
             continue
         _rc = _fn()
-        if _rc and _cmd in _ABORT_AFTER:
+        if _rc and _cmd in _fatal:
             # ⚠ 为什么中止、接下来怎么办 —— 那段话由各步自己打（它们最清楚原因）
             return _rc
 

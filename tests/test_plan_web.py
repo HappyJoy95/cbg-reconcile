@@ -240,7 +240,10 @@ class Test接口(unittest.TestCase):
         def fake_export(root, d, who="", name=""):
             got["d"] = d
             got["who"] = who
-            return {"ok": True, "path": "/x.xlsx", "file": "x.xlsx", "rel": "out/x.xlsx",
+            target = Path(root) / "out" / "exports" / "x.xlsx"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"test workbook")
+            return {"ok": True, "path": str(target), "file": "x.xlsx", "rel": "out/x.xlsx",
                     "rows": 9, "sheets": ["总览", "合计", "明细", "说明"]}
 
         with mock.patch.object(web, "role_scope",
@@ -285,7 +288,8 @@ class Test分成到人(unittest.TestCase):
       "7 个人 × 每个品类"会把表撑到没法看。要改成列的话说一声。
     """
 
-    APP = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((Path(__file__).resolve().parent.parent / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
     CSS = (Path(__file__).resolve().parent.parent / "web" / "style.css").read_text(encoding="utf-8")
 
     def test_门店名挂了可点的钩子(self):
@@ -299,8 +303,8 @@ class Test分成到人(unittest.TestCase):
         self.assertIn("planState.openStores = new Set(o.openStores || [])", self.APP)
 
     def test_点击委托里有门店那一支(self):
-        body = self.APP[self.APP.index("$('#plan-table')?.addEventListener"):
-                        self.APP.index("// 刷新 = **先抓云商新数据")]
+        start = self.APP.index("$('#plan-table')?.addEventListener")
+        body = self.APP[start:self.APP.index("/* 展开 / 收起一列", start)]
         self.assertIn("data-plan-store", body)
         # ⚠ 2026-09-21 晚起走 `planToggleStore`（带**上下动画**），不再直接 renderPlan
         self.assertIn("planToggleStore(", body)
@@ -366,7 +370,8 @@ class Test表头只有一行(unittest.TestCase):
     ⚠ 这几条是**形态钉子**（前端没有构建步骤，跑不了 JS 单测 ⇒ 钉源码形状）：
       它们防的是"哪天又顺手改回多行表头"，而不是防手滑。
     """
-    APP = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((Path(__file__).resolve().parent.parent / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
     CSS = (Path(__file__).resolve().parent.parent / "web" / "style.css").read_text(encoding="utf-8")
     THEME = (Path(__file__).resolve().parent.parent / "web" / "theme.css").read_text(encoding="utf-8")
 
@@ -449,7 +454,8 @@ class Test列宽固定和展开动画(unittest.TestCase):
          浏览器只在帧末算一次样式 ⇒ 过渡起点变成"点之前那份自然宽度"（新列一上来就是 108）。
          ⇒ 冻结那一帧关过渡（`.plan-frozen`）+ **两层 rAF** 中间夹一次绘制。
     """
-    APP = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((Path(__file__).resolve().parent.parent / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
     CSS = (Path(__file__).resolve().parent.parent / "web" / "style.css").read_text(encoding="utf-8")
     THEME = (Path(__file__).resolve().parent.parent / "web" / "theme.css").read_text(encoding="utf-8")
 
@@ -547,13 +553,13 @@ class Test列宽固定和展开动画(unittest.TestCase):
     def test_展开动画是两层rAF(self):
         """坑③的第三半：一层 rAF 时冻结态和终点态同一帧算样式 ⇒ 没有起点。"""
         body = self._fn("planAnimate")
-        self.assertIn("requestAnimationFrame(() => requestAnimationFrame(", body)
+        self.assertIn("planRequestFrame(() => planRequestFrame(", body)
         self.assertIn("planState.anim = null", body, "收尾要把动画状态清掉")
         self.assertIn("planAnimStep()", body)
         self.assertIn("planClean()", body)
         # ⚠ 收尾**不再重画整张表**（弱机器上一次重画就是一次可见的卡顿）：
         #   该消失的列/行直接 remove，见 `planClean`
-        self.assertNotIn("renderPlan", body[self.body_index(body, "setTimeout"):])
+        self.assertNotIn("renderPlan", body[self.body_index(body, "planScheduleTimer"):])
         self.assertIn("PLAN_ANIM_MS", body)
 
     def body_index(self, body, needle):
@@ -620,7 +626,8 @@ class Test合计带环比(unittest.TestCase):
       前端那一格直接用 —— 别在前端拿七个百分比平均（那玩意儿没有意义）。
     """
 
-    APP = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((Path(__file__).resolve().parent.parent / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
 
     def test_合计那格也画环比(self):
         body = self.APP[self.APP.index("function renderPlan("):
@@ -645,13 +652,14 @@ class Test区域汇总折叠(unittest.TestCase):
     默认只列门店、**不画**各区共计；点区域名把该区收成一行 `region_sums`。
     """
 
-    APP = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
+    APP = "\n".join((Path(__file__).resolve().parent.parent / "web" / _p).read_text(encoding="utf-8")
+                             for _p in ("common/base.js", "common/nav.js", "features/plan/monthly/page.js", "app.js"))
     CSS = (Path(__file__).resolve().parent.parent / "web" / "style.css").read_text(encoding="utf-8")
 
     def test_区域名可点且默认不画汇总(self):
         self.assertIn("data-plan-region=", self.APP, "区域名要挂可点钩子")
         self.assertIn("collapsedRegions", self.APP, "收起态要记在 planState")
-        self.assertIn("planNormRegion", self.APP,
+        self.assertIn("normalizeRegionName", self.APP,
                       "分组键要 strip+空→其他，跟后端 region_sums 一致"
                       "（不同键会「显示同名、点了折不起来」）")
         self.assertIn("collapsedRegions: [...planState.collapsedRegions]", self.APP,
@@ -664,12 +672,12 @@ class Test区域汇总折叠(unittest.TestCase):
         self.assertIn("planState.collapsedRegions.has(grp.reg) && sum", body,
                       "汇总行只在该区收起时画")
         self.assertIn("grp.rows.map(renderStoreRow)", body, "展开时画门店明细")
-        self.assertIn("planNormRegion(regions0[r.store])", body,
+        self.assertIn("normalizeRegionName(regions0[r.store])", body,
                       "切组也要走同一把尺（否则同名被拆成多组）")
 
     def test_点击委托里有区域那一支(self):
-        body = self.APP[self.APP.index("$('#plan-table')?.addEventListener"):
-                        self.APP.index("// 刷新 = **先抓云商新数据")]
+        start = self.APP.index("$('#plan-table')?.addEventListener")
+        body = self.APP[start:self.APP.index("/* 展开 / 收起一列", start)]
         self.assertIn("data-plan-region", body)
         self.assertIn("planToggleRegion(", body)
 

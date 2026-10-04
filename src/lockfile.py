@@ -18,7 +18,7 @@ import platform
 import time
 from pathlib import Path
 
-from .service import pid_alive
+from .desktop.service import pid_alive
 
 DEFAULT_STALE = 1800          # 半小时。一次对账正常几十秒，含自动续期也就几分钟
 

@@ -445,13 +445,14 @@ def _js_code(src: str) -> str:
 class Test前端接线(unittest.TestCase):
     def setUp(self):
         self.html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-        self.js = _js_code((ROOT / "web" / "app.js").read_text(encoding="utf-8"))
+        self.js = _js_code("\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js")))
 
     def test_卡片和控件都在(self):
         # ⚠ 「公司代码」「读取本店信息」2026-09-19 去掉了；
-        #   「保存账号」改叫「确认登录」，「读取本店信息」换成「退出」。
+        #   「保存账号」改叫「确认登录」，入口切换在登录卡片底部。
         for ident in ("sa-username", "sa-password", "sa-status",
-                      "btn-sa-save", "btn-sa-quit", "sa-captcha", "sa-msg"):
+                      "btn-sa-save", "sa-captcha", "sa-msg"):
             with self.subTest(ident=ident):
                 self.assertIn('id="%s"' % ident, self.html)
 

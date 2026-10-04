@@ -8,7 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
 GAME_JS = ROOT / "web" / "gomoku" / "game.js"
 GAME_CSS = ROOT / "web" / "gomoku" / "style.css"
 

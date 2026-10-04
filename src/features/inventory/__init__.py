@@ -39,9 +39,26 @@ SUB = Sub(key="inventory", label="库存盘点", order=10)
 
 #: 一级功能模块。`order=30` 排在「五项合规」(20) 之后。
 #: `types=""` = 三类门店都看得见（盘点是每个店自己的货，不分店型）。
-FEATURE = Feature(key="inventory", label="库存盘点", order=30, types="",
+#: ⭐ 操作/数据范围（协议 v2，2026-10-02）：`push.inventory` 那把尺（原 `_can_for`
+#:   写死 True）收编成这里的 `export` —— 全员可导（跟原来逐字一致）；
+#:   盘点是**本店/本机**的活 ⇒ `data="store"`（最窄缺省）。
+FEATURE = Feature(audience=("erp", "platform"), key="inventory", label="库存盘点", order=30, types="",
+                  ops={"view": ("store", "manager", "platform"),
+                       "export": ("store", "manager", "platform")},
+                  data="authorized",
                   children=[SUB])
 
 from . import book, push                                    # noqa: E402,F401
 from . import settings as _settings                         # noqa: E402,F401
 FEATURE.children.append(_settings.SUB)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/inventory/ready', 'inventory', 'view'),
+    ('GET', '/api/inventory/warehouses', 'inventory', 'view'),
+    ('POST', '/api/inventory/book', 'inventory', 'view'),
+    ('POST', '/api/inventory/transit', 'inventory', 'view'),
+    ('POST', '/api/inventory/index', 'inventory', 'view'),
+    ('POST', '/api/inventory/export', 'inventory', 'export'),
+)
+FEATURE.route_data = {('POST', '/api/inventory/index'): 'all'}

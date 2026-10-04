@@ -35,6 +35,14 @@ from src.storage import runlog
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def patch_step_run(command, fn=None, **kwargs):
+    """替换注册步骤的执行入口，避免测试误跑真实采集。"""
+    step = next(item for item in registry.BUILTIN_STEPS if item.cmd == command)
+    if fn is not None:
+        kwargs["new"] = fn
+    return mock.patch.object(step, "run", **kwargs)
+
+
 def _next_at(hhmm, now=None):
     """「下一个 HH:MM」的**真实**日期时间字符串 —— 按当前时钟算，别写死今天。
 
@@ -648,8 +656,9 @@ class Test每天这一步要记一笔(unittest.TestCase):
           那边第 1 步失败 / 合作店早退都是直接 return，会漏掉最该记的那一趟。
         """
         with mock.patch("src.storage.runlog.find_db", lambda root=None: self.db), \
-             mock.patch("src.cli.cmd_dump", return_value=rc), \
-             mock.patch("src.cli.cmd_pools", return_value=rc):
+             patch_step_run("dump", return_value=rc), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        return_value=rc):
             return cli.main(["-c", "config/store-X.yaml", "daily",
                              "--steps", steps, "--wake-slot", slot])
 
@@ -680,8 +689,9 @@ class Test每天这一步要记一笔(unittest.TestCase):
         """⚠ 手动「跑一次」**不该**被记成"这一跳跑过了" ——
         记了的话那一跳就永远不会自己跑了（看着像"定时器坏了"）。"""
         with mock.patch("src.storage.runlog.find_db", lambda root=None: self.db), \
-             mock.patch("src.cli.cmd_dump", return_value=0), \
-             mock.patch("src.cli.cmd_pools", return_value=0):
+             patch_step_run("dump", return_value=0), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        return_value=0):
             cli.main(["-c", "config/store-X.yaml", "daily", "--steps", "dump,pools"])
         self.assertEqual(runlog.recent(self.root, kind=timer.WAKE_KIND), [])
 
@@ -729,11 +739,11 @@ class Test合作店也要跑达成(unittest.TestCase):
              mock.patch("src.cli.store_profile_of",
                         lambda cfg: {"needs_linglong": needs_linglong,
                                      "erp_name": "甲店", "show_all": False}), \
-             mock.patch("src.cli.cmd_dump",
-                        side_effect=lambda *a, **k: hit.setdefault("dump", 1) and 0), \
-             mock.patch("src.cli.cmd_erp_dump",
-                        side_effect=lambda *a, **k: hit.setdefault("erp-dump", 1) and 0), \
-             mock.patch.object(run_daily, "attain_run", side_effect=fake_attain):
+             patch_step_run("dump",
+                            side_effect=lambda *a, **k: hit.setdefault("dump", 1) and 0), \
+             patch_step_run("erp-dump",
+                            side_effect=lambda *a, **k: hit.setdefault("erp-dump", 1) and 0), \
+             mock.patch("src.features.sales.attain.attain.run", side_effect=fake_attain):
             rc = run_daily.main(["-c", "config/x.yaml", "--steps", steps])
         return rc, hit, plan_calls
 
@@ -800,8 +810,9 @@ class Test_steps_参数的语义(unittest.TestCase):
             seen["pools"] = True
             return 0
 
-        with mock.patch("src.cli.cmd_dump", side_effect=fake_dump), \
-             mock.patch("src.cli.cmd_pools", side_effect=fake_pools):
+        with patch_step_run("dump", side_effect=fake_dump), \
+             mock.patch("src.features.compliance.comparison.execution.run",
+                        side_effect=fake_pools):
             run_daily.main(["-c", "config/store-X.yaml", "--steps", "dump"])
         self.assertTrue(seen.get("dump"), "说了只跑 dump，它就得跑")
         self.assertFalse(seen.get("pools"), "没说的那步不许跑")
@@ -1288,10 +1299,10 @@ class Test带短横线的步骤名(unittest.TestCase):
         #   ⇒ 用 `ExitStack`（3.8 就有），或者老老实实嵌套 with。
         import contextlib
         with contextlib.ExitStack() as stack:
-            for name, target in (("dump", "src.cli.cmd_dump"),
-                                 ("erp", "src.cli.cmd_erp_dump"),
-                                 ("pools", "src.cli.cmd_pools")):
-                stack.enter_context(mock.patch(target, side_effect=spy(name)))
+            for name, command in (("dump", "dump"), ("erp", "erp-dump")):
+                stack.enter_context(patch_step_run(command, side_effect=spy(name)))
+            stack.enter_context(mock.patch(
+                "src.features.compliance.comparison.execution.run", side_effect=spy("pools")))
             run_daily.main(["-c", "config/store-X.yaml", "--steps", "dump"])
             run_daily.main(["-c", "config/store-X.yaml", "--steps", "dump"])
         self.assertIn("dump", seen)
@@ -1393,20 +1404,20 @@ class Test自动更新那一步(unittest.TestCase):
         import contextlib
         import types
         with contextlib.ExitStack() as stack:
-            for name, target in (("dump", "src.cli.cmd_dump"),
-                                 ("erp", "src.cli.cmd_erp_dump"),
-                                 ("pools", "src.cli.cmd_pools"),
+            for name, command in (("dump", "dump"), ("erp", "erp-dump")):
+                stack.enter_context(patch_step_run(command, side_effect=spy(name)))
+            for name, target in (("pools", "src.features.compliance.comparison.execution.run"),
                                  ("auto", "src.modules.health.auto_update")):
                 stack.enter_context(mock.patch(target, side_effect=spy(name)))
             # ⚠ 达成的桩要回 **dict**（`run_daily` 读 `res.get("ok")`），不是整数
             stack.enter_context(mock.patch(
-                "src.run_daily.attain_run",
+                "src.features.sales.attain.attain.run",
                 side_effect=lambda **kw: (seen.setdefault("attain", 1),
                                           {"ok": True})[1]))
             # ⚠ POS 走**执行模块**，桩要按新契约回一个带 `.ok` 的对象
             #   （返回整数会让 `res.ok` 直接 AttributeError）
             stack.enter_context(mock.patch(
-                "src.run_daily.pos_run",
+                "src.app.pos.run",
                 side_effect=lambda **kw: (seen.setdefault("pos", 1),
                                           types.SimpleNamespace(ok=True, why=""))[1]))
             # ⚠ 本店必须"要走玲珑"，否则会走合作店那条早退分支
@@ -1418,11 +1429,11 @@ class Test自动更新那一步(unittest.TestCase):
             # ⚠ 2026-09-21（M18）：第 6 步（上报数据）**也要挡** —— 它 `root=None`
             #   ⇒ 会去读**项目根**那个真库、并往真 `out/report/` 写包与指纹
             #   （实测污染过一次：`out/report/{pending,state.db}`）。
-            stack.enter_context(mock.patch.object(
-                run_daily, "report_run",
+            stack.enter_context(mock.patch(
+                "src.app.report.run",
                 side_effect=lambda **kw: (seen.setdefault("report", 1), {"ok": True})[1]))
-            stack.enter_context(mock.patch.object(
-                run_daily, "inbox_run",
+            stack.enter_context(mock.patch(
+                "src.app.report_inbox.run",
                 side_effect=lambda **kw: {"ok": True, "skipped": "没配收信"}))
             run_daily.main([])
         self.assertNotIn("auto", seen, "整批把自动更新捎上了 —— 半夜换代码")

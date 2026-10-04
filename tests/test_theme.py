@@ -97,11 +97,12 @@ class Test两份样式表的规矩(_Base):
 
         （反过来"用了没定义"浏览器会静默失效，也要查 —— 见下一条。）
         """
-        # ⚠ app.js 里也有 var(--…)（拼 HTML 的内联样式，如 --hot）——
-        #   不扫的话「定义了但只在 JS 用」会被误报成没人用。
+        # ⚠ 页面模块已经拆成独立脚本；只扫公共 app.js 会把业务页仍在使用的
+        #   令牌误判成闲置。扫描 web/ 下所有本地 JS，也覆盖懒加载的独立页面。
         used = set(re.findall(r"var\((--[\w-]+)",
                               self.style + self.all_themes
-                              + (WEB / "app.js").read_text(encoding="utf-8")))
+                              + "\n".join(p.read_text(encoding="utf-8")
+                                             for p in sorted(WEB.rglob("*.js")))))
         defined = set(re.findall(r"^\s*(--[\w-]+):", self.tokens, re.M))
         unused = sorted(defined - used)
         # ⚠ **不许开白名单** —— 我第一版给 `--ink*` 开了个豁免，
@@ -153,7 +154,8 @@ class Test过渡动画(_Base):
 
     def setUp(self):
         super().setUp()
-        self.js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((WEB / _p).read_text(encoding="utf-8")
+                              for _p in ("common/base.js", "common/nav.js", "app.js"))
 
     def test_侧栏是滑出去不是直接消失(self):
         """原来是 `body.side-collapsed .sidebar { display: none }`。"""
@@ -285,7 +287,8 @@ class Test提示条对比度(unittest.TestCase):
 
     def setUp(self):
         self.style = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
-        self.js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js", "app.js"))
 
     def test_toast的good别名映射成ok(self):
         i = self.js.index("function toast(")
@@ -454,7 +457,9 @@ class Test每个色块等宽(_Base):
 
         ⚠ 2026-09-22：防护膜小计也挂了 `rate`，计数从 2 改成 3（只加不放宽：
         仍是「出现次数 == 渲染点数」的钉子，漏一处就红）。"""
-        js = (WEB / "app.js").read_text(encoding="utf-8")
+        js = "\n".join((WEB / _p).read_text(encoding="utf-8")
+                              for _p in ("common/base.js", "common/nav.js",
+                                         "features/sales/attain/page.js", "app.js"))
         self.assertEqual(js.count('<b class="rate">'), 3, "主表 / 区域小计 / 历史页各一处")
         self.assertEqual(js.count('<b class="rate hint">—</b>'), 3)
 
@@ -498,7 +503,8 @@ class Test日夜自动主题与侧栏天气(_Base):
 
     def setUp(self):
         super().setUp()
-        self.js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((WEB / _p).read_text(encoding="utf-8")
+                              for _p in ("common/base.js", "common/nav.js", "app.js"))
 
     def test_设置页有自动开关和日夜映射(self):
         for eid in ("theme-auto", "theme-day", "theme-night", "theme-auto-status"):
@@ -572,7 +578,8 @@ class Test自定义照片主题与壁纸(_Base):
 
     def setUp(self):
         super().setUp()
-        self.js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.js = "\n".join((WEB / _p).read_text(encoding="utf-8")
+                              for _p in ("common/base.js", "common/nav.js", "app.js"))
         self.photo = (self.themes_dir / "photo.css").read_text(encoding="utf-8")
 
     def test_有照片主题文件且链在_style_前(self):

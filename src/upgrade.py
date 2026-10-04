@@ -236,7 +236,7 @@ def notify(root, cfg: dict, change: dict, notes: dict) -> tuple:
     `pushed` —— 全跳过（门店没配邮箱）或全失败（网不通）时**不能记**，
     否则"当时没配、后来配了"就永远收不到这条提醒了。
     """
-    from . import mailer, wecom
+    from .integrations import mailer, wecom
     store = cfg.get("erp_store_name") or cfg.get("store_code") or "本店"
     subject, body = build_message(store, change, notes)
     said, sent = [], []

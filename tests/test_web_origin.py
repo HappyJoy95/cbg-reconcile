@@ -16,6 +16,11 @@ class TestWriteOrigin(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        (self.root / "config").mkdir(parents=True, exist_ok=True)
+        (self.root / "config" / "store-X.yaml").write_text(
+            "erp_store_name: 青岛CBD万达店\n"
+            "store_code: SCN328987\n"
+            "marker: C\n", encoding="utf-8")
         web.Handler.app = web.App(self.root, "config/store-X.yaml")
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
         self.addCleanup(self.server.server_close)

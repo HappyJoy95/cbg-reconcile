@@ -46,7 +46,9 @@ from src.features.store import staff                                       # noq
 from src.modules import timer                                              # noqa: E402
 from src.storage import runlog                                             # noqa: E402
 
-APP_JS = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP_JS = "\n".join((ROOT / "web" / _p).read_text(encoding="utf-8")
+                   for _p in ("common/base.js", "common/nav.js",
+                              "features/store/page.js", "app.js"))
 
 #: 测试用的窗口 —— 真窗口 5 分钟，等不起；**逻辑一模一样**，只是短
 SHORT = 0.25
@@ -305,6 +307,49 @@ class Test接口(_Base):
         self.assertEqual(st, 403, d)
         self.assertTrue(d.get("forbidden"))
         self.assertFalse(m.called, "区长那边不该触发上报")
+
+
+class Test人员HTTP归属(unittest.TestCase):
+    def test_人员路由由业务目录处理(self):
+        from src.features.store import http as staff_http
+        source = (ROOT / "src" / "http" / "app.py").read_text(encoding="utf-8")
+        handler_source = (ROOT / "src" / "features" / "store" / "http.py").read_text(
+            encoding="utf-8")
+        self.assertTrue(callable(staff_http.handle))
+        self.assertIn("staff_http.handle(", source)
+        self.assertNotIn('if path == "/api/staff" and method == "GET":', source)
+        self.assertNotIn('if path == "/api/staff" and method in ("PUT", "POST"):', source)
+        self.assertNotIn("from src.web", handler_source)
+
+    def test_区长接口只返回映射到授权门店的上报人员表(self):
+        from src.app import report_inbox
+        from src.features.store import http as staff_http
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            config.mkdir()
+            (config / "stores.yaml").write_text(
+                "stores:\n"
+                "  - erp_name: 甲店\n    tdoc_name: 甲店短名\n    huawei_code: SCN-A\n"
+                "  - erp_name: 乙店\n    tdoc_name: 乙店短名\n    huawei_code: SCN-B\n",
+                encoding="utf-8")
+            rows = [
+                ("SCN-A", {"store_name": "甲店", "rows": [{"name": "甲员工", "active": True}]}),
+                ("SCN-B", {"store_name": "甲店", "rows": [{"name": "乙员工", "active": True}]}),
+            ]
+            scope = {"role": "manager", "label": "区长",
+                     "stores": {"甲店", "甲店短名"}}
+            with mock.patch.object(report_inbox, "tables_of", return_value=rows):
+                payload, status = staff_http.handle(
+                    "GET", "/api/staff", scope, root=root,
+                    config_path=config / "store.yaml", env_file="",
+                    read_json=lambda: {}, forbid=lambda *_: {}, audit=lambda *_a, **_k: None,
+                    scope_store_ok=lambda sc, name: name in sc["stores"])
+
+        self.assertEqual(status, 200)
+        self.assertEqual([row["store_name"] for row in payload["stores"]], ["甲店"])
+        self.assertEqual(payload["count"], 1)
 
 
 class Test前端接线(unittest.TestCase):

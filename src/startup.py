@@ -96,15 +96,23 @@ TASKS: List[Tuple[str, Callable]] = [
 ]
 
 
-def tasks() -> List[Tuple[str, Callable]]:
+def tasks(root=None) -> List[Tuple[str, Callable]]:
     """按版本给启动刷新清单；生活馆不加载云商人员链。"""
-    from . import edition
-    if edition.is_lifehall():
+    from .modules.auth import runtime
+    if runtime.is_lifehall(root):
         return [task for task in TASKS if task[0] != "门店组织架构 / 本店人员"]
     return list(TASKS)
 
 
 def run_once(app, force: bool = False, say=print) -> dict:
+    from .modules.auth import runtime_guard
+    with runtime_guard.guard(app.root) as acquired:
+        if not acquired:
+            return {"ran": False, "results": {}, "reason": "有任务正在使用本机运行身份，稍后重试启动刷新"}
+        return _run_once(app, force=force, say=say)
+
+
+def _run_once(app, force: bool = False, say=print) -> dict:
     """今天还没跑过就跑一轮。返回 `{"ran": bool, "results": {名字: 结果}}`。
 
     ⚠ **一条坏了不影响别的**，也不影响"记成今天跑过" —— 见模块开头那段。
@@ -112,7 +120,7 @@ def run_once(app, force: bool = False, say=print) -> dict:
     if not force and not should_run(app.root):
         return {"ran": False, "results": {}, "reason": "今天已经刷过了"}
     results = {}
-    for name, fn in tasks():
+    for name, fn in tasks(app.root):
         try:
             results[name] = fn(app) or "好了"
         except Exception as e:                                 # noqa: BLE001

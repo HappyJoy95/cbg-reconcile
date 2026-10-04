@@ -26,7 +26,7 @@
 <link rel="stylesheet" href="/themes/taotu.css?v=135">
 <link rel="stylesheet" href="/themes/dianye.css?v=135">
 <link rel="stylesheet" href="/themes/photo.css?v=136">
-<link rel="stylesheet" href="/style.css?v=152">
+<link rel="stylesheet" href="/style.css?v=153">
 <link rel="stylesheet" href="/inventory/style.css?v=136">
 <link rel="stylesheet" href="/gomoku/style.css?v=1">
 </head>
@@ -185,21 +185,18 @@
     </div>
   </div>
   <!-- ⚠ 库存盘点（M16，2026-09-20 用户：「把库存盘点功能整理成一个模块接入我们这个项目」）——
-       它是**同文档子面板**（`#subpanel-inventory` 里的 `.inv-root`，已拆 iframe），
+       它是**同文档子面板**（`#subpanel-inventory` 里的 `.inv-root`，不是 iframe），
        跟 POS / 报量查询一样切过去就能用，不再另开一个标签页
        （用户当天改的口径：「做嵌套进来吧，现在单独打开一个页面很奇怪」）。
 
-       ⚠ 嵌入式唯一要留神的是**扫码枪的焦点**：扫码枪就是键盘，输入必须落在
-         iframe 里的扫码框上。光靠"进来时聚焦一次"不够 —— 用户点一下控制台别处，
-         焦点就跑了，表现是"扫了没反应"。兜底见 app.js 的 `mountInventory` / `focusInvScan`：
-           ① 切到这一页、以及鼠标在面板上动时，把焦点还给 iframe；
-           ② 焦点真在外面时，父页面把**那一下按键**转给 iframe（只转第一下，
-              之后焦点已经在里面了）—— 一个字符都不会丢。
+       ⚠ 扫码枪就是键盘，输入必须落在扫码框。切入库存页或鼠标回到面板时，
+         会把焦点还给扫码框；库存脚本只在首次进入时懒加载，离页会释放控制台焦点监听。
+         接入逻辑在 `web/features/inventory/page.js`，不恢复 iframe/postMessage。
        理由与踩坑：`.dsh/docs/2026-09-20-3.0.0-M16-库存盘点接入-开发目标.md` -->
   <div class="nav-item" data-tab="inventory">
-    <button class="tab" data-tab="inventory" aria-haspopup="true" aria-expanded="false">库存盘点</button>
+    <button class="tab" data-tab="inventory" data-direct-subtab="inventory"
+            aria-haspopup="true" aria-expanded="false">库存盘点</button>
     <div class="nav-menu">
-      <button class="subtab" data-subtab="inventory">库存盘点</button>
       <button class="subtab" data-subtab="inventory-settings">设置</button>
     </div>
   </div>
@@ -221,7 +218,6 @@
       <button class="subtab" data-subtab="pricetag">价签工具</button>
       <button class="subtab" data-subtab="badge">工牌工具</button>
       <button class="subtab" data-subtab="claim-pending">权益领取</button>
-      <button class="subtab" data-subtab="sn-trace">串号追踪</button>
     </div>
   </div>
   <!-- ⚠ 分销（2.3.0，2026-09-29）：渠道分销部的分销单四张看板。
@@ -232,19 +228,13 @@
   <div class="nav-item" data-tab="distribution">
     <button class="tab" data-tab="distribution" aria-haspopup="true" aria-expanded="false">分销</button>
     <div class="nav-menu">
-      <button class="subtab" data-subtab="dist-region">区域看板</button>
-      <button class="subtab" data-subtab="dist-model">机型看板</button>
-      <button class="subtab" data-subtab="dist-salesman">销售员看板</button>
-      <button class="subtab" data-subtab="dist-detail">分销明细</button>
+      <button class="subtab" data-subtab="dist-region">分销看板</button>
     </div>
   </div>
-  <div class="nav-item nav-lifehall" data-tab="tools">
-    <button class="tab" data-tab="tools" data-direct-subtab="pricetag">价签工具</button>
-  </div>
-  <div class="nav-item nav-lifehall" data-tab="tools">
-    <button class="tab" data-tab="tools" data-direct-subtab="claim-pending">权益领取</button>
-  </div>
-  <!-- 收银（2026-09-29 生活馆利润核算录入端）—— 第三个平级入口。
+  <!-- ⭐ 2026-10-02（用户）：价签 / 权益**不再平铺** —— 两版统一走「小工具」
+       下拉（生活馆版原来隐藏下拉、靠这两个直连块的 CSS 一并撤了）。
+       收银仍是生活馆唯一的平级直连入口。 -->
+  <!-- 收银（2026-09-29 生活馆利润核算录入端）—— 生活馆的平级入口。
        ⚠ `data-subtab` 挂在 **div** 上，不挂按钮：按钮同时带 direct+subtab 会被
          绑两次点击（loader 跑两遍）；div 自身属性不会被
          `querySelectorAll('[data-subtab]')` 绑到（那只扫子孙）。
@@ -363,6 +353,7 @@
         <button class="btn ghost small" id="btn-refresh-attain" title="重新抓云商销售数据并重算达成（约 1~2 分钟）"
                   aria-label="刷新：重新抓云商销售数据并重算达成（约 1~2 分钟）">刷新</button>
         <button class="btn ghost small" id="btn-export-attain"
+                data-op="export" data-op-page="attain"
                 title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 导出的范围就是你能看到的这几家店"
                 aria-label="导出为 Excel">导出 Excel</button>
       </div>
@@ -458,6 +449,7 @@
                 title="重新抓云商销售数据并重算（约 1~2 分钟）"
                 aria-label="刷新：重新抓云商销售数据并重算（约 1~2 分钟）">刷新</button>
         <button class="btn ghost small" id="btn-export-plan"
+                data-op="export" data-op-page="monthly"
                 title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 导出的范围就是你能看到的这几家店"
                 aria-label="导出为 Excel">导出 Excel</button>
       </div>
@@ -619,8 +611,8 @@
      ⚠ 这一页**已拆 iframe、并进同文档**（2026-09-22）—— markup 在
        `#subpanel-inventory` 的 `.inv-root` 里，配色直接吃控制台主题。
        历史：用户 2026-09-20 曾定「做嵌套进来」；外层控制台卡片已去掉；
-       扫码焦点靠 `mountInventory` / `focusInvScan`（同文档，不再 postMessage）。
-       脚本由 app.js 在**第一次切到这一页时**懒注入（不点不发请求）。
+       扫码焦点与懒加载由 `web/features/inventory/page.js` 管理；第一次切到这一页时
+       才注入库存脚本（不点不发请求）。
        ⚠ 面板本身（`panel-` / `subpanel-`）**不能删** —— 切页签靠它，
          `test_web_ia` 那几条也钉着。 -->
 <!-- ───────────────────── 增值 · 防护膜达成情况 ─────────────────────
@@ -646,6 +638,7 @@
                   title="重新从本地销售明细计算"
                   aria-label="刷新">刷新</button>
           <button class="btn ghost small" id="btn-export-film"
+                  data-op="export" data-op-page="film"
                   title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 版式同源表"
                   aria-label="导出为 Excel">导出 Excel</button>
         </div>
@@ -686,6 +679,7 @@
                   title="重新从本地销售明细计算"
                   aria-label="刷新">刷新</button>
           <button class="btn ghost small" id="btn-export-benefit"
+                  data-op="export" data-op-page="benefit"
                   title="把这一页导成 Excel 并下载（浏览器「下载」里找）—— 四张表"
                   aria-label="导出为 Excel">导出 Excel</button>
         </div>
@@ -945,39 +939,15 @@
     </div>
   </div>
 
-  <!-- 串号追踪（2026-09-23）：86码/SN → 库存快照 + 销售全程；无定时 Step -->
-  <div class="subpanel" id="subpanel-sn-trace">
-    <div class="card">
-      <div class="card-head">
-        <h2>串号追踪 <span class="hint" id="sn-trace-meta"></span></h2>
-        <div class="form-row" style="margin:0">
-          <button class="btn ghost small" id="btn-refresh-sn-trace"
-                  title="先抓云商在库+销售再查"
-                  aria-label="刷新">刷新</button>
-        </div>
-      </div>
-      <div class="hint" id="sn-trace-scope" style="margin-bottom:8px"></div>
-      <form class="form-row" id="sn-trace-form"
-            style="margin:0 0 12px;gap:8px;align-items:center;flex-wrap:wrap"
-            autocomplete="off">
-        <label class="hint" for="sn-trace-input" style="margin:0">串号</label>
-        <input id="sn-trace-input" type="search"
-               placeholder="粘贴 86 码（IMEI）或设备 SN，回车查询"
-               style="background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:280px;flex:1;max-width:420px" />
-        <button type="submit" class="btn" id="btn-sn-trace">查询</button>
-      </form>
-      <div id="sn-trace-result" class="hint">输入串号后点「查询」——本地库串起库存快照与销售记录，并反查真 SN。</div>
-    </div>
-  </div>
 </section>
 
 <!-- ──────────────────────── 分销（2.3.0）────────────────────────
-     渠道分销部的分销单四张看板。三条用户拍板的口径（2026-09-29）：
+     渠道分销部单一工作区，内含区域/机型/销售员/明细四个视角。三条用户拍板的口径（2026-09-29）：
        ① 只算 `门店=渠道分销部` 且 单据类型 ∈ {分销, 分销退}（净额）；
        ② 区域识别：备注九区关键词 → 客户映射 → **待确认**（⛔ 不用门店名兜底），
           明细页下拉确认、按客户落盘、可改可重置；
        ③ 手动选时间段**现拉**（不读对账库 erp_sales —— 实测它历史有缺行）。
-     ⚠ 日期区间这四个控件是**四页共用**的（写在 `DIST_RANGE`，切页不丢）。 -->
+     日期区间、拉取和导出在同一工具栏，切换视角不丢时间范围。 -->
 <section class="panel" id="panel-distribution">
   <div class="card" id="dist-toolbar">
     <div class="form-row" style="margin:0;flex-wrap:wrap;gap:8px;align-items:center">
@@ -994,9 +964,20 @@
       <span class="hint" id="dist-status" style="margin-left:auto"></span>
     </div>
     <div class="hint" id="dist-range-note" style="margin-top:6px"></div>
+    <div class="dist-view-tabs" role="tablist" aria-label="分销视角">
+      <button class="dist-view-tab active" type="button" data-dist-view="region"
+              data-tab="dist-region" role="tab" aria-selected="true">区域</button>
+      <button class="dist-view-tab" type="button" data-dist-view="model"
+              data-tab="dist-model" role="tab" aria-selected="false">机型</button>
+      <button class="dist-view-tab" type="button" data-dist-view="salesman"
+              data-tab="dist-salesman" role="tab" aria-selected="false">销售员</button>
+      <button class="dist-view-tab" type="button" data-dist-view="detail"
+              data-tab="dist-detail" role="tab" aria-selected="false">明细</button>
+    </div>
   </div>
 
-  <div class="subpanel" id="subpanel-dist-region">
+  <div class="subpanel active" id="subpanel-dist-region">
+    <div class="dist-view active" id="dist-view-region" role="tabpanel">
     <div class="card">
       <div class="card-head">
         <h2>区域看板 <span class="hint" id="dist-region-meta"></span></h2>
@@ -1021,9 +1002,10 @@
                 title="清空全部客户→区的映射，全部回到待确认">重置全部映射</button>
       </div>
     </div>
+    </div>
   </div>
 
-  <div class="subpanel" id="subpanel-dist-model">
+  <div class="dist-view" id="dist-view-model" role="tabpanel" hidden>
     <div class="card">
       <div class="card-head">
         <h2>机型看板 <span class="hint" id="dist-model-meta"></span></h2>
@@ -1042,7 +1024,7 @@
     </div>
   </div>
 
-  <div class="subpanel" id="subpanel-dist-salesman">
+  <div class="dist-view" id="dist-view-salesman" role="tabpanel" hidden>
     <div class="card">
       <div class="card-head">
         <h2>销售员看板 <span class="hint" id="dist-salesman-meta"></span></h2>
@@ -1058,7 +1040,7 @@
     </div>
   </div>
 
-  <div class="subpanel" id="subpanel-dist-detail">
+  <div class="dist-view" id="dist-view-detail" role="tabpanel" hidden>
     <div class="card">
       <div class="card-head">
         <h2>分销明细 <span class="hint" id="dist-detail-meta"></span></h2>
@@ -1252,9 +1234,12 @@
         <div class="card-head">
           <h2>本店人员 <span class="hint" id="staff-meta"></span></h2>
           <div>
-            <button class="btn ghost small" id="btn-staff-all">全选</button>
-            <button class="btn ghost small" id="btn-staff-none">全不选</button>
-            <button class="btn primary small" id="btn-staff-save">保存</button>
+            <button class="btn ghost small" id="btn-staff-all"
+                    data-op="modify" data-op-page="account">全选</button>
+            <button class="btn ghost small" id="btn-staff-none"
+                    data-op="modify" data-op-page="account">全不选</button>
+            <button class="btn primary small" id="btn-staff-save"
+                    data-op="modify" data-op-page="account">保存</button>
           </div>
         </div>
         <p class="hint" id="staff-hint">
@@ -1275,6 +1260,22 @@
   </div>
 
   <div class="subpanel" id="subpanel-general">
+    <div class="card" id="lifehall-entry-settings-card" hidden>
+      <div class="card-head">
+        <h2>生活馆入口</h2>
+        <span class="hint">门店编码用于本机进入和后续玲珑授权</span>
+      </div>
+      <div class="form-row">
+        <b>当前门店编码</b>
+        <code id="lifehall-current-code">未设置</code>
+      </div>
+      <div class="form-row">
+        <button class="btn" id="btn-lifehall-edit-code" type="button">重新输入门店编码</button>
+        <button class="btn primary" id="btn-lifehall-open-ll" type="button">玲珑授权</button>
+      </div>
+      <p class="hint">生活馆直接使用门店编码进入，不需要 ERP 登录。重新输入后才会更新本机编码。</p>
+    </div>
+
     <!-- ⚠ 门店编码卡**不在这一档**了（2026-09-29 用户：「把门店编码设置放到
          玲珑授权里面吧」）—— 它管的是"认哪家店、抓会话怎么自检"，跟会话同去向，
          挪进 `#subpanel-linglong`（下面「玲珑授权」那块）。 -->
@@ -1297,7 +1298,7 @@
     </div>
     <!-- ⚠ 2026-09-21（用户：「通用设置里第一块门店去掉」）—— 这块整块删了。
          它原来只显示"门店身份认出来没"+ 一个「重新登录 / 换账号」按钮，
-         而**登录/换账号的动作本来就在登录页**（`#btn-open-setup-ll`），
+         生活馆不再从玲珑页打开一张旧登录门；重新授权控件直接留在玲珑页。
          左边「账号设置」那一页也看得到身份 —— 三处说同一件事。
          ⚠ 删的时候把 JS 那两处（`renderProfile` 里的 `#store-summary`、
          `#btn-open-setup` 的接线）一起清了：只删 HTML 会变成静默空转。 -->
@@ -1311,6 +1312,7 @@
       <div class="card-head">
         <h2>数据强制刷新 <span class="hint" id="rewrite-status"></span></h2>
         <button class="btn ghost small" id="btn-sales-rewrite"
+                data-op="modify" data-op-page="sales-settings"
                 title="按当前口径重抓本年度全部销售明细并整表重写（要几分钟，日志在右下角抽屉）">强制刷新</button>
       </div>
       <div class="hint" style="margin:-4px 0 10px 0">
@@ -1729,7 +1731,7 @@
 
   <!-- ⭐ 2026-09-20（用户：「**定时器设置单独出来一页**」）——
        原来它是"通用"页里的一张卡，现在是一页（左下角菜单里自己一行）。 -->
-  <div class="subpanel" id="subpanel-timer">
+  <div class="subpanel" id="subpanel-timer" data-page-key="scheduler">
     <div class="card" id="card-scheduler">
       <div class="card-head">
         <!-- ⚠ `#timer-meta`（"下次 2026-09-20 21:00"）2026-09-20 **去掉了** ——
@@ -1804,9 +1806,8 @@
            放到玲珑授权里面吧」）：它管的是"认哪家店、抓会话怎么自检"，跟会话同去向。
            ⚠ 只在生活馆显示（`hidden` 由 `renderStoreCodeForms()` 按版开关，
              full 版的店码由云商登录匹配出来，手输会盖掉那个判据）。
-           ⚠ 放在 `#ll-home` **外面** —— 那块会被 `mountLinglong()` 整块搬去
-             登录页，卡跟着搬会把"设置页的入口"搬没（登录页另有自己的宿主
-             `#setup-store-code-host`）。 -->
+           ⚠ 放在 `#ll-home` **外面** —— `mountLinglong()` 只搬授权控件，编码设置
+             始终留在玲珑授权页，不再复制到旧登录门。 -->
       <div class="card" id="store-code-settings-card" hidden>
         <div class="card-head">
           <h2>门店编码</h2>
@@ -1880,10 +1881,6 @@
         </div>
       </div>
 
-      <!-- 门禁做完之后想重新抓一次 —— 这条路仍然留着（点了会打开登录页） -->
-      <div class="form-row">
-        <button class="btn ghost small" id="btn-open-setup-ll">重新登录 / 换账号</button>
-      </div>
     </div>
 
 </section>
@@ -1982,6 +1979,51 @@
 
      ⚠ 第 ② 步（玲珑）**只有要玲珑的店才出现** —— 合作店不显示它，
        不要求它，登录页上连提都不提。 -->
+<!-- ⭐ 独立选择页（2026-10-02 统一进入流程，开发目标 §4.5）——
+     新装机器的第一屏：授权店 / 平台岗 / 生活馆 三张卡。
+     ⚠ 只有「**没选过** 且 **这台机器还没就绪**」才露脸（后端 `/api/entry` 的
+       `needed`）—— 升级上来的老机器永远不会见到它；生活馆版（EDITION）也不露。 -->
+<div class="setup-mask" id="entry-mask" hidden>
+  <div class="setup-card">
+    <div class="setup-head">
+      <h2>选择进入方式</h2>
+      <span class="hint">这台电脑第一次使用</span>
+    </div>
+    <p class="hint" id="entry-lead">
+      选一个入口。<b>选错也没关系</b> —— 登录页底部有「换进入方式」。
+    </p>
+    <div class="entry-options" id="entry-options">
+      <button class="entry-opt" id="entry-erp" type="button">
+        <b>授权店</b><span class="hint">ERP 登录 —— 门店日常用这个</span>
+      </button>
+      <button class="entry-opt" id="entry-platform" type="button">
+        <b>平台岗</b><span class="hint">ERP 登录并确认平台权限</span>
+      </button>
+      <button class="entry-opt" id="entry-lifehall" type="button">
+        <b>生活馆</b><span class="hint">输入并保存门店编码，直接进入</span>
+      </button>
+    </div>
+    <div id="entry-code" hidden>
+      <div class="form-row">
+        <label>门店编码</label>
+        <input id="entry-store-code" placeholder="如 SCN328987" autocomplete="off">
+      </div>
+      <div class="form-row">
+        <button class="btn primary" id="btn-entry-code">保存并进入</button>
+        <button class="btn" id="btn-entry-code-back" type="button">返回</button>
+        <span class="hint" id="entry-code-msg"></span>
+      </div>
+      <p class="hint">
+        编码保存后这台机器就能进了；之后要抓玲珑数据，再走「玲珑授权」（编码会接着用）。
+        <b>这一步不要求 ERP 登录</b>。
+      </p>
+    </div>
+    <div class="setup-foot">
+      <span class="hint" id="entry-error"></span>
+    </div>
+  </div>
+</div>
+
 <div class="setup-mask" id="setup-mask" hidden>
   <div class="setup-card">
     <div class="setup-head">
@@ -1991,6 +2033,10 @@
     <p class="hint" id="setup-lead">
       这台电脑要先把<b>门店的云商账号</b>登录好，才能进主界面。
       <b>不登录、或者登录了但用不了，都不给用。</b>
+    </p>
+    <p class="hint" id="setup-entry-mismatch" hidden style="color:var(--bad)">
+      ⚠ 选的入口是<b>平台岗</b>，但当前账号不是平台岗 ——
+      换平台岗账号重新登录，或点底部「换进入方式」换个入口。
     </p>
 
     <section class="setup-step" id="setup-step-erp">
@@ -2011,7 +2057,6 @@
                  autocomplete="new-password"></div>
         <div class="form-row">
           <button class="btn primary" id="btn-sa-save">确认登录</button>
-          <button class="btn" id="btn-sa-quit">退出</button>
           <span class="hint" id="sa-msg"></span>
         </div>
         <div id="sa-captcha" hidden>
@@ -2041,10 +2086,6 @@
         所以要先登录一次。<br>
         ⚠ 会话过期了也会回到这一页：<b>那是故意的</b>，过期了后面全是错的数。
       </p>
-      <p class="hint" id="setup-linglong-lifehall-note" hidden>
-        先登录玲珑并抓到会话，就能进入生活馆版使用页面上的工具。
-      </p>
-      <div id="setup-store-code-host" hidden></div>
       <!-- ⚠ 这几件控件**平时住在「通用设置 › 玲珑授权」页**里，
            走到这一步时由 `mountLinglong()` 整块搬进来 ——
            这里只是它临时的住处，别在这儿再抄一份（id 会重复）。 -->
@@ -2057,6 +2098,24 @@
          ⚠ 它**只放行界面**：抓数/对比/POS 该失败还是失败（没有会话就是没有），
            而且进来之后**顶上一直挂着一条横幅**说清这是预览 ——
            绝不能让"预览"看起来像"能用"。 -->
+    <!-- ⭐ 平台岗的第二步（2026-10-02 统一进入流程）：ERP 登录成功后**显式确认**
+         「以平台岗进入」—— 用户草案：「平台岗 = ERP 登录并确认平台权限」。
+         ⚠ 确认**后端再验一次**账号（`POST /api/entry confirm`），前端按钮只是入口。 -->
+    <section class="setup-step" id="setup-step-confirm" hidden>
+      <div class="setup-step-head">
+        <span class="setup-num" id="setup-confirm-num">2</span>
+        <b>确认平台权限</b>
+        <span class="hint" id="setup-confirm-why">这个账号是平台岗 —— 确认后以平台岗身份进入</span>
+      </div>
+      <p class="hint">
+        平台岗看的是<b>全部门店</b>的数据。确认之前这台机器不会以平台岗身份进入。
+      </p>
+      <div class="form-row">
+        <button class="btn primary" id="btn-entry-confirm">确认以平台岗身份进入</button>
+        <span class="hint" id="setup-confirm-msg"></span>
+      </div>
+    </section>
+
     <section class="setup-step" id="setup-step-preview" hidden>
       <div class="setup-step-head">
         <span class="setup-num">·</span>
@@ -2078,10 +2137,9 @@
 
     <div class="setup-foot">
       <span class="hint" id="setup-msg"></span>
-      <!-- ⚠ 原来这里有「收起」和「我已登录完，重新检查」—— 用户 2026-09-19
-           说都不要：状态由「确认登录」成功后**自动往下走**，不用手动"重新检查"；
-           想走就点上面的「退出」。 -->
-      <span></span>
+      <!-- 登录卡片右下角提供入口切换；移除只能尝试关闭当前标签页的「退出」。 -->
+      <button class="btn ghost small" id="btn-entry-switch" type="button"
+              title="清掉这台机器选过的入口，回到三张卡">换进入方式</button>
     </div>
   </div>
 </div>
@@ -2233,6 +2291,19 @@
 <!-- ⚠ `?v=` 里那个数字不是装饰：前端**没有构建步骤**，浏览器对 .js/.css 会有内存缓存。
      每次改动前端资源就 +1。game.js 必须在 app.js **之前**（连点时要 mountGomoku）。 -->
 <script src="/gomoku/game.js?v=1"></script>
-<script src="/app.js?v=178"></script>
+<script src="/common/base.js?v=1"></script>
+<script src="/common/nav.js?v=7"></script>
+<script src="/features/inventory/page.js?v=1"></script>
+<script src="/features/valueadd/film/page.js?v=2"></script>
+<script src="/features/valueadd/benefit/page.js?v=2"></script>
+<script src="/features/sales/attain/page.js?v=1"></script>
+<script src="/features/compliance/pos/page.js?v=1"></script>
+<script src="/features/compliance/comparison/page.js?v=1"></script>
+<script src="/features/distribution/page.js?v=1"></script>
+<script src="/features/plan/monthly/page.js?v=1"></script>
+<script src="/features/cashier/page.js?v=1"></script>
+<script src="/features/tools/claim/page.js?v=1"></script>
+<script src="/features/store/page.js?v=1"></script>
+<script src="/app.js?v=193"></script>
 </body>
 </html>

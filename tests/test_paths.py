@@ -104,14 +104,22 @@ class Test只有一处知道深度(unittest.TestCase):
     def test_八个调用点都改成从_paths_取(self):
         """⚠ 这条是**反向**断言：光禁掉 `parent.parent` 还不够 ——
         有人可能改写成 `src` 之外的别的算法。八个模块必须都真的 import 了它。"""
-        want = ["cli.py", "dump.py", "elevate.py", "envfile.py",
-                "erp.py", "runtime.py", "version.py", "web.py"]
+        want = {
+            "cli.py": ("src/cli.py", "from .paths import"),
+            "dump.py": ("src/dump.py", "from .paths import"),
+            "elevate.py": ("src/desktop/elevate.py", "from ..paths import"),
+            "envfile.py": ("src/envfile.py", "from .paths import"),
+            "erp.py": ("src/integrations/erp.py", "from ..paths import"),
+            "runtime.py": ("src/desktop/runtime.py", "from ..paths import"),
+            "version.py": ("src/version.py", "from .paths import"),
+            "web.py": ("src/http/app.py", "from ..paths import"),
+        }
         missing = []
-        for name in want:
-            text = (SRC / name).read_text(encoding="utf-8")
-            if "from .paths import" not in text:
-                missing.append(f"src/{name}")
-        self.assertEqual(missing, [], "这些模块没有从 src/paths.py 取根：" + ", ".join(missing))
+        for name, (rel, needle) in want.items():
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            if needle not in text:
+                missing.append(rel)
+        self.assertEqual(missing, [], "这些实现没有从 src/paths.py 取根：" + ", ".join(missing))
 
 
 class Test根脚本不许挪(unittest.TestCase):

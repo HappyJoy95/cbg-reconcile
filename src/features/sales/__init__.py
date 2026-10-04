@@ -24,6 +24,7 @@ from ..registry import Feature, Sub
 #:   ⚠ **`key` 一动都不能动**：`sales` 是 `data-tab` / `GO_TARGETS` / `LEGACY_GO`
 #:     三处共用的 key（见 `tests/test_web_ia.py::test_界面上的名字`）。
 FEATURE = Feature(
+    audience=("erp", "platform"), data="authorized", ops={"view": ("store", "manager", "platform")},
     key="sales", label="周度重点产品", order=10, types="",
     children=[
         attain.SUB,                                  # 周度目标达成（带定时步骤）
@@ -33,6 +34,17 @@ FEATURE = Feature(
         # 「历史记录」**紧跟在它下面**（用户 2026-09-20：「在工作区的**周度目标达成
         #   情况下面**加个历史记录」）—— 过了这一周就自动锁住存档，这页只看不改。
         Sub(key="attain-history", label="历史记录", order=20),
-        Sub(key="sales-settings", label="设置", order=90),
+        Sub(ops={"view": ("store", "manager", "platform"), "modify": ("store", "manager", "platform")}, key="sales-settings", label="设置", order=90),
     ],
+)
+
+# 路由归属只在业务登记；新增接口未登记时公共门禁拒绝。
+FEATURE.routes = (
+    ('GET', '/api/attain', 'attain', 'view'),
+    ('POST', '/api/attain/export', 'attain', 'export'),
+    ('GET', '/api/attain/split', 'attain', 'view'),
+    ('PUT', '/api/attain/split', 'attain', 'modify'),
+    ('POST', '/api/attain/split/send', 'attain', 'modify'),
+    ('GET', '/api/attain/history', 'attain', 'view'),
+    ('POST', '/api/sales-rewrite', 'sales-settings', 'modify'),
 )
